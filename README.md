@@ -113,6 +113,17 @@ cd xezim
 cargo build --release          # or ./scripts/build-pgo.sh for a profile-guided build
 ```
 
+No Rust toolchain? Build with Docker instead (see the `Dockerfile`):
+
+```bash
+docker build -t xezim .                                       # image with xezim on PATH
+docker run --rm -v "$PWD:/work" xezim counter.sv
+docker build --target export --output type=local,dest=dist .  # just dist/xezim + dist/include
+```
+
+The exported binary needs glibc 2.36 or newer (Debian 12, Ubuntu 22.10, RHEL 10
+and later).
+
 ```systemverilog
 // counter.sv
 module counter_tb;

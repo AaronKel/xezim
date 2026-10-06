@@ -1,0 +1,12 @@
+target
+target-*
+dist
+pgo-target
+reports
+bench
+simtest
+*.log
+*.fst
+*.vcd
+xezim_cov.json
+.git
