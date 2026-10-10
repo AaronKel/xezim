@@ -63261,60 +63261,41 @@ impl Simulator {
     /// flat-name string path cannot see. The string-char block in
     /// `assign_value_index` keys on `string_signals` + a resolvable flat
     /// `name`, so it misses:
-    ///   - a CLASS-member string (`this.s[i]`, `c.s[i]`, `C::s[i]`), a
-    ///     `MemberAccess` base with no flat signal name, and
-    ///   - a string-array / string-queue ELEMENT (`sa[k][i]`, `q[k][i]`),
-    ///     which arrives here with `expr` = `sa[k]` (an `Index`), not the
-    ///     collection name.
+    ///   - a CLASS-member string (`this.s[i]`, `c.s[i]`, `C::s[i]`,
+    ///     `c.b.s[i]`), a `MemberAccess` or dotted base with no flat signal
+    ///     name, and
+    ///   - a string-array / string-queue ELEMENT (`sa[k][i]`, `q[k][i]`,
+    ///     `s2[a][b][i]`), which arrives here with `expr` = `sa[k]` (an
+    ///     `Index`), not the collection name.
     /// Both would otherwise byte-select into the packed container (bit-bash)
     /// or vanish. Reads the current string, replaces byte `i`, and stores the
     /// whole string back via `assign_value` — exactly what the flat-name block
-    /// does. Returns `None` when the base is not one of these shapes or is not
-    /// string-valued, so callers fall through to the existing arms unchanged.
+    /// does. Returns `None` unless `expr` is provably a SCALAR string (see
+    /// `string_char_receiver_is_scalar`), so callers fall through to the
+    /// existing arms unchanged.
     fn try_string_index_char_write(
         &mut self,
         expr: &Expression,
         index: &Expression,
         val: &Value,
     ) -> Option<bool> {
-        // Only the two basic shapes the flat-name block can't reach, plus the
-        // dotted-Ident form (`c.s` parses as a two-segment HierarchicalIdentifier
-        // when the receiver is a module-scope handle, vs. the MemberAccess shape
-        // `this.s` gets inside a method). A single-segment bare Ident in
-        // `string_signals` already lands in the flat-name block, and a whole
-        // collection-name write (`sa[1] = "..."`) must NOT be char-spliced.
+        // Only the shapes the flat-name block can't reach: a member, an
+        // element, or a dotted ident (`c.s` parses as a two-segment
+        // HierarchicalIdentifier when the receiver is a module-scope handle,
+        // vs. the MemberAccess shape `this.s` gets inside a method). A
+        // single-segment bare Ident in `string_signals` already lands in the
+        // flat-name block.
         let is_member = matches!(&expr.kind, ExprKind::MemberAccess { .. });
         let is_elem = matches!(&expr.kind, ExprKind::Index { .. });
         let is_dotted_ident = matches!(&expr.kind, ExprKind::Ident(h) if h.path.len() >= 2);
         if !is_member && !is_elem && !is_dotted_ident {
             return None;
         }
-        if !self.expr_is_string_valued(expr) {
+        // §7.4.4 / §7.8 / §7.10: a select on a string COLLECTION, or on a
+        // partial element of a multi-dimensional one, picks a whole element
+        // (`c.b.q[1] = "x"`, `s2[1][2] = "x"`), not a character.
+        if !self.string_char_receiver_is_scalar(expr) {
             return None;
-        }
-        // Defensive: a whole-COLLECTION write (`sa[1] = ...`, `c.sa[k] = ...`)
-        // is an element write, not a character write. A string ARRAY / QUEUE
-        // has string ELEMENTS, so reading the bare collection name is
-        // string-Valued and would otherwise be mistaken for a single string
-        // and char-spliced (this dropped string-keyed assoc element writes in
-        // a foreach). The index base `sa[k]` resolves to the ELEMENT's flat
-        // name (not in a collection set), so genuine `sa[k][i]` char writes
-        // still pass; only the dotted/member collection name is excluded.
-        // Module-scope collections live in `module.*`; class-member
-        // collections (`obj.sa`) are resolved by receiver-class ancestry.
-        if self.class_member_is_collection(expr) {
-            return None;
-        }
-        if let Some(fm) = self.flat_member_name(expr) {
-            let hits = |n: &str| {
-                self.module.arrays.contains_key(n)
-                    || self.module.queue_vars.contains(n)
-                    || self.module.dynamic_arrays.contains(n)
-                    || self.module.associative_arrays.contains_key(n)
-            };
-            if hits(&fm) || fm.rsplit(['.', '[', ']']).next().is_some_and(|l| hits(l)) {
-                return None;
-            }
         }
         let content = self.eval_expr(expr).to_sv_string();
         let i = self.eval_expr(index).to_u64().unwrap_or(0) as usize;
@@ -88212,38 +88193,291 @@ impl Simulator {
             .any(|p| *p == prop)
     }
 
-    /// Does `expr` resolve to a COLLECTION property (assoc / queue / dynamic-
-    /// array / fixed array) of its receiver's class? Complements
-    /// `class_member_is_string`: a `string[string]` / `string[$]` member is
-    /// STRING-VALUED when read as a bare collection name, but a write into it
-    /// (`c.sa[k] = ...`, a foreach assoc-element store) is an ELEMENT write,
-    /// NOT a character splice. Resolve the receiver handle exactly as
-    /// `class_member_is_string` does, then consult the class's collection
-    /// property sets.
-    fn class_member_is_collection(&self, expr: &Expression) -> bool {
-        let (handle_opt, prop): (Option<usize>, String) = match &expr.kind {
-            ExprKind::MemberAccess { expr: recv, member } => {
-                let h = match &recv.kind {
-                    ExprKind::This => self.this_stack.last().copied().flatten(),
-                    ExprKind::Ident(hier) if hier.path.len() == 1 => {
-                        self.peek_local_handle(&hier.path[0].name.name)
-                    }
-                    _ => None,
-                };
-                (h, member.name.clone())
-            }
-            // `obj.col` / `c.sa` (two-segment HierarchicalIdentifier): the
-            // receiver is the head handle.
-            ExprKind::Ident(hier) if hier.path.len() == 2 => {
-                (self.peek_local_handle(&hier.path[0].name.name), hier.path[1].name.name.clone())
-            }
-            _ => return false,
-        };
-        let Some(handle) = handle_opt else { return false };
-        let Some(inst) = self.heap.get(handle).and_then(|c| c.as_ref()) else {
+    /// §6.16 / §7.4: is `expr`, the receiver of a select `expr[i]`, a SCALAR
+    /// `string`, so that the select names one character? A positive check on
+    /// the declared shape: the variable or property at the root of `expr`
+    /// must hold `string` elements, and the element selects already applied
+    /// to it (`sa[k]`, `m2[a][b]`) must remove every unpacked dimension.
+    /// Anything else — a string collection (`c.b.q`, `this.b.aa`), a partial
+    /// element of a multi-dimensional one (`s2[1]`), a receiver whose shape
+    /// is unknown — is not: a select on it writes a whole element.
+    fn string_char_receiver_is_scalar(&mut self, expr: &Expression) -> bool {
+        let mut selects = 0usize;
+        let mut root = expr;
+        while let ExprKind::Index { expr: base, .. } = &root.kind {
+            selects += 1;
+            root = base;
+        }
+        let Some((is_string, dims, var_root)) = self.string_receiver_shape(root) else {
             return false;
         };
-        self.class_assoc_member(&inst.class_name, &prop)
+        if !is_string || selects != dims {
+            return false;
+        }
+        // §7.4.5: the element of a design array whose elements are themselves
+        // collections (`string sq[2][$]`) is registered under its flat name;
+        // selecting into it is still an element write.
+        if var_root && selects > 0 {
+            if let Some(fm) = self.flat_member_name(expr) {
+                if self.is_collection_store(&fm) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Is `name` the storage name of a collection (fixed, dynamic,
+    /// associative array or queue)?
+    fn is_collection_store(&self, name: &str) -> bool {
+        self.module.queue_vars.contains(name)
+            || self.module.dynamic_arrays.contains(name)
+            || self.module.associative_arrays.contains_key(name)
+            || self.module.arrays.contains_key(name)
+            || self.module.arrays_2d.contains_key(name)
+            || self.module.arrays_nd.contains_key(name)
+    }
+
+    /// The shape of the variable or property `root` (a select-free name) as
+    /// `(holds string elements, unpacked dimensions, is a design/local
+    /// variable rather than a class property)`, or `None` when unknown. See
+    /// `string_char_receiver_is_scalar`.
+    fn string_receiver_shape(&mut self, root: &Expression) -> Option<(bool, usize, bool)> {
+        match &root.kind {
+            // `this.s`, `c.b.s`, `h[0].s`, `C::s` reached as a member.
+            ExprKind::MemberAccess { expr: recv, member } => {
+                if let Some((s, d)) = self.member_string_shape(recv, &member.name) {
+                    return Some((s, d, false));
+                }
+                self.unresolved_string_shape(root)
+            }
+            ExprKind::Ident(h) if h.path.len() >= 2 => {
+                let n = h.path.len();
+                let leaf = &h.path[n - 1];
+                if !leaf.selects.is_empty() {
+                    return None;
+                }
+                // `obj.s` / `a.b.s` / `h[0].q` (receiver handle) or `C::s`
+                // (static property; the scope parses like a dotted path).
+                let recv = Self::hier_receiver_expr(h, root.span);
+                if let Some((s, d)) = self.member_string_shape(&recv, &leaf.name.name) {
+                    return Some((s, d, false));
+                }
+                // A hierarchical design variable (`top.s`).
+                let var = self.var_string_shape(h);
+                if let Some((true, d)) = var {
+                    return Some((true, d, true));
+                }
+                // A member of a struct variable (`st.s`, `st.sa`).
+                if h.path.iter().all(|seg| seg.selects.is_empty()) {
+                    if let Some((s, d)) = self.struct_member_string_shape(h) {
+                        return Some((s, d, true));
+                    }
+                }
+                if let Some((s, d)) = var {
+                    return Some((s, d, true));
+                }
+                self.unresolved_string_shape(root)
+            }
+            ExprKind::Ident(h) => {
+                let seg = h.path.first()?;
+                if !seg.selects.is_empty() {
+                    return None;
+                }
+                let name = seg.name.name.as_str();
+                // §8.7: a bare property name inside a method is `this.<name>`
+                // unless a local or formal shadows it (§6.21).
+                if !self.local_stack.iter().any(|m| m.contains_key(name)) {
+                    let cls: Option<String> = match self.this_stack.last().copied().flatten() {
+                        Some(hd) => self
+                            .heap
+                            .get(hd)
+                            .and_then(|c| c.as_ref())
+                            .map(|i| i.class_name.clone()),
+                        None => self.class_context_stack.last().cloned().flatten(),
+                    };
+                    if let Some(c) = cls {
+                        if let Some((s, d)) = self.class_prop_string_shape(&c, name) {
+                            return Some((s, d, false));
+                        }
+                    }
+                }
+                self.var_string_shape(h).map(|(s, d)| (s, d, true))
+            }
+            _ => None,
+        }
+    }
+
+    /// The receiver of the dotted path `h` (all but its last segment) as an
+    /// expression: a select on a segment (`h[0].q`) becomes an `Index`, each
+    /// further segment a `MemberAccess`.
+    fn hier_receiver_expr(
+        h: &crate::ast::expr::HierarchicalIdentifier,
+        span: crate::ast::Span,
+    ) -> Expression {
+        let n = h.path.len();
+        if h.path[..n - 1].iter().all(|seg| seg.selects.is_empty()) {
+            return Expression::new(ExprKind::Ident(hier_prefix(h)), span);
+        }
+        let mut head = hier_prefix(h);
+        head.path.truncate(1);
+        let selects = std::mem::take(&mut head.path[0].selects);
+        let mut e = Expression::new(ExprKind::Ident(head), span);
+        let wrap = |e: Expression, sel: &[Expression]| {
+            sel.iter().fold(e, |acc, ix| {
+                Expression::new(
+                    ExprKind::Index {
+                        expr: Box::new(acc),
+                        index: Box::new(ix.clone()),
+                    },
+                    span,
+                )
+            })
+        };
+        e = wrap(e, &selects);
+        for seg in &h.path[1..n - 1] {
+            e = Expression::new(
+                ExprKind::MemberAccess {
+                    expr: Box::new(e),
+                    member: seg.name.clone(),
+                },
+                span,
+            );
+            e = wrap(e, &seg.selects);
+        }
+        e
+    }
+
+    /// `(holds string elements, unpacked dimensions)` of property `prop` of
+    /// the object `recv` refers to, or of class `recv` (`C::prop`).
+    fn member_string_shape(&self, recv: &Expression, prop: &str) -> Option<(bool, usize)> {
+        if let Some(hd) = self.eval_handle_expr(recv).filter(|&hd| hd != 0) {
+            let cls = self.heap.get(hd)?.as_ref()?.class_name.as_str();
+            return self.class_prop_string_shape(cls, prop);
+        }
+        match &recv.kind {
+            ExprKind::Ident(rh)
+                if rh.path.len() == 1
+                    && rh.path[0].selects.is_empty()
+                    && self.module.classes.contains_key(&rh.path[0].name.name) =>
+            {
+                self.class_prop_string_shape(&rh.path[0].name.name, prop)
+            }
+            _ => None,
+        }
+    }
+
+    /// `(holds string elements, unpacked dimensions)` of property `prop`
+    /// declared by class `cn` or an ancestor (§8.13); `None` if none does.
+    fn class_prop_string_shape(&self, cn: &str, prop: &str) -> Option<(bool, usize)> {
+        let mut cur = Some(cn);
+        for _ in 0..64 {
+            let cd = self.module.classes.get(cur?)?;
+            let static_coll = cd.static_collections.iter().any(|(n, ..)| n == prop);
+            let static_fixed = cd.static_fixed_arrays.iter().any(|(n, ..)| n == prop);
+            if cd.properties.contains_key(prop)
+                || cd.static_properties.contains(prop)
+                || static_coll
+                || static_fixed
+            {
+                let dims = if let Some((d, _, _)) = cd.array_of_coll_properties.get(prop) {
+                    d.len() + 1
+                } else if let Some(d) = cd.param_sized_props.get(prop) {
+                    d.len()
+                } else if let Some((d, _)) = cd.array_nd_properties.get(prop) {
+                    d.len()
+                } else if cd.array_properties.contains_key(prop)
+                    || cd.queue_properties.contains_key(prop)
+                    || cd.assoc_properties.contains_key(prop)
+                    || static_coll
+                    || static_fixed
+                {
+                    1
+                } else {
+                    0
+                };
+                return Some((cd.string_properties.contains(prop), dims));
+            }
+            cur = cd.extends.as_deref();
+        }
+        None
+    }
+
+    /// `(holds string elements, unpacked dimensions)` of the design or
+    /// subroutine-local variable `h` names, from the collection registries;
+    /// `None` when it is neither a string nor a collection.
+    fn var_string_shape(
+        &self,
+        h: &crate::ast::expr::HierarchicalIdentifier,
+    ) -> Option<(bool, usize)> {
+        let name = self.resolve_hier_name(h);
+        let n: &str = &name;
+        let bare = (h.path.len() == 1).then(|| h.path[0].name.name.as_str());
+        // A typedef'd string array (`str3_t ts;`) is not registered as a
+        // string by name; its declared type is.
+        let decl_is_string = |nm: &str| {
+            self.module
+                .var_decl_types
+                .get(nm)
+                .is_some_and(|dt| match dt {
+                    DataType::TypeReference { .. } => {
+                        Self::is_string_data_type(&self.resolve_dt(dt))
+                    }
+                    _ => Self::is_string_data_type(dt),
+                })
+        };
+        let is_string = self.string_signals.contains(n)
+            || bare.is_some_and(|b| self.string_signals.contains(b))
+            || decl_is_string(n)
+            || bare.is_some_and(|b| b != n && decl_is_string(b));
+        let dims = if self.module.queue_vars.contains(n)
+            || self.module.dynamic_arrays.contains(n)
+            || self.module.associative_arrays.contains_key(n)
+        {
+            1
+        } else {
+            self.unpacked_dims_of(n)
+        };
+        (is_string || dims > 0).then_some((is_string, dims))
+    }
+
+    /// `(holds string elements, unpacked dimensions)` of the struct member
+    /// path `h` (`st.s`, `st.in.sa`), walked through the declared types.
+    fn struct_member_string_shape(
+        &self,
+        h: &crate::ast::expr::HierarchicalIdentifier,
+    ) -> Option<(bool, usize)> {
+        let mut dt = self
+            .module
+            .var_decl_types
+            .get(&h.path[0].name.name)?
+            .clone();
+        let mut udims = Vec::new();
+        for seg in &h.path[1..] {
+            if !udims.is_empty() {
+                return None;
+            }
+            (dt, udims) = self.member_decl_type(&dt, &seg.name.name)?;
+        }
+        Some((
+            Self::is_string_data_type(&self.resolve_dt(&dt)),
+            udims.len(),
+        ))
+    }
+
+    /// Last resort for a receiver whose declaration could not be found (a
+    /// member of a struct array element, a frame-local struct): a
+    /// string-valued name that is not itself a collection is a scalar.
+    fn unresolved_string_shape(&mut self, root: &Expression) -> Option<(bool, usize, bool)> {
+        if !self.expr_is_string_valued(root) {
+            return None;
+        }
+        if let Some(fm) = self.flat_member_name(root) {
+            if self.is_collection_store(&fm) {
+                return None;
+            }
+        }
+        Some((true, 0, true))
     }
 
     /// Peek a class-typed procedural local's heap handle WITHOUT mutating
