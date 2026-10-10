@@ -1001,9 +1001,6 @@ impl Simulator {
             ret_val = Some(r);
         } else if let Some(td) = self.task_decl_rc(&name) {
             self.dpi_export_depth += 1;
-            if inst.is_some() {
-                self.task_clears_this = true;
-            }
             self.exec_task_call(&td, &arg_exprs);
             self.dpi_export_depth -= 1;
             is_task = true;

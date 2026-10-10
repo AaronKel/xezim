@@ -67,7 +67,6 @@ struct DpiAmbient {
     activation: Option<String>,
     ts_override: Option<String>,
     export_depth: u32,
-    task_clears_this: bool,
     in_edge_block: bool,
     break_flag: bool,
     continue_flag: bool,
@@ -558,7 +557,6 @@ impl Simulator {
             activation: self.activation_scope.borrow().clone(),
             ts_override: self.timescale_scope_override.clone(),
             export_depth: self.dpi_export_depth,
-            task_clears_this: self.task_clears_this,
             in_edge_block: self.in_edge_block,
             break_flag: self.break_flag,
             continue_flag: self.continue_flag,
@@ -586,7 +584,6 @@ impl Simulator {
         *self.activation_scope.borrow_mut() = a.activation;
         self.timescale_scope_override = a.ts_override;
         self.dpi_export_depth = a.export_depth;
-        self.task_clears_this = a.task_clears_this;
         self.in_edge_block = a.in_edge_block;
         self.break_flag = a.break_flag;
         self.continue_flag = a.continue_flag;
