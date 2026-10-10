@@ -16078,9 +16078,6 @@ impl<'a> BytecodeCompiler<'a> {
                         // target to the AST interpreter, which routes it
                         // through the string-char arm of `assign_value_index`.
                         if self.signal_is_string_name(hier) {
-                            // Defer to the AST interpreter, whose
-                            // `assign_value_index` string-char arm splices a
-                            // byte rather than bit-bashing the container.
                             self.bail("blocking_target_string_char");
                             return false;
                         }
