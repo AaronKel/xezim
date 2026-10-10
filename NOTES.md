@@ -10,6 +10,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A character write `s[i] = c` changes one character of a string reached
+  as a task formal (`ref`, `inout`, `input`, `output`), a class property
+  (`this.s[i]`, `c.s[i]`, `c.b.s[i]`, `C::s[i]`), a struct member, an element
+  of a string array, queue or associative array (`sa[k][i]`, `s2[a][b][i]`),
+  or a module string written from an `always` block. A write to a whole
+  element of a string collection (`c.b.q[1] = "x"`, `s2[1][2] = "x"`) still
+  replaces that element, and a task's string formal no longer makes a
+  same-named packed variable elsewhere read as a string. (from PR #292 by
+  Thomas Burg)
 * A variable declared in a `begin…end` block of a task, function or method
   goes out of scope when the block ends: an enclosing variable, class
   property or module variable of the same name is visible again with its own
