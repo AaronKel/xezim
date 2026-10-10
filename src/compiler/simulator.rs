@@ -76356,8 +76356,9 @@ impl Simulator {
         // field-automation macros assign `s = __rdone__` for an `int s` while
         // some unrelated global `s` is a struct: without this, the whole-struct
         // copy path diverts the write and `s` silently stays 0.
-        let this_scalar = self.this_integral_prop(n);
-        (!struct_decl || this_scalar) && (self.struct_copy_target(dst).1.is_none() || this_scalar)
+        // Checked only once a struct target was found, the one answer it
+        // can change.
+        (!struct_decl && self.struct_copy_target(dst).1.is_none()) || self.this_integral_prop(n)
     }
 
     /// Does `flat_member_name(e)` evaluate nothing but plain reads? Its only
@@ -76404,6 +76405,9 @@ impl Simulator {
     /// `this` is bound. Used to keep the whole-struct copy branch from
     /// diverting `s = v` when a global `s` is an unrelated struct.
     fn this_integral_prop(&self, name: &str) -> bool {
+        // A frame local shadows the property (§13.3): a scalar local under its
+        // name, an unpacked-struct local under its `<name>.` marker (its
+        // leaves live under `<name>.<member>`; the bare name is never a key).
         if self
             .local_stack
             .last()
@@ -76460,7 +76464,7 @@ impl Simulator {
         if self
             .local_stack
             .last()
-            .is_some_and(|f| f.contains_key(name))
+            .is_some_and(|f| f.contains_key(name) || f.contains_key(&format!("{}.", name)))
         {
             return false;
         }
@@ -76686,7 +76690,10 @@ impl Simulator {
                 Some(uq) => uq.to_string(),
                 None => n.to_string(),
             };
-            if self.struct_copy_target(dst).1.is_some() {
+            // §8.10: an integral property of `this` is a scalar target even
+            // when a same-named struct exists elsewhere (see
+            // `simple_ident_copy_ok`).
+            if self.struct_copy_target(dst).1.is_some() && !self.this_integral_prop(n) {
                 return false;
             }
         }
