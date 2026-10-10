@@ -17,16 +17,14 @@ mod array_equality_class;
 mod assoc_typedef_element_class;
 #[path = "classes/bit_class_property_signedness.rs"]
 mod bit_class_property_signedness;
+#[path = "classes/block_local_shadows_enclosing.rs"]
+mod block_local_shadows_enclosing;
 #[path = "classes/blocking_task_super_dispatch.rs"]
 mod blocking_task_super_dispatch;
 #[path = "classes/class_assoc_struct_string_keys.rs"]
 mod class_assoc_struct_string_keys;
 #[path = "classes/class_formal_named_like_struct.rs"]
 mod class_formal_named_like_struct;
-#[path = "classes/block_local_shadows_enclosing.rs"]
-mod block_local_shadows_enclosing;
-#[path = "classes/integral_prop_named_like_struct.rs"]
-mod integral_prop_named_like_struct;
 #[path = "classes/class_formal_typedef_widen.rs"]
 mod class_formal_typedef_widen;
 #[path = "classes/class_interface_same_name.rs"]
@@ -71,6 +69,8 @@ mod function_local_struct_return_shadow;
 mod implements_typedef_scope;
 #[path = "classes/inherited_local_member.rs"]
 mod inherited_local_member;
+#[path = "classes/integral_prop_named_like_struct.rs"]
+mod integral_prop_named_like_struct;
 #[path = "classes/interface_class_inherited_names.rs"]
 mod interface_class_inherited_names;
 #[path = "classes/memory_tasks_fixed_property.rs"]
@@ -105,6 +105,8 @@ mod struct_member_bitselect_frame_local;
 mod struct_member_class_handle_new;
 #[path = "classes/subroutine_formal_frame_type.rs"]
 mod subroutine_formal_frame_type;
+#[path = "classes/task_static_one_cell_per_declaration.rs"]
+mod task_static_one_cell_per_declaration;
 #[path = "classes/this_collection_struct_members.rs"]
 mod this_collection_struct_members;
 #[path = "classes/this_path_state_soft_randomize.rs"]
