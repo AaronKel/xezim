@@ -85,6 +85,8 @@ mod string_index_write_frame_local;
 mod string_char_index_write_followups;
 #[path = "strings/string_char_receiver_shapes.rs"]
 mod string_char_receiver_shapes;
+#[path = "strings/task_string_formal_scope.rs"]
+mod task_string_formal_scope;
 #[path = "strings/string_flag_not_clobbered_by_samed_name_local.rs"]
 mod string_flag_not_clobbered_by_samed_name_local;
 #[path = "strings/string_index_ref_queue.rs"]

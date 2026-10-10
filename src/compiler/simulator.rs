@@ -3932,6 +3932,21 @@ struct ProcessContext {
     /// next, nor lose it when it resumes.
     current_static_task: Option<String>,
     current_auto_task: Option<String>,
+    /// See `Simulator::task_string_formals`.
+    task_string_formals: Vec<TaskFrameStrings>,
+}
+
+/// The formals of one task frame whose string-ness differs from the global
+/// `string_signals` set (see `Simulator::task_string_formals`).
+#[derive(Debug, Clone)]
+struct TaskFrameStrings {
+    /// `local_gen_stack` generation of the task's frame.
+    fgen: u64,
+    /// Its `string` formals.
+    strings: Vec<String>,
+    /// Its non-string formals whose name `string_signals` holds for another
+    /// scope.
+    others: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -4163,11 +4178,8 @@ struct TaskCleanup {
     /// all, so a `task push(ref int q[$])` pushed into storage named after the
     /// FORMAL and the caller's queue never changed.
     queue_writebacks: Vec<(String, String)>,
-    /// String-typed formals registered in `string_signals` for the duration of
-    /// this frame so `s[i]` byte-selects (a character write) instead of the
-    /// frame-local unpacked-struct bit-slice arm. Removed on unwind (mirrors
-    /// the free-function and class-method frame paths).
-    frame_string_signals: Vec<String>,
+    /// This frame pushed an entry on `task_string_formals` (popped on unwind).
+    pushed_string_formals: bool,
     saved_break: bool,
     saved_continue: bool,
     saved_return: bool,
@@ -6773,6 +6785,15 @@ pub struct Simulator {
     /// Snapshot at frame entry, restore at frame exit, so a
     /// frame can never leak an add OR a remove to its caller.
     string_signals_removed: Vec<Vec<String>>,
+    /// §13.5 / §6.16: the `string` formals of each active TASK frame of the
+    /// running process, keyed by the frame's generation (`local_gen_stack`).
+    /// A task can suspend, so its formals must not enter the global
+    /// `string_signals` set: while it waits, or after `disable fork` kills
+    /// it, another subroutine's same-named packed formal would read as a
+    /// string and lose its bit writes. Per-process (moved with
+    /// `ProcessContext`), and the frame's non-string formals override a
+    /// global string flag of the same name; see `frame_name_is_string`.
+    task_string_formals: Vec<TaskFrameStrings>,
     /// §13.4/§6.21: width, signedness and declared-type tables are keyed by
     /// bare name, so a callee's local (`logic [7:0] r;`) overwrote the
     /// entries of a caller's same-named variable, which then kept the
@@ -12045,6 +12066,7 @@ impl Simulator {
             in_const_param_eval: false,
             return_value: None,
             string_signals_removed: Vec::new(),
+            task_string_formals: Vec::new(),
             decl_shadow_log: Vec::new(),
             nested_run_epoch: 0,
             cond_read_union: HashSet::default(),
@@ -48240,6 +48262,7 @@ impl Simulator {
             method_local_base: self.method_local_base.clone(),
             current_static_task: self.current_static_task.clone(),
             current_auto_task: self.current_auto_task.clone(),
+            task_string_formals: self.task_string_formals.clone(),
         }
     }
 
@@ -48298,6 +48321,7 @@ impl Simulator {
             && self.method_local_base.is_empty()
             && self.current_static_task.is_none()
             && self.current_auto_task.is_none()
+            && self.task_string_formals.is_empty()
             && !self.ref_redirect_hot
     }
 
@@ -48329,6 +48353,7 @@ impl Simulator {
             method_local_base: std::mem::take(&mut self.method_local_base),
             current_static_task: self.current_static_task.take(),
             current_auto_task: self.current_auto_task.take(),
+            task_string_formals: std::mem::take(&mut self.task_string_formals),
         }
     }
 
@@ -48357,6 +48382,7 @@ impl Simulator {
         self.method_local_base = ctx.method_local_base;
         self.current_static_task = ctx.current_static_task;
         self.current_auto_task = ctx.current_auto_task;
+        self.task_string_formals = ctx.task_string_formals;
     }
 
     fn inherit_current_process_context(&mut self, pid: usize) {
@@ -63650,7 +63676,7 @@ impl Simulator {
                             .last()
                             .and_then(|f| f.get(base.as_ref()))
                             .cloned()
-                        && !self.string_signals.contains(&*base)
+                        && !self.frame_name_is_string(&base)
                     {
                         let bit = i as usize;
                         if bit < cur.width as usize {
@@ -64460,7 +64486,7 @@ impl Simulator {
             // String character assignment: `s[i] = "."` replaces the
             // i-th character (byte). `s[0]` is the leftmost char, which
             // sits in the most-significant byte of the packed value.
-            if self.string_signals.contains(&*name) {
+            if self.frame_name_is_string(&name) {
                 // Replace the i-th character of the string CONTENT (not
                 // a byte of the fixed-width container, which would write
                 // the wrong position and grow the string). Mirrors putc.
@@ -124906,6 +124932,81 @@ impl Simulator {
                 log.push(name.to_string());
             }
         }
+        // A non-string local declared in a task's own frame shadows a
+        // same-named string formal for the rest of that frame.
+        if let (Some(entry), Some(top)) = (
+            self.task_string_formals.last_mut(),
+            self.local_gen_stack.last(),
+        ) {
+            if entry.fgen == *top {
+                entry.strings.retain(|n| n != name);
+            }
+        }
+    }
+
+    /// The `task_string_formals` entry for a task frame of generation `fgen`
+    /// with formals `ports`, or `None` when no formal needs one.
+    fn task_frame_strings(
+        &self,
+        fgen: u64,
+        ports: &[crate::ast::decl::FunctionPort],
+    ) -> Option<TaskFrameStrings> {
+        let mut strings = Vec::new();
+        let mut others = Vec::new();
+        for port in ports {
+            let n = &port.name.name;
+            if Self::is_string_data_type(&port.data_type) {
+                strings.push(n.clone());
+            } else if self.string_signals.contains(n.as_str()) {
+                others.push(n.clone());
+            }
+        }
+        (!strings.is_empty() || !others.is_empty()).then_some(TaskFrameStrings {
+            fgen,
+            strings,
+            others,
+        })
+    }
+
+    /// Does the frame-local or design name `name` hold a `string`? A task
+    /// frame's own formals decide for the names they declare (see
+    /// `task_string_formals`); otherwise the global `string_signals` set.
+    #[inline]
+    fn frame_name_is_string(&self, name: &str) -> bool {
+        match self.task_frame_string_flag(name) {
+            Some(is_string) => is_string,
+            None => self.string_signals.contains(name),
+        }
+    }
+
+    /// §13.5 / §6.16: whether `name` is a `string` formal (`Some(true)`) or
+    /// a non-string formal (`Some(false)`) of the task frame that holds it in
+    /// the running process; `None` when that frame is not a task frame with a
+    /// `task_string_formals` entry for it. The innermost frame declaring
+    /// `name` decides, so a nested subroutine's same-named formal or local
+    /// is not affected.
+    #[inline]
+    fn task_frame_string_flag(&self, name: &str) -> Option<bool> {
+        if self.task_string_formals.is_empty() {
+            return None;
+        }
+        let i = self
+            .local_stack
+            .iter()
+            .rposition(|f| f.contains_key(name))?;
+        let fgen = *self.local_gen_stack.get(i)?;
+        let entry = self
+            .task_string_formals
+            .iter()
+            .rev()
+            .find(|e| e.fgen == fgen)?;
+        if entry.strings.iter().any(|n| n == name) {
+            Some(true)
+        } else if entry.others.iter().any(|n| n == name) {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     /// Does the lvalue mention any of `names` — root identifier segments or
@@ -134677,6 +134778,14 @@ impl Simulator {
         // permanently clobber an enclosing scope's `string m`; snapshot here
         // and restore below so a frame leaks neither an add nor a remove.
         self.string_signals_removed.push(Vec::new());
+        // §13.4 / §6.21: a non-string formal shadows any string flag its name
+        // carries from another scope for the duration of this frame, the way
+        // a non-string local declaration does.
+        for port in fd.ports.iter() {
+            if !Self::is_string_data_type(&port.data_type) {
+                self.forget_string_flag(&port.name.name);
+            }
+        }
         if Self::is_string_data_type(&fd.return_type) {
             if self.string_signals.insert(ret_name.clone()) {
                 frame_string_signals.push(ret_name.clone());
@@ -135039,17 +135148,8 @@ impl Simulator {
         self.ref_identity_stack.pop();
         self.refresh_ref_redirect_hot();
         self.local_iface_aliases.pop();
-        // §23.8: stop leaking this frame's string-typed formal names into the
-        // global `string_signals` set now that the body is done; restore the
-        // frame-scoped snapshot (mirrors the free-function and class-method
-        // frame paths).
-        for n in &c.frame_string_signals {
-            self.string_signals.remove(n);
-        }
-        if let Some(removed) = self.string_signals_removed.pop() {
-            for n in removed {
-                self.string_signals.insert(n);
-            }
+        if c.pushed_string_formals {
+            self.task_string_formals.pop();
         }
         self.continue_flag = c.saved_continue;
         self.sync_static_locals();
@@ -136136,23 +136236,21 @@ impl Simulator {
         self.ref_alias_stack.push(alias_map);
         self.ref_identity_stack.push(identity_formals);
         self.refresh_ref_redirect_hot();
-        // §23.8: register string-typed FORMALS in `string_signals` for the
-        // duration of this frame so `s[i]` byte-selects (a character write)
-        // instead of hitting the frame-local unpacked-struct bit-slice arm
-        // (a task `ref string s` formal is a frame local, not a registered
-        // signal, so the free-function/class-method registration was the
-        // only thing absent here). Frame-scoped: remember each newly-added
-        // name and the snapshot so the unwind can restore exactly those,
-        // exactly as the function and class-method frame paths do.
-        self.string_signals_removed.push(Vec::new());
-        let mut frame_string_signals: Vec<String> = Vec::new();
-        for port in &td.ports {
-            if Self::is_string_data_type(&port.data_type) {
-                if self.string_signals.insert(port.name.name.clone()) {
-                    frame_string_signals.push(port.name.name.clone());
+        // §13.5 / §6.16: record the `string` FORMALS of this frame so `s[i]`
+        // writes a character instead of hitting the frame-local bit-slice
+        // arm. Kept per process, keyed by this frame's generation, rather
+        // than in the global `string_signals` set (see
+        // `task_string_formals`).
+        let pushed_string_formals = match self.local_gen_stack.last() {
+            Some(&fgen) => match self.task_frame_strings(fgen, &td.ports) {
+                Some(entry) => {
+                    self.task_string_formals.push(entry);
+                    true
                 }
-            }
-        }
+                None => false,
+            },
+            None => false,
+        };
         self.return_value = None;
         let saved_break = self.break_flag;
         let saved_continue = self.continue_flag;
@@ -136195,7 +136293,7 @@ impl Simulator {
             output_bindings,
             assoc_params,
             array_params,
-            frame_string_signals,
+            pushed_string_formals,
             saved_break,
             saved_continue,
             saved_return,
@@ -141127,6 +141225,7 @@ impl Simulator {
                         if let Some(first) = t.items.first() {
                             self.process_origin.insert(pid, (first.span, "class task"));
                         }
+                        let string_formals = self.task_frame_strings(fgen, &t.ports);
                         self.process_contexts.insert(
                             pid,
                             ProcessContext {
@@ -141153,6 +141252,7 @@ impl Simulator {
                                 method_local_base: Vec::new(),
                                 current_static_task: None,
                                 current_auto_task: None,
+                                task_string_formals: string_formals.into_iter().collect(),
                             },
                         );
                         self.event_queue
@@ -152886,6 +152986,12 @@ impl Simulator {
                 // scope's `string <name>`.
                 self.string_signals_removed.push(Vec::new());
                 if let ClassMethodKind::Function(f) = &method.kind {
+                    // §13.4 / §6.21: see the free-function path.
+                    for port in ports.iter() {
+                        if !Self::is_string_data_type(&port.data_type) {
+                            self.forget_string_flag(&port.name.name);
+                        }
+                    }
                     if plan.ret.as_ref().is_some_and(|r| r.decl_string) {
                         if self.string_signals.insert(f.name.name.name.clone()) {
                             frame_string_signals.push(f.name.name.name.clone());
