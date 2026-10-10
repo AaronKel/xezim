@@ -10,6 +10,18 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A variable declared in a `begin…end` block of a task, function or method
+  goes out of scope when the block ends: an enclosing variable, class
+  property or module variable of the same name is visible again with its own
+  value. This holds for blocks that wait (`#1`, `fork…join`), for blocking
+  `repeat`/`for`/`while`/`foreach` bodies, for `static` block variables, and
+  for array and queue block variables. A method- or block-local unpacked
+  struct named like an `int` property is the local, and `s = f()` writes an
+  `int` property named like a module struct. A `static` variable of a package
+  or module task is one variable for every calling class. A fork child's
+  write to its parent's automatic wakes the parent's `wait` before the
+  time step's nonblocking assignments update, and a UVM register's second backdoor `write` no longer
+  dereferences a null `map_info`. (from PR #293 by Thomas Burg)
 * Unpacked-array locals of an automatic task, including multi-dimensional
   ones, are per invocation, so concurrent calls no longer share them. Tasks
   and functions in a `module automatic`, `interface automatic`, `program
