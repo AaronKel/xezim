@@ -10,6 +10,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* In a method of a class with an `int s` property, `s = v` writes the
+  property even when another class has a struct property `s` and the module
+  has a struct variable `s`; the write used to land in the module struct.
+* A method called more than 1000 times reads `h.val` through a handle of
+  class `node` from `node`'s `val` when the object is a subclass that
+  redeclares `val`; it used to read the subclass's copy once compiled.
 * A character write `s[i] = c` changes one character of a string reached
   as a task formal (`ref`, `inout`, `input`, `output`), a class property
   (`this.s[i]`, `c.s[i]`, `c.b.s[i]`, `C::s[i]`), a struct member, an element
@@ -229,6 +235,13 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Performance**
 
+* More class methods and package functions run as bytecode: those that read
+  a member off an element of a class-handle collection (`m[k].val`,
+  `q[i].name`), package functions that call a static method of a class
+  (`Srv::get()`), and bodies that store a returned queue or dynamic array in
+  a local (`q = f(..)`). Element member reads run 62% fewer instructions
+  and a package function calling a singleton getter 15% fewer. (from PR
+  #294 by Thomas Burg, with follow-ups)
 * Wait-free class tasks and package and module functions run as bytecode once
   they cross the same call threshold as class functions (`XEZIM_METHOD_TIER`,
   default 1000 calls), and compiled code calls compiled package functions
