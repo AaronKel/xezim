@@ -66986,6 +66986,29 @@ impl Simulator {
                 changed
             }
             ExprKind::MemberAccess { expr, member } => {
+                // §7.2.1/§7.4: a field of an element of a class array of
+                // packed structs (`beats[i].last = 1`, `o.beats[i].mask =
+                // m`) is a slice of the element: write the element with
+                // the field's bits replaced. The read side
+                // (`packed_struct_elem_type`) already slices it.
+                if let ExprKind::Index { .. } = &expr.kind
+                    && let Some(su) = self.packed_struct_elem_type(expr)
+                {
+                    let (fields, total) = self.packed_agg_layout(&su);
+                    if let Some(&(_, off, w)) = fields.iter().find(|f| f.0 == member.name)
+                        && total > 0
+                    {
+                        let mut elem = self.eval_expr(expr);
+                        if elem.width != total {
+                            elem = elem.resize(total);
+                        }
+                        let fv = val.resize(w);
+                        for i in 0..w {
+                            elem.set_bit((off + i) as usize, fv.get_bit(i as usize));
+                        }
+                        return self.assign_value(expr, &elem);
+                    }
+                }
                 // §13.4.2: a member of a subroutine-local / formal unpacked
                 // struct is owned by the call frame. Inside a subroutine body
                 // `s.a = v` parses as MemberAccess (at module level the same
@@ -68050,6 +68073,110 @@ impl Simulator {
         items: &[crate::ast::decl::ConstraintItem],
         targets: &[(String, Expression)],
     ) -> rand_csp::CspOutcome {
+        let (scalars, arrays) = match self.std_randomize_vars(targets, false) {
+            Ok(v) => v,
+            Err(o) => return o,
+        };
+        let out = self.rand_csp_solve_scope(items, &scalars, &arrays);
+        if std::env::var_os("XEZIM_RAND_DBG").is_some() {
+            eprintln!(
+                "[rand-dbg] std::randomize joint: targets {:?} -> {:?}",
+                targets.iter().map(|t| &t.0).collect::<Vec<_>>(),
+                out
+            );
+        }
+        out
+    }
+
+    /// §18.5.8.1: `std::randomize(n, a) with {a.size() == n + 1; …}` solves
+    /// the sizes of the dynamic-array targets whose `size()` a constraint
+    /// reads first, jointly with the other targets, then the elements with
+    /// the arrays at those sizes. None when no size is read or the joint
+    /// solver does not model the call; otherwise whether it succeeded.
+    fn std_randomize_sized(
+        &mut self,
+        items: &[crate::ast::decl::ConstraintItem],
+        targets: &[(String, Expression)],
+    ) -> Option<bool> {
+        let (scalars, arrays) = self.std_randomize_vars(targets, true).ok()?;
+        let sized: HashSet<String> = arrays
+            .iter()
+            .filter(|a| {
+                (self.module.dynamic_arrays.contains(&a.1)
+                    || self
+                        .signals
+                        .contains_key(&Self::name_with_suffix(&a.1, ".size")))
+                    && Self::items_read_size(items, &a.0)
+            })
+            .map(|a| a.0.clone())
+            .collect();
+        if sized.is_empty() {
+            return None;
+        }
+        for _ in 0..4 {
+            let sizes = match self.csp_scope_sizes(items, &scalars, &arrays, &sized) {
+                Ok(s) => s,
+                // A relaxation of the problem has no solution.
+                Err(rand_csp::CspOutcome::Unsat) => return Some(false),
+                Err(_) => return None,
+            };
+            for (name, n) in sizes {
+                if let Some(a) = arrays.iter().find(|a| a.0 == name) {
+                    let key = a.1.clone();
+                    self.resize_random_dyn_target(&key, n);
+                }
+            }
+            if matches!(
+                self.std_randomize_joint(items, targets),
+                rand_csp::CspOutcome::Sat
+            ) {
+                return Some(true);
+            }
+        }
+        None
+    }
+
+    /// Whether some item reads `name.size()`.
+    fn items_read_size(items: &[crate::ast::decl::ConstraintItem], name: &str) -> bool {
+        let wrapper = [crate::ast::decl::ClassConstraint {
+            is_static: false,
+            is_extern: false,
+            has_body: true,
+            name: crate::ast::Identifier {
+                name: "__inline__".to_string(),
+                span: crate::ast::Span::dummy(),
+            },
+            items: items.to_vec(),
+            span: crate::ast::Span::dummy(),
+        }];
+        let c = RandColl {
+            prop: name.to_string(),
+            scoped: name.to_string(),
+            kind: CollKind::Dyn,
+            width: 1,
+            lo: 0,
+            hi: 0,
+            nested: false,
+            is_object_elem: false,
+        };
+        Self::csp_size_solved(&c, &wrapper)
+    }
+
+    /// The joint solver's variables for `std::randomize(targets)`: plain
+    /// integral scalars and 1-D arrays at their current size. An empty
+    /// array is listed only with `empty` (the size phase sizes it).
+    #[allow(clippy::type_complexity)]
+    fn std_randomize_vars(
+        &mut self,
+        targets: &[(String, Expression)],
+        empty: bool,
+    ) -> Result<
+        (
+            Vec<(String, Expression, u32, bool, Option<Vec<u64>>)>,
+            Vec<(String, String, Vec<i64>, u32, bool, Option<Vec<u64>>)>,
+        ),
+        rand_csp::CspOutcome,
+    > {
         let mut scalars = Vec::new();
         let mut arrays = Vec::new();
         for (name, lv) in targets {
@@ -68062,7 +68189,7 @@ impl Simulator {
                 if self.module.arrays_nd.contains_key(&nm)
                     || self.module.arrays_2d.contains_key(&nm)
                 {
-                    return rand_csp::CspOutcome::NotApplicable;
+                    return Err(rand_csp::CspOutcome::NotApplicable);
                 }
                 let dynamic = self.module.dynamic_arrays.contains(&nm)
                     || self
@@ -68073,40 +68200,8 @@ impl Simulator {
                 } else if let Some(&(lo, hi, _)) = self.module.arrays.get(&nm) {
                     (lo.min(hi)..=lo.max(hi)).collect()
                 } else {
-                    return rand_csp::CspOutcome::NotApplicable;
+                    return Err(rand_csp::CspOutcome::NotApplicable);
                 };
-                let Some(first) = idx.first() else {
-                    // An empty array has no element variables.
-                    continue;
-                };
-                let Some(v0) = self.get_signal_value_by_name(&format!("{}[{}]", nm, first)) else {
-                    return rand_csp::CspOutcome::NotApplicable;
-                };
-                if v0.is_real {
-                    return rand_csp::CspOutcome::NotApplicable;
-                }
-                let w = self
-                    .module
-                    .arrays
-                    .get(&nm)
-                    .map(|t| t.2 as u32)
-                    .unwrap_or(v0.width);
-                if w > 64 {
-                    // Left as drawn: a constraint reading it is judged by the
-                    // final check.
-                    continue;
-                }
-                // The declared element type decides the signedness: an
-                // element value written by the per-item repair above may
-                // carry a literal's (`bc[i] == 1` left a `bit` element
-                // signed, and the solve then had no value 1 for it).
-                let signed = match self.module.var_decl_types.get(&nm) {
-                    Some(dt) => {
-                        super::elaborate::is_type_signed_resolved(dt, &self.module.typedef_types)
-                    }
-                    None => v0.is_signed || self.signed_signals.contains(&nm),
-                };
-                let ev = enum_vals(self, &nm);
                 // §18.12: a dynamic array or queue local to an automatic
                 // task is stored under a per-call key (`declare_local_dyn`);
                 // the constraints name it as written, so the solver knows it
@@ -68122,6 +68217,48 @@ impl Simulator {
                     }
                     _ => nm.clone(),
                 };
+                let Some(first) = idx.first() else {
+                    // An empty array has no element variables.
+                    if empty && dynamic {
+                        let w = self
+                            .module
+                            .arrays
+                            .get(&nm)
+                            .map(|t| t.2 as u32)
+                            .unwrap_or(32);
+                        let ev = enum_vals(self, &nm);
+                        arrays.push((written, nm, idx, w.max(1), false, ev));
+                    }
+                    continue;
+                };
+                let Some(v0) = self.get_signal_value_by_name(&format!("{}[{}]", nm, first)) else {
+                    return Err(rand_csp::CspOutcome::NotApplicable);
+                };
+                if v0.is_real {
+                    return Err(rand_csp::CspOutcome::NotApplicable);
+                }
+                let w = self
+                    .module
+                    .arrays
+                    .get(&nm)
+                    .map(|t| t.2 as u32)
+                    .unwrap_or(v0.width);
+                if w > 64 && !(empty && dynamic) {
+                    // Left as drawn: a constraint reading it is judged by the
+                    // final check.
+                    continue;
+                }
+                // The declared element type decides the signedness: an
+                // element value written by the per-item repair above may
+                // carry a literal's (`bc[i] == 1` left a `bit` element
+                // signed, and the solve then had no value 1 for it).
+                let signed = match self.module.var_decl_types.get(&nm) {
+                    Some(dt) => {
+                        super::elaborate::is_type_signed_resolved(dt, &self.module.typedef_types)
+                    }
+                    None => v0.is_signed || self.signed_signals.contains(&nm),
+                };
+                let ev = enum_vals(self, &nm);
                 arrays.push((written, nm, idx, w.max(1), signed, ev));
                 continue;
             }
@@ -68131,14 +68268,14 @@ impl Simulator {
                 if targets.iter().any(|(n, _)| n == root) {
                     continue;
                 }
-                return rand_csp::CspOutcome::NotApplicable;
+                return Err(rand_csp::CspOutcome::NotApplicable);
             }
             if !matches!(lv.kind, ExprKind::Ident(_)) {
-                return rand_csp::CspOutcome::NotApplicable;
+                return Err(rand_csp::CspOutcome::NotApplicable);
             }
             let cur = self.eval_expr(lv);
             if cur.is_real {
-                return rand_csp::CspOutcome::NotApplicable;
+                return Err(rand_csp::CspOutcome::NotApplicable);
             }
             if cur.width > 64 {
                 continue;
@@ -68152,15 +68289,7 @@ impl Simulator {
                 ev,
             ));
         }
-        let out = self.rand_csp_solve_scope(items, &scalars, &arrays);
-        if std::env::var_os("XEZIM_RAND_DBG").is_some() {
-            eprintln!(
-                "[rand-dbg] std::randomize joint: targets {:?} -> {:?}",
-                targets.iter().map(|t| &t.0).collect::<Vec<_>>(),
-                out
-            );
-        }
-        out
+        Ok((scalars, arrays))
     }
 
     /// The root variable a `std::randomize` target names: `v`, `s.f`,
@@ -73966,6 +74095,16 @@ impl Simulator {
                     }
                     match (llw, rlw) {
                         (Some(lw), Some(rw)) => lw.max(rw),
+                        // §7.5.1/§7.10.2: `size()` and `num()` return an int,
+                        // so `a.size() == n + m` over 6-bit n, m adds at 32
+                        // bits. Asked only when the other side is narrower.
+                        (l, r)
+                            if l.max(r).is_none_or(|w| w < 32)
+                                && (self.count_method_call(left)
+                                    || self.count_method_call(right)) =>
+                        {
+                            ctx_width.max(32)
+                        }
                         _ => ctx_width,
                     }
                 } else {
@@ -97288,6 +97427,36 @@ impl Simulator {
     /// `None` when the callee is not a plain module-scope function (a method,
     /// a class constructor, an array builtin), where the caller falls back to
     /// evaluation.
+    /// `e` is a call of a collection's `size()` / `num()` (an int).
+    fn count_method_call(&mut self, e: &Expression) -> bool {
+        let ExprKind::Call { func, args } = &e.kind else {
+            return false;
+        };
+        if !args.is_empty() || !self.callee_method_name_is(func, |m| matches!(m, "size" | "num")) {
+            return false;
+        }
+        if self.collection_method_of(func).is_some() {
+            return true;
+        }
+        // A class member (`s.size()` in a method, `obj.s.size()`): its
+        // storage is instance-scoped.
+        let recv = match &func.kind {
+            ExprKind::MemberAccess { expr, .. } => (**expr).clone(),
+            ExprKind::Ident(h) if h.path.len() >= 2 => {
+                let mut r = h.clone();
+                r.path.pop();
+                r.cached_signal_id = std::cell::Cell::new(None);
+                r.cached_resolved_name = std::cell::OnceCell::new();
+                Expression::new(ExprKind::Ident(r), func.span)
+            }
+            _ => return false,
+        };
+        self.array_operand_name(&recv).is_some()
+            || self
+                .expr_assoc_name(&recv)
+                .is_some_and(|n| self.is_associative_array(&n))
+    }
+
     fn call_return_width(&mut self, func: &Expression) -> Option<u32> {
         // A queue/dyn-array method reached here through the generic Call
         // fallback and EVALUATED — so `s - q.pop_back()` popped once for the
@@ -104402,6 +104571,12 @@ impl Simulator {
                                 .collect();
                             let folded = self.fold_state_guards(constraints, &rand_roots);
                             let constraints: &[crate::ast::decl::ConstraintItem] = &folded;
+                            // §18.5.8.1: sizes a constraint reads are solved
+                            // first, then the elements (see
+                            // `std_randomize_sized`).
+                            if let Some(ok) = self.std_randomize_sized(constraints, &targets) {
+                                return Value::from_u64(ok as u64, 32);
+                            }
                             let mut satisfied = false;
                             for attempt in 0..10 {
                                 if attempt > 0 {
@@ -105403,14 +105578,21 @@ impl Simulator {
                     // the array left at its old size — the ubiquitous
                     // `std::randomize(list) with { list.size() == N; }` idiom
                     // silently produced an empty list.
+                    // A size from a not yet constrained variable can be
+                    // anything; one past the size phase's bound is left to
+                    // the retries rather than allocated.
                     if let Some(arr) = self.size_call_on_target(left, targets) {
                         let n = self.eval_expr(right).to_i64().unwrap_or(0).max(0) as u64;
-                        self.resize_random_dyn_target(&arr, n);
+                        if n <= 1 << 20 {
+                            self.resize_random_dyn_target(&arr, n);
+                        }
                         return;
                     }
                     if let Some(arr) = self.size_call_on_target(right, targets) {
                         let n = self.eval_expr(left).to_i64().unwrap_or(0).max(0) as u64;
-                        self.resize_random_dyn_target(&arr, n);
+                        if n <= 1 << 20 {
+                            self.resize_random_dyn_target(&arr, n);
+                        }
                         return;
                     }
                     if let Some(lv) = self.target_for(left, targets) {
@@ -111743,7 +111925,12 @@ impl Simulator {
                 || cd.queue_properties.contains_key(&member)
                 || cd.assoc_properties.contains_key(&member)
             {
-                let tn = cd.properties.get(&member)?.type_name.clone()?;
+                let mut tn = cd.properties.get(&member)?.type_name.clone()?;
+                // §8.25: an element typed by a class type parameter has the
+                // type this object bound to it.
+                if cd.type_param_names.contains(&tn) {
+                    tn = self.class_prop_type_name(handle, &member)?;
+                }
                 let dt = self.module.typedef_types.get(tn.as_str())?;
                 if let DataType::Struct(su) = Self::resolve_type_ref(dt, &self.module.typedef_types)
                 {
@@ -146481,7 +146668,12 @@ impl Simulator {
             // final only when no array is sized at random: with fixed shapes
             // every trial would hand the solver the same problem.
             if csp_ok && csp_runs < 8 {
-                let sized = rand_colls.iter().any(|c| c.kind == CollKind::Dyn);
+                // §18.5.8.1: the joint solve sizes an array whose size a
+                // constraint reads itself (`csp_size_phase`).
+                let sized = rand_colls.iter().any(|c| {
+                    c.kind == CollKind::Dyn
+                        && !(sub_objs.is_empty() && Self::csp_size_solved(c, &constraints))
+                });
                 csp_runs += 1;
                 match self.rand_csp_solve(
                     handle,
