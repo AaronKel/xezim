@@ -155619,6 +155619,38 @@ impl Simulator {
                             }
                         }
                     }
+                    // §8.14 / §8.10: a property some subclass redeclares is a
+                    // separate variable, stored under `<Class>::p` in that
+                    // subclass's objects. A read or write through a handle of
+                    // an ancestor's static type must pick the copy per object
+                    // (`shadowed_member_rewrite`), so the compiled member
+                    // paths decline it for every ancestor of a redeclarer.
+                    for cd in self.module.classes.values() {
+                        let mut cur = cd.extends.as_deref();
+                        let mut guard = 0;
+                        while let Some(b) = cur
+                            && guard < 64
+                        {
+                            guard += 1;
+                            let base = b.split('#').next().unwrap_or(b);
+                            let Some(bd) = self
+                                .module
+                                .classes
+                                .get(b)
+                                .or_else(|| self.module.classes.get(base))
+                            else {
+                                break;
+                            };
+                            for key in [b, base] {
+                                if let Some(fields) = facts.instance_fields.get_mut(key) {
+                                    for p in cd.properties.keys() {
+                                        fields.remove(p);
+                                    }
+                                }
+                            }
+                            cur = bd.extends.as_deref();
+                        }
+                    }
                     // §8.20: non-virtual methods some subclass redeclares —
                     // the only calls whose static binding differs from the
                     // dynamic dispatch CallMethod performs.
