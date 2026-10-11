@@ -549,6 +549,8 @@ mod compiled_task_and_free_fn_chain;
 mod compiled_collection_return_store;
 #[path = "classes/compiled_member_redeclared.rs"]
 mod compiled_member_redeclared;
+#[path = "classes/int_property_named_like_struct_property.rs"]
+mod int_property_named_like_struct_property;
 #[path = "classes/compiled_method_test_env.rs"]
 mod compiled_method_test_env;
 #[path = "classes/concurrent_function_struct_local_shadow.rs"]

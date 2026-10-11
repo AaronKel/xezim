@@ -77065,9 +77065,12 @@ impl Simulator {
             return false;
         }
         let n = h.path[0].name.name.as_str();
+        // §8.10 / §13.3: a struct elsewhere (another class's struct property,
+        // a module struct) named like an integral property of `this` does
+        // not make the bare name a struct target (see `simple_ident_copy_ok`).
         if self.module.events.contains(n)
             || self.class_member_names().vif_props.contains(n)
-            || self.struct_capable_names().contains(n)
+            || (self.struct_capable_names().contains(n) && !self.this_integral_prop(n))
             || self
                 .module
                 .var_decl_types
