@@ -21,6 +21,8 @@ mod bit_class_property_signedness;
 mod block_local_shadows_enclosing;
 #[path = "classes/blocking_task_super_dispatch.rs"]
 mod blocking_task_super_dispatch;
+#[path = "classes/blocklocal_struct_named_like_member.rs"]
+mod blocklocal_struct_named_like_member;
 #[path = "classes/class_assoc_struct_string_keys.rs"]
 mod class_assoc_struct_string_keys;
 #[path = "classes/class_formal_named_like_struct.rs"]
