@@ -482,6 +482,90 @@ struct Csp {
     /// The reverse of `pop` (count -> x): the evaluator reads `x` itself, so
     /// a source that depends on the count depends on `x` too.
     pop_rev: HashMap<usize, usize>,
+    /// §7.12.3: a `sum()` that can wrap at its own width is a variable `s`
+    /// tied to its terms by `Σ terms == s + 2^w·k` with a carry variable
+    /// `k` (`LinCx`): (s, k, the term variables). Both have small domains
+    /// and are decided first: the last open term is then fixed by the
+    /// equality instead of guessed against a set of allowed sums.
+    carries: Vec<(usize, usize, Vec<usize>)>,
+    /// Variable count before translation: the carry variables live above
+    /// it and are made afresh by every translation.
+    carry_base: Option<usize>,
+}
+
+/// One modular reduction of a relation being translated (see
+/// `Csp::carries`): its variables are created only when the relation is.
+struct Carry {
+    acc: Lin,
+    w: u32,
+    s: bool,
+    k: (i128, i128),
+}
+
+/// Translation context of `csp_lin`: the initial domains, and the carries
+/// of the relation, numbered from `base`.
+struct LinCx<'a> {
+    dom0: &'a [Dom],
+    base: usize,
+    carries: Vec<Carry>,
+}
+
+impl<'a> LinCx<'a> {
+    fn new(csp: &'a Csp) -> Self {
+        LinCx {
+            dom0: &csp.dom0,
+            base: csp.vars.len(),
+            carries: Vec::new(),
+        }
+    }
+
+    /// Bounds of `v`: an existing variable or a pending carry's `s`/`k`.
+    fn bounds(&self, v: usize) -> Option<(i128, i128)> {
+        if v < self.base {
+            let d = self.dom0.get(v)?;
+            return Some((d.first()?.0, d.last()?.1));
+        }
+        let c = self.carries.get((v - self.base) / 2)?;
+        Some(if (v - self.base) % 2 == 0 {
+            ws_range(c.w, c.s)
+        } else {
+            c.k
+        })
+    }
+
+    fn range(&self, l: &Lin) -> Option<(i128, i128)> {
+        let (mut lo, mut hi) = (l.k, l.k);
+        for &(v, c) in &l.t {
+            let (a, b) = self.bounds(v)?;
+            let (x, y) = (a.checked_mul(c)?, b.checked_mul(c)?);
+            lo = lo.checked_add(x.min(y))?;
+            hi = hi.checked_add(x.max(y))?;
+        }
+        Some((lo, hi))
+    }
+
+    /// §7.12.3: `acc` accumulated at `(w, s)` wraps when its range leaves
+    /// that type: its value is then a new variable (`Csp::carries`). None
+    /// when it cannot wrap, or the modulus is too large a coefficient.
+    fn carry(&mut self, acc: &Lin, w: u32, s: bool) -> Option<usize> {
+        let (lo, hi) = self.range(acc)?;
+        let (rlo, rhi) = ws_range(w, s);
+        if lo >= rlo && hi <= rhi {
+            return None;
+        }
+        let m = 1i128 << w.min(64);
+        if w > 64 || m > COEF_MAX {
+            return None;
+        }
+        let k = (floor_div(lo - rlo, m), floor_div(hi - rlo, m));
+        self.carries.push(Carry {
+            acc: acc.clone(),
+            w,
+            s,
+            k,
+        });
+        Some(self.base + 2 * (self.carries.len() - 1))
+    }
 }
 
 /// Translation scope: bound `foreach` indices and the `with` iterator.
@@ -684,6 +768,7 @@ impl Node {
 }
 
 /// Outcome of one joint solve.
+#[derive(Debug)]
 pub(super) enum CspOutcome {
     /// A verified solution was written to the object.
     Sat,
@@ -858,16 +943,16 @@ impl Simulator {
     }
 
     /// §18.12: solve `std::randomize(…) with {items}` jointly. `scalars`
-    /// are (name, lvalue, width, signed, enum values); `arrays` are (name,
-    /// element indices, width, signed, enum values) of collections already
-    /// sized. The solution is written to the caller's variables and checked
+    /// are (name, lvalue, width, signed, enum values); `arrays` are (name
+    /// as the constraints write it, storage name, element indices, width,
+    /// signed, enum values) of collections already sized. The solution is written to the caller's variables and checked
     /// with the inline-constraint checker.
     #[allow(clippy::type_complexity)]
     pub(super) fn rand_csp_solve_scope(
         &mut self,
         items: &[ConstraintItem],
         scalars: &[(String, Expression, u32, bool, Option<Vec<u64>>)],
-        arrays: &[(String, Vec<i64>, u32, bool, Option<Vec<u64>>)],
+        arrays: &[(String, String, Vec<i64>, u32, bool, Option<Vec<u64>>)],
     ) -> CspOutcome {
         let mut csp = Csp {
             handle: usize::MAX,
@@ -899,6 +984,8 @@ impl Simulator {
             wide_fail: false,
             pop: HashMap::default(),
             pop_rev: HashMap::default(),
+            carries: Vec::new(),
+            carry_base: None,
         };
         let dom_of = |w: u32, s: bool, members: &Option<Vec<u64>>| -> Dom {
             match members {
@@ -911,7 +998,7 @@ impl Simulator {
                 }
             }
         };
-        for (name, idx, w, s, members) in arrays {
+        for (name, key, idx, w, s, members) in arrays {
             if *w == 0 || *w > 64 {
                 return CspOutcome::NotApplicable;
             }
@@ -920,7 +1007,7 @@ impl Simulator {
             for &i in idx {
                 elems.push((i, csp.vars.len()));
                 csp.vars.push(CspVar {
-                    key: VarKey::Elem(format!("{}[{}]", name, i)),
+                    key: VarKey::Elem(format!("{}[{}]", key, i)),
                     width: *w,
                     signed: *s,
                 });
@@ -952,6 +1039,15 @@ impl Simulator {
         }
         if csp.vars.is_empty() || csp.vars.len() > MAX_VARS {
             return CspOutcome::NotApplicable;
+        }
+        if std::env::var_os("XEZIM_RAND_DBG").is_some() {
+            eprintln!(
+                "[rand-dbg] scope solve: arrays {:?}",
+                csp.arrays
+                    .iter()
+                    .map(|(n, a)| (n.clone(), a.elems.len(), a.width, a.signed))
+                    .collect::<Vec<_>>()
+            );
         }
         let constraints = vec![ClassConstraint {
             is_static: false,
@@ -1021,6 +1117,8 @@ impl Simulator {
             wide_fail: false,
             pop: HashMap::default(),
             pop_rev: HashMap::default(),
+            carries: Vec::new(),
+            carry_base: None,
         };
         let enum_dom = |me: &Self, tn: &str| -> Option<Dom> {
             let members = me.module.enum_members.get(tn)?;
@@ -1143,6 +1241,14 @@ impl Simulator {
         csp.order.clear();
         csp.soft_priority.clear();
         csp.opaque = false;
+        csp.carries.clear();
+        match csp.carry_base {
+            Some(b) => {
+                csp.vars.truncate(b);
+                csp.dom0.truncate(b);
+            }
+            None => csp.carry_base = Some(csp.vars.len()),
+        }
         let env = Env::default();
         self.csp_slice_links(csp);
         for (index, con) in constraints.iter().enumerate() {
@@ -2934,6 +3040,20 @@ impl Simulator {
                 deps.dedup();
             }
         }
+        // The evaluator reads a sum's terms, not its carry variables.
+        if !csp.carries.is_empty() {
+            let ts: Vec<usize> = csp
+                .carries
+                .iter()
+                .filter(|c| deps.contains(&c.0) || deps.contains(&c.1))
+                .flat_map(|c| c.2.iter().copied())
+                .collect();
+            if !ts.is_empty() {
+                deps.extend(ts);
+                deps.sort_unstable();
+                deps.dedup();
+            }
+        }
         // §18.5.9: the evaluator reads an object-array element through its
         // select (`arr[k]`), not by the solver's one-segment name.
         let item = match item {
@@ -3880,7 +4000,10 @@ impl Simulator {
         // `neg` expresses; fold it together with the caller's negation.
         let inv = matches!(op, BinaryOp::Neq | BinaryOp::CaseNeq) != neg;
         let mut fits = Vec::new();
-        let lin = Self::csp_lin(&a, w, false, &mut fits)?;
+        let mut cx = LinCx::new(csp);
+        let lin = Self::csp_lin(&a, w, false, &mut fits, &mut cx)?;
+        let carries = std::mem::take(&mut cx.carries);
+        self.csp_add_carries(csp, carries);
         fits.push(Fit {
             lin: lin.clone(),
             lo: 0,
@@ -3958,12 +4081,14 @@ impl Simulator {
         }
         let s = sl && sr;
         let mut fits = Vec::new();
+        let mut cx = LinCx::new(csp);
         let (Some(la), Some(lb)) = (
-            Self::csp_lin(&a, w, s, &mut fits),
-            Self::csp_lin(&b, w, s, &mut fits),
+            Self::csp_lin(&a, w, s, &mut fits, &mut cx),
+            Self::csp_lin(&b, w, s, &mut fits, &mut cx),
         ) else {
             return fallback(self, csp);
         };
+        let carries = std::mem::take(&mut cx.carries);
         let (rlo, rhi) = ws_range(w, s);
         let nleaf = fits.len();
         fits.push(Fit {
@@ -4002,6 +4127,7 @@ impl Simulator {
         let Some(lin) = lin else {
             return fallback(self, csp);
         };
+        self.csp_add_carries(csp, carries);
         let mut deps: Vec<usize> = lin.t.iter().map(|t| t.0).collect();
         for f in &fits {
             deps.extend(f.lin.t.iter().map(|t| t.0));
@@ -4191,14 +4317,17 @@ impl Simulator {
         };
         let (w, s) = Self::csp_ws(&a);
         let mut fits = Vec::new();
+        let mut cx = LinCx::new(csp);
         let lin = if w <= 64 {
-            Self::csp_lin(&a, w, s, &mut fits)
+            Self::csp_lin(&a, w, s, &mut fits, &mut cx)
         } else {
             None
         };
+        let carries = std::mem::take(&mut cx.carries);
         let Some(lin) = lin else {
             return self.csp_eval_node(csp, whole, env, neg);
         };
+        self.csp_add_carries(csp, carries);
         let frame = self.csp_frame(&env.binds);
         self.push_local_frame(frame);
         let set = dom_norm(self.cons_ranges_i128(ranges));
@@ -4829,6 +4958,10 @@ impl Simulator {
             ExprKind::MemberAccess { expr, member } => (expr, member.name.as_str(), &[]),
             _ => return None,
         };
+        // `arr.size()` is a constant of the solve (below `csp_sum`).
+        if method == "size" {
+            return None;
+        }
         let arr = csp.arrays.get(&self.csp_member(csp, recv)?)?.clone();
         if method != "sum" {
             return Some(None);
@@ -4886,7 +5019,7 @@ impl Simulator {
 
     /// Linear form of `a` in the context `(w, s)`, recording the fits that
     /// keep it exact.
-    fn csp_lin(a: &Ae, w: u32, s: bool, fits: &mut Vec<Fit>) -> Option<Lin> {
+    fn csp_lin(a: &Ae, w: u32, s: bool, fits: &mut Vec<Fit>, cx: &mut LinCx) -> Option<Lin> {
         match a {
             Ae::Var(v, _, vs) => {
                 // an unsigned context zero-extends a signed operand
@@ -4903,11 +5036,18 @@ impl Simulator {
                 let raw = v.to_u64()?;
                 Some(Lin::konst(Self::as_ctx(raw as i128, v.width, s)))
             }
-            Ae::Neg(x) => Self::csp_lin(x, w, s, fits)?.scale(-1),
-            Ae::Add(l, r) => Self::csp_lin(l, w, s, fits)?.plus(&Self::csp_lin(r, w, s, fits)?, 1),
-            Ae::Sub(l, r) => Self::csp_lin(l, w, s, fits)?.plus(&Self::csp_lin(r, w, s, fits)?, -1),
+            Ae::Neg(x) => Self::csp_lin(x, w, s, fits, cx)?.scale(-1),
+            Ae::Add(l, r) => {
+                Self::csp_lin(l, w, s, fits, cx)?.plus(&Self::csp_lin(r, w, s, fits, cx)?, 1)
+            }
+            Ae::Sub(l, r) => {
+                Self::csp_lin(l, w, s, fits, cx)?.plus(&Self::csp_lin(r, w, s, fits, cx)?, -1)
+            }
             Ae::Mul(l, r) => {
-                let (x, y) = (Self::csp_lin(l, w, s, fits)?, Self::csp_lin(r, w, s, fits)?);
+                let (x, y) = (
+                    Self::csp_lin(l, w, s, fits, cx)?,
+                    Self::csp_lin(r, w, s, fits, cx)?,
+                );
                 if x.is_const() {
                     y.scale(x.k)
                 } else if y.is_const() {
@@ -4923,7 +5063,13 @@ impl Simulator {
             } => {
                 let mut acc = Lin::konst(0);
                 for t in terms {
-                    acc = acc.plus(&Self::csp_lin(t, *sw, *ss, fits)?, 1)?;
+                    acc = acc.plus(&Self::csp_lin(t, *sw, *ss, fits, cx)?, 1)?;
+                }
+                // §7.12.3: the sum is computed at its own width and wraps
+                // there (`a.sum() == 3` over 16-bit elements also holds for
+                // terms adding up to 3 + 2^16·k).
+                if let Some(v) = cx.carry(&acc, *sw, *ss) {
+                    return Self::csp_lin(&Ae::Var(v, *sw, *ss), w, s, fits, cx);
                 }
                 Self::csp_leaf_fit(&acc, *sw, *ss, *sw, *ss, s, fits);
                 Some(acc)
@@ -4935,7 +5081,7 @@ impl Simulator {
                 w: cw,
                 s: cs,
             } => {
-                let l = Self::csp_lin(inner, *iw, *is, fits)?;
+                let l = Self::csp_lin(inner, *iw, *is, fits, cx)?;
                 Self::csp_leaf_fit(&l, *iw, *is, *cw, *cs, s, fits);
                 Some(l)
             }
@@ -5031,7 +5177,7 @@ impl Simulator {
             })
             .collect();
         for (name, elems, skip) in arrays {
-            let shape = if skip || csp.scope.is_some() {
+            let shape = if skip {
                 None
             } else {
                 self.csp_scalar_shape(csp, &name)
@@ -5169,6 +5315,50 @@ impl Simulator {
         }
     }
 
+    /// Create the variables of a translated relation's carries (`LinCx`)
+    /// and their defining equalities `acc - s - 2^w·k == 0`.
+    fn csp_add_carries(&mut self, csp: &mut Csp, carries: Vec<Carry>) {
+        for c in carries {
+            debug_assert!(csp.vars.len() >= csp.carry_base.unwrap_or(0));
+            let sv = csp.vars.len();
+            csp.vars.push(CspVar {
+                key: VarKey::Aux,
+                width: c.w,
+                signed: c.s,
+            });
+            let (lo, hi) = ws_range(c.w, c.s);
+            csp.dom0.push(vec![(lo, hi)]);
+            let kv = csp.vars.len();
+            csp.vars.push(CspVar {
+                key: VarKey::Aux,
+                width: 64,
+                signed: true,
+            });
+            csp.dom0.push(vec![c.k]);
+            let terms: Vec<usize> = c.acc.t.iter().map(|t| t.0).collect();
+            // `LinCx::carry` keeps 2^w within COEF_MAX.
+            let lin = Lin {
+                t: vec![(sv, -1), (kv, -(1i128 << c.w))],
+                k: 0,
+            }
+            .plus(&c.acc, 1)
+            .expect("carry within the coefficient bound");
+            let mut deps: Vec<usize> = lin.t.iter().map(|t| t.0).collect();
+            deps.sort_unstable();
+            let one = Self::literal_of(&Value::from_u64(1, 1), crate::ast::Span::dummy());
+            csp.carries.push((sv, kv, terms));
+            let src = self.csp_src(csp, SrcItem::Expr(one), &Env::default(), deps);
+            csp.nodes.push(Node::Lin {
+                lin,
+                rel: Rel::Eq,
+                fits: Vec::new(),
+                src,
+                sneg: false,
+                wrap: None,
+            });
+        }
+    }
+
     fn csp_aux_var(csp: &mut Csp, w: u32) -> usize {
         csp.vars.push(CspVar {
             key: VarKey::Aux,
@@ -5189,6 +5379,9 @@ impl Simulator {
         name: &str,
     ) -> Option<(Vec<(String, u32, u32)>, Option<(i64, i64)>)> {
         let dt: Option<DataType> = if csp.scope.is_some() {
+            // A collection local to an automatic task is registered under
+            // its per-call key (`declare_local_dyn`).
+            let name = self.dyn_name_lookup(name).unwrap_or(name);
             if let Some(f) = self.module.packed_struct_fields.get(name) {
                 return Some((f.clone(), None));
             }

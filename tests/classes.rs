@@ -354,6 +354,8 @@ mod randomize_countones_count;
 mod randomize_dist_weights;
 #[path = "classes/randomize_foreach_accept.rs"]
 mod randomize_foreach_accept;
+#[path = "classes/randomize_issues_295_297.rs"]
+mod randomize_issues_295_297;
 #[path = "classes/randomize_shift_mask_wide_peer.rs"]
 mod randomize_shift_mask_wide_peer;
 #[path = "classes/randomize_inside_range.rs"]

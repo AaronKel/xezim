@@ -5875,6 +5875,16 @@ pub struct Simulator {
     /// `exec_stmt_var_decl` registered in `packed_full_dims` (so a later
     /// same-named array local can drop it).
     array_local_packed_dims: HashSet<String>,
+    /// Field layout of the packed-struct element of the array local being
+    /// declared, for `declare_local_dyn` to register under the per-call key.
+    /// The bare name's previous entry is restored once the layout moves to
+    /// that key: (layout, bare name, previous entry).
+    #[allow(clippy::type_complexity)]
+    local_elem_layout: Option<(
+        Vec<(String, u32, u32)>,
+        String,
+        Option<Vec<(String, u32, u32)>>,
+    )>,
     pub real_signals: HashSet<String>,
     /// Base names of 2D/ND UNPACKED arrays (union of `module.arrays_2d` and
     /// `module.arrays_nd` keys). The bytecode compiler consults this so a
@@ -11745,6 +11755,7 @@ impl Simulator {
             widths,
             signed_signals,
             array_local_packed_dims: HashSet::default(),
+            local_elem_layout: None,
             real_signals,
             multi_dim_array_names,
             forced_signals: HashMap::default(),
@@ -68062,9 +68073,33 @@ impl Simulator {
                     // final check.
                     continue;
                 }
-                let signed = v0.is_signed || self.signed_signals.contains(&nm);
+                // The declared element type decides the signedness: an
+                // element value written by the per-item repair above may
+                // carry a literal's (`bc[i] == 1` left a `bit` element
+                // signed, and the solve then had no value 1 for it).
+                let signed = match self.module.var_decl_types.get(&nm) {
+                    Some(dt) => {
+                        super::elaborate::is_type_signed_resolved(dt, &self.module.typedef_types)
+                    }
+                    None => v0.is_signed || self.signed_signals.contains(&nm),
+                };
                 let ev = enum_vals(self, &nm);
-                arrays.push((nm, idx, w.max(1), signed, ev));
+                // §18.12: a dynamic array or queue local to an automatic
+                // task is stored under a per-call key (`declare_local_dyn`);
+                // the constraints name it as written, so the solver knows it
+                // by that name and reads and writes its elements by the key.
+                let written = match &lv.kind {
+                    ExprKind::Ident(h)
+                        if h.root.is_none()
+                            && h.path.len() == 1
+                            && h.path[0].selects.is_empty()
+                            && h.path[0].name.name != nm =>
+                    {
+                        h.path[0].name.name.clone()
+                    }
+                    _ => nm.clone(),
+                };
+                arrays.push((written, nm, idx, w.max(1), signed, ev));
                 continue;
             }
             if let Some((root, _)) = name.split_once('.') {
@@ -68094,7 +68129,15 @@ impl Simulator {
                 ev,
             ));
         }
-        self.rand_csp_solve_scope(items, &scalars, &arrays)
+        let out = self.rand_csp_solve_scope(items, &scalars, &arrays);
+        if std::env::var_os("XEZIM_RAND_DBG").is_some() {
+            eprintln!(
+                "[rand-dbg] std::randomize joint: targets {:?} -> {:?}",
+                targets.iter().map(|t| &t.0).collect::<Vec<_>>(),
+                out
+            );
+        }
+        out
     }
 
     /// The root variable a `std::randomize` target names: `v`, `s.f`,
@@ -81638,6 +81681,28 @@ impl Simulator {
                     }
                 }
             } else {
+                // §7.2.1/§7.4: an ARRAY local of a packed struct element
+                // (`s_t a [];` in a task or function) gets the element's
+                // field layout, as a module-scope array does in
+                // elaboration: `a[i].f` slices the element. Without it a
+                // field write was dropped and a field read gave 0.
+                self.local_elem_layout = None;
+                if let Some(fields) = super::elaborate::packed_struct_field_layout(
+                    data_type,
+                    &self.module.parameters,
+                    &self.module.typedefs,
+                    &self.module.typedef_types,
+                )
+                .filter(|f| !f.is_empty())
+                {
+                    let prev = self
+                        .module
+                        .packed_struct_fields
+                        .insert(d.name.name.clone(), fields.clone());
+                    // An array local to an automatic task lives under a
+                    // per-call key (`declare_local_dyn`).
+                    self.local_elem_layout = Some((fields, d.name.name.clone(), prev));
+                }
                 // §7.4/§20.7: an ARRAY local of a packed multi-dimensional
                 // element (`logic [7:0][3:0] pk [2][3];`) keeps its packed
                 // geometry, as a module-scope array does: the element width
@@ -103899,6 +103964,15 @@ impl Simulator {
         } else {
             frame.push((bare.to_string(), key.clone()));
         }
+        if let Some((fields, name, prev)) = self.local_elem_layout.take()
+            && name == bare
+        {
+            self.module.packed_struct_fields.insert(key.clone(), fields);
+            match prev {
+                Some(p) => self.module.packed_struct_fields.insert(name, p),
+                None => self.module.packed_struct_fields.remove(&name),
+            };
+        }
         key
     }
 
@@ -103939,6 +104013,7 @@ impl Simulator {
         self.module.queue_max_sizes.remove(key);
         self.module.descending_arrays.remove(key);
         self.module.var_decl_types.remove(key);
+        self.module.packed_struct_fields.remove(key);
         self.module.array_elem_class.remove(key);
         self.signals.remove(&size_key);
         self.widths.remove(key);
@@ -105626,8 +105701,41 @@ impl Simulator {
         }
         // array -> (lo, hi, pinned by ==)
         let mut bounds: HashMap<String, (i64, i64, bool)> = HashMap::default();
+        // array -> the values a `size() inside {…}` allows
+        let mut sets: HashMap<String, Vec<(i64, i64)>> = HashMap::default();
         for it in flat {
             match it {
+                // §11.4.13: `size() inside {…}` written as an expression.
+                CI::Expr(e) if matches!(e.kind, ExprKind::Inside { .. }) => {
+                    let ExprKind::Inside { expr, ranges } = &e.kind else {
+                        continue;
+                    };
+                    let Some(arr) = self.size_call_on_target(expr, targets) else {
+                        continue;
+                    };
+                    let mut set: Option<Vec<(i64, i64)>> = Some(Vec::new());
+                    for r in ranges {
+                        let iv = match &r.kind {
+                            ExprKind::Range(lo, hi) => {
+                                self.eval_expr(lo).to_i64().zip(self.eval_expr(hi).to_i64())
+                            }
+                            _ => self.eval_expr(r).to_i64().map(|v| (v, v)),
+                        };
+                        match (iv, set.as_mut()) {
+                            (Some((l, h)), Some(s)) => s.push((l.min(h), l.max(h))),
+                            _ => set = None,
+                        }
+                    }
+                    let b = bounds
+                        .entry(arr.clone())
+                        .or_insert((0, i32::MAX as i64, false));
+                    match set {
+                        Some(s) if !s.is_empty() && !sets.contains_key(&arr) => {
+                            sets.insert(arr, s);
+                        }
+                        _ => b.2 = true,
+                    }
+                }
                 CI::Expr(e) => {
                     let ExprKind::Binary { op, left, right } = &e.kind else {
                         continue;
@@ -105702,7 +105810,28 @@ impl Simulator {
             }
         }
         for (arr, (lo, hi, pinned)) in bounds {
-            if pinned || lo > hi || (lo == 0 && hi == i32::MAX as i64) {
+            if pinned || lo > hi || (lo == 0 && hi == i32::MAX as i64 && !sets.contains_key(&arr)) {
+                continue;
+            }
+            // A set: a value of it inside the bounds, every value alike.
+            if let Some(set) = sets.get(&arr) {
+                let parts: Vec<(i64, i64)> = set
+                    .iter()
+                    .map(|&(l, h)| (l.max(lo).max(0), h.min(hi).min(lo.max(0) + (1 << 20))))
+                    .filter(|(l, h)| l <= h)
+                    .collect();
+                let total: i64 = parts.iter().map(|(l, h)| h - l + 1).sum();
+                if total == 0 {
+                    continue;
+                }
+                let mut k = self.cur_rng().gen_range(0..total);
+                for (l, h) in parts {
+                    if k <= h - l {
+                        self.resize_random_dyn_target(&arr, (l + k) as u64);
+                        break;
+                    }
+                    k -= h - l + 1;
+                }
                 continue;
             }
             // An open upper bound stays near the lower one: an unbounded
@@ -118177,6 +118306,7 @@ impl Simulator {
         // accumulating in a full i64 and returning 32 bits gave the raw match
         // count (3) where the LRM requires 1.
         let mut expr_w: u32 = 0;
+        let mut expr_s = false;
         for i in 0..size {
             let key = assoc_keys.as_ref().map(|k| k[i as usize].as_str());
             let elem = self
@@ -118216,6 +118346,7 @@ impl Simulator {
             let fv = self.eval_expr(filter);
             if expr_w == 0 {
                 expr_w = fv.width.max(1);
+                expr_s = fv.is_signed;
             }
             let v = fv.to_i64().unwrap_or(0);
             acc = Some(match (acc, method) {
@@ -118267,6 +118398,15 @@ impl Simulator {
         } else {
             raw
         };
+        // §7.12.3: the result has the type of the `with` expression: its
+        // width (`$bits(a.sum() with (16'(item)))` is 16) and signedness
+        // (`sb.sum() with (item) == -56` over bytes holds).
+        if matches!(method, "sum" | "product" | "and" | "or" | "xor") && expr_w > 0 {
+            let w = expr_w.min(64);
+            let mut v = Value::from_u64(if w < 64 { out & ((1u64 << w) - 1) } else { out }, w);
+            v.is_signed = expr_s;
+            return v;
+        }
         Value::from_u64(out, w.max(32))
     }
 
