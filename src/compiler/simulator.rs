@@ -155578,22 +155578,21 @@ impl Simulator {
                         }
                     }
                 }
-                for (tn, dt) in self.module.typedef_types.iter() {
-                    if matches!(dt, crate::ast::types::DataType::TypeReference { .. }) {
-                        scope_static_receivers.insert(tn.clone());
+                // A free function's body (`__free_fn__<pkg>`, no class chain
+                // above) admits only the elaborated class names: an alias
+                // resolves against the caller's stale spec there (see the
+                // compiler's Step 9h arm).
+                if !cname.starts_with("__free_fn__") {
+                    for (tn, dt) in self.module.typedef_types.iter() {
+                        if matches!(dt, crate::ast::types::DataType::TypeReference { .. }) {
+                            scope_static_receivers.insert(tn.clone());
+                        }
                     }
                 }
                 for nm in shadow_names.iter().chain(bare_members.iter()) {
                     scope_static_receivers.remove(nm);
                 }
                 scope_static_receivers.retain(|n| !self.signal_name_to_id.contains_key(n.as_str()));
-                // 9h free-fn gate: only ELABORATED concrete class names are
-                // safe to compile as class-scope static receivers from a
-                // free function body (the defining class is baked; the
-                // runtime resolves it without the stale caller spec). Type
-                // params and typedef aliases are deliberately excluded.
-                let concrete_class_names: HashSet<String> =
-                    self.module.classes.keys().cloned().collect();
                 let admission = self.compiled_method_admission.clone().unwrap_or_else(|| {
                     let mut facts = super::bytecode::MethodAdmission::default();
                     for (class, declaration) in &self.module.classes {
@@ -155742,7 +155741,6 @@ impl Simulator {
                         &const_names,
                         &new_type_map,
                         &scope_static_receivers,
-                        &concrete_class_names,
                         &handle_local_types,
                         &string_method_names,
                         &free_fn_table,

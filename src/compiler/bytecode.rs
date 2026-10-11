@@ -1613,14 +1613,6 @@ pub struct BytecodeCompiler<'a> {
     /// targets are admitted (compile-site filtered).
     new_type_map: HashMap<String, String>,
     scope_static_receivers: HashSet<String>,
-    /// Covers 9h free-fn gate: the set of ELABORATED concrete class names
-    /// (keys of `module.classes`). A class-scope static call from a FREE
-    /// function is only compiled when the receiver is one of these — a
-    /// plain class whose defining class is baked, so `exec_class_scope_
-    /// static_call` resolves it without consulting the (stale) caller
-    /// `current_spec`. Type-param receivers stay on the AST interpreter,
-    /// where the per-specialization binding is resolved by the frame.
-    concrete_class_names: HashSet<String>,
     /// class-perf Step 9e: the static CLASS of the method being compiled —
     /// the `this` root's type for TYPED handle-chain admission.
     method_class: Option<String>,
@@ -1975,7 +1967,6 @@ impl<'a> BytecodeCompiler<'a> {
             class_const_names: HashSet::default(),
             new_type_map: HashMap::default(),
             scope_static_receivers: HashSet::default(),
-            concrete_class_names: HashSet::default(),
             method_class: None,
             handle_member_types: None,
             method_admission: None,
@@ -5039,22 +5030,20 @@ impl<'a> BytecodeCompiler<'a> {
         // element class (`handle_member_types[method_class][coll]` is the
         // STORED element type — Some iff the collection holds handles).
         let (coll, _bare, _) = self.member_coll_elem_target(coll_base)?;
-        let elem_class = self
-            .method_class
-            .as_deref()
-            .and_then(|cls| self.handle_member_types?.get(cls)?.get(coll.as_str()).cloned())?;
+        let elem_class = self.method_class.as_deref().and_then(|cls| {
+            self.handle_member_types?
+                .get(cls)?
+                .get(coll.as_str())
+                .cloned()
+        })?;
         // The leaf must be an admitted instance field of the ELEMENT class
         // (statics / non-loadable / unadmitted members stay on the AST).
-        if !self
-            .method_admission
-            .as_ref()
-            .is_some_and(|admission| {
-                admission
-                    .instance_fields
-                    .get(&elem_class)
-                    .is_some_and(|fields| fields.contains(member))
-            })
-        {
+        if !self.method_admission.as_ref().is_some_and(|admission| {
+            admission
+                .instance_fields
+                .get(&elem_class)
+                .is_some_and(|fields| fields.contains(member))
+        }) {
             return None;
         }
         // Lower `m[k]` to the element's heap-handle register, then read
@@ -13893,9 +13882,7 @@ impl<'a> BytecodeCompiler<'a> {
                     // `this.aa[k].field`). Checked before the handle-chain
                     // path and the signal/struct arms below, which cannot
                     // resolve an indexed collection receiver.
-                    if let Some(dest) =
-                        self.compile_member_handle_elem_member(base, &member.name)
-                    {
+                    if let Some(dest) = self.compile_member_handle_elem_member(base, &member.name) {
                         return Some(dest);
                     }
                     // Step 6: the base may be a whole chain (`a.b`,
@@ -14536,35 +14523,17 @@ impl<'a> BytecodeCompiler<'a> {
                     && !self
                         .bare_member_names
                         .contains(h.path[0].name.name.as_str())
-                    // free-function bodies have no `this` and no defining
-                    // class context: a class-scope static call
-                    // (`Cls.m(..)` / `pkg.Cls.m(..)`) re-enters the
-                    // dispatcher with the CALLER's class context — for a
-                    // free fn that is whatever frame ran last, so
-                    // `uvm_report_info`'s `uvm_report_server::get_server()`
-                    // resolved against a stale/foreign class and the report
-                    // pipeline corrupted strings. Free fns decline static
-                    // scoped calls; they stay on the AST interpreter which
-                    // resolves the scope correctly.
-                    // free-function bodies have no `this` and no defining
-                    // class context: a class-scope static call
-                    // (`Cls.m(..)` / `pkg.Cls.m(..)`) re-enters the
-                    // dispatcher with the CALLER's class context — for a
-                    // free fn that is whatever frame ran last. Compiling a
-                    // CONCRETE-class receiver is safe: `CallStaticScoped`
-                    // bakes the class name, and
+                    // A free-function body has no `this` and no defining
+                    // class context, so a class-scope static call re-enters
+                    // the dispatcher with whatever frame ran last as the
+                    // caller's context. A CONCRETE class receiver is safe:
+                    // `CallStaticScoped` bakes the class name and
                     // `exec_class_scope_static_call` resolves it through
-                    // `module.classes` without consulting the stale
-                    // `current_spec` (it saves/restores spec around the
-                    // dispatch). A TYPE-PARAM receiver (`T::m()`) instead
-                    // resolves via `resolve_type_param_binding(name)`
-                    // against the stale spec, which is exactly the
-                    // `uvm_report_info`/`get_server` string corruption the
-                    // gate guards; those stay on the AST interpreter.
-                    && (!self.free_function_mode
-                        || self
-                            .concrete_class_names
-                            .contains(h.path[0].name.name.as_str()))
+                    // `module.classes` without the stale `current_spec`. A
+                    // type parameter or typedef alias resolves against that
+                    // stale spec (the `uvm_report_server::get_server()`
+                    // string corruption), so for a free function the
+                    // simulator admits only elaborated class names here.
                     && self
                         .scope_static_receivers
                         .contains(h.path[0].name.name.as_str())
@@ -17823,7 +17792,6 @@ impl<'a> BytecodeCompiler<'a> {
         class_const_names: &HashSet<String>,
         new_type_map: &HashMap<String, String>,
         scope_static_receivers: &HashSet<String>,
-        concrete_class_names: &HashSet<String>,
         handle_local_types: &HashMap<String, String>,
         string_method_names: &HashSet<String>,
         functions: &'a HashMap<String, FunctionDeclaration>,
@@ -17941,7 +17909,6 @@ impl<'a> BytecodeCompiler<'a> {
         self.class_const_names = class_const_names.clone();
         self.new_type_map = new_type_map.clone();
         self.scope_static_receivers = scope_static_receivers.clone();
-        self.concrete_class_names = concrete_class_names.clone();
         self.method_class = Some(method_class.to_string());
         self.handle_member_types = Some(handle_member_types);
 
@@ -21130,7 +21097,6 @@ mod tests {
             &HashSet::default(),
             &HashMap::default(),
             &HashSet::default(),
-            &HashSet::default(),
             &HashMap::default(),
             &HashSet::default(),
             &empty_fns,
@@ -21228,7 +21194,6 @@ mod tests {
             &HashSet::default(),
             &HashMap::default(),
             &HashSet::default(),
-            &HashSet::default(),
             &HashMap::default(),
             &HashSet::default(),
             &empty_fns,
@@ -21310,7 +21275,6 @@ mod tests {
                     &HashSet::default(),
                     &HashSet::default(),
                     &HashMap::default(),
-                    &HashSet::default(),
                     &HashSet::default(),
                     &HashMap::default(),
                     &HashSet::default(),
