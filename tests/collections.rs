@@ -67,6 +67,8 @@ mod mailbox_bounded;
 mod mailbox_handle_named_like_struct;
 #[path = "collections/member_off_handle_collection_elem.rs"]
 mod member_off_handle_collection_elem;
+#[path = "classes/compiled_method_test_env.rs"]
+mod compiled_method_test_env;
 #[path = "collections/call_ret_store_into_local_coll.rs"]
 mod call_ret_store_into_local_coll;
 #[path = "collections/multidim_assoc_array.rs"]

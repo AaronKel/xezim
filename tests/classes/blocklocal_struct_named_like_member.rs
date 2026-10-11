@@ -14,6 +14,9 @@ use xezim::simulate;
 
 #[test]
 fn blocklocal_struct_does_not_pollute_class_int_member() {
+    // Compiled from the first call (tier 0) in a child process, then again
+    // here at the default tier.
+    let _ = super::compiled_method_test_env::eager();
     let src = r#"
 module test;
   typedef struct { int a; } mystruct;
@@ -44,6 +47,9 @@ endmodule
     assert!(
         sim.output.iter().any(|o| o.message == "C|99 99 99"),
         "block-local struct named s must not hijack C.s: {:?}",
-        sim.output.iter().map(|o| o.message.as_str()).collect::<Vec<_>>()
+        sim.output
+            .iter()
+            .map(|o| o.message.as_str())
+            .collect::<Vec<_>>()
     );
 }

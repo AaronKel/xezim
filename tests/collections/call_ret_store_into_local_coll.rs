@@ -23,6 +23,9 @@ use xezim::simulate;
 
 #[test]
 fn collection_ret_call_store_into_local_collection() {
+    // Compiled from the first call (tier 0) in a child process, then again
+    // here at the default tier.
+    let _ = super::compiled_method_test_env::eager();
     let src = r#"module top;
 
 class store;

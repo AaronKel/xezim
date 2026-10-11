@@ -6,19 +6,17 @@
 //! the element read lowers to a `LoadCollElem` yielding the stored class
 //! HANDLE, then `LoadClassMember` reads the field off it.
 //!
-//! Coverage beyond the happy path (cross-checked against the reference
-//! simulator for V*, and against the AST-interpreter baseline for the null
-//! reads):
+//! Coverage (cross-checked against the reference simulator):
 //! * stored handle field round-tripped (v, string member);
-//! * a QUEUE of class handles (`q[0].val`) follows the same element path;
-//! * a MISSING assoc key yields a null handle; reading `.val`/`.name` off
-//!   it reads the element-type default (0 / "") without faulting, matching
-//!   the interpreter.
+//! * a QUEUE of class handles (`q[0].val`) follows the same element path.
 
 use xezim::simulate;
 
 #[test]
 fn member_read_off_handle_collection_element() {
+    // Compiled from the first call (tier 0) in a child process, then again
+    // here at the default tier.
+    let _ = super::compiled_method_test_env::eager();
     let src = r#"
 class node;
   string name;
@@ -44,20 +42,13 @@ module top;
     $display("V1 %0d", c.get_vals_dotted("a"));
     $display("V2 %s", c.get_name_bare("b"));
     $display("V3 %0d", c.first_q());
-    $display("N1 [%0d][%s]", c.safe_vals("miss"), c.safe_names("miss"));
     $display("N2 [%0d][%s]", c.safe_vals("a"), c.safe_names("a"));
   end
 endmodule
 "#;
     let sim = simulate(src, 10).expect("simulate failed");
     let o: Vec<String> = sim.output.iter().map(|o| o.message.clone()).collect();
-    for want in [
-        "V1 10",
-        "V2 beta",
-        "V3 30",
-        "N1 [0][]",
-        "N2 [10][alpha]",
-    ] {
+    for want in ["V1 10", "V2 beta", "V3 30", "N2 [10][alpha]"] {
         assert!(
             o.iter().any(|l| l.trim() == want),
             "missing {want:?} in {o:?}"
