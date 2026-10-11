@@ -545,6 +545,8 @@ mod cls_agg_members_matrix;
 mod compiled_method_admission_regression;
 #[path = "classes/compiled_task_and_free_fn_chain.rs"]
 mod compiled_task_and_free_fn_chain;
+#[path = "classes/compiled_collection_return_store.rs"]
+mod compiled_collection_return_store;
 #[path = "classes/compiled_method_test_env.rs"]
 mod compiled_method_test_env;
 #[path = "classes/concurrent_function_struct_local_shadow.rs"]

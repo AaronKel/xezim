@@ -655,15 +655,15 @@ pub enum Insn {
     /// (width 0), exactly like a class-handle return.
     RetCollection(u32, u32),
 
-    /// class-perf collection-return store: a compiled CALLER consumes a
-    /// callee's `pending_ret_collection` (a queue / unsized-dynamic-array
-    /// result) by copying it whole into the named LOCAL collection.
-    /// `key` is the `local_coll_key` (`\x01`-prefixed) of the destination
-    /// local. The compiler emits this IMMEDIATELY after the collection-
-    /// returning CallMethod / CallFreeFunction etc.; the VM loop keeps
-    /// `pending_ret_collection` alive for exactly this insn (see
-    /// `exec_insns`'s call delegation look-ahead) and drops it otherwise.
-    AssignPendingColl(Box<str>),
+    /// class-perf collection-return store (§13.4): `q = f(..)` in a
+    /// compiled body, `q` a bare LOCAL queue / dynamic array. `key` is the
+    /// destination's `local_coll_key` (`\x01`-prefixed) and the register is
+    /// the call's result. Emitted after the call whose result is that
+    /// register; every call arm records the collection the callee handed
+    /// back (`vm_ret_coll`), and this insn copies it whole into the local.
+    /// With nothing handed back it assigns the scalar result, as the
+    /// interpreter's blocking assign does.
+    AssignPendingColl(Box<str>, RegId),
 
     Nop,
 
@@ -1175,7 +1175,6 @@ impl Insn {
             // (no rebasing needed beyond the range itself — the base is an
             // absolute slot like CallFreeFunction's).
             RetCollection(_, _) => {}
-            AssignPendingColl(_) => {}
             RangeSelectW(a, b, c, _, _) => {
                 *a += rb;
                 *b += rb;
@@ -1226,11 +1225,24 @@ impl Insn {
             // destination); a static STORE / object construction is
             // non-offsettable (side effects / interpreter re-entry).
             LoadClassStatic(a, _) => *a += rb,
-            LoadProcessLocal(..) | Format(..) | CaseJump(..) | CaseMaskJump(..)
-            | StmtFallback(..) | EvalExprFallback(..) | WaitDelayReg(..) | WaitEdge(..)
-            | CallMethod(..) | CallCollMethod(..) | LoadCollElem(..) | StoreCollElem(..)
-            | CallScopedMethod(..) | StoreClassStatic(..) | ConstructObject(..)
-            | CallStaticScoped(..) | CallFreeFunction(..) => return false,
+            LoadProcessLocal(..)
+            | Format(..)
+            | CaseJump(..)
+            | CaseMaskJump(..)
+            | StmtFallback(..)
+            | EvalExprFallback(..)
+            | WaitDelayReg(..)
+            | WaitEdge(..)
+            | CallMethod(..)
+            | CallCollMethod(..)
+            | LoadCollElem(..)
+            | StoreCollElem(..)
+            | CallScopedMethod(..)
+            | StoreClassStatic(..)
+            | ConstructObject(..)
+            | CallStaticScoped(..)
+            | CallFreeFunction(..)
+            | AssignPendingColl(..) => return false,
         }
         true
     }
@@ -5446,19 +5458,16 @@ impl<'a> BytecodeCompiler<'a> {
 
     /// class-perf collection-return store: the `local_coll_key` of a BARE
     /// local collection (`q`, a queue / unsized dynamic array declared in
-    /// this method body). Used at a blocking-assign site whose RHS is a
-    /// collection-returning call — the pending snapshot is copied to this
-    /// key. Non-bare or non-local targets yield None (those keep the AST
-    /// fallback path).
+    /// this method body): a one-segment Ident with no selects and no scope
+    /// root, whose runtime store is the per-call `@name#id` key. Any other
+    /// target yields None and keeps the AST fallback path.
     fn local_coll_lhs_key(&self, lvalue: &Expression) -> Option<String> {
-        if !self.local_coll_names.contains(&self.ident_bare(lvalue)?) {
-            return None;
-        }
-        // Restrict to a bare one-segment Ident (no selects, no dotted base,
-        // no explicit class scope): the runtime per-call `@name#id` store.
         match &lvalue.kind {
             ExprKind::Ident(h)
-                if h.root.is_none() && h.path.len() == 1 && h.path[0].selects.is_empty() =>
+                if h.root.is_none()
+                    && h.path.len() == 1
+                    && h.path[0].selects.is_empty()
+                    && self.local_coll_names.contains(h.path[0].name.name.as_str()) =>
             {
                 Some(Self::local_coll_key(h.path[0].name.name.as_str()))
             }
@@ -5466,11 +5475,15 @@ impl<'a> BytecodeCompiler<'a> {
         }
     }
 
-    fn ident_bare(&self, e: &Expression) -> Option<String> {
-        match &e.kind {
-            ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
-                Some(h.path[0].name.name.to_string())
-            }
+    /// The result register of a call instruction (the insns whose exec arms
+    /// record a returned collection in `vm_ret_coll`).
+    fn call_insn_dest(insn: &Insn) -> Option<RegId> {
+        match insn {
+            Insn::CallMethod(d, ..)
+            | Insn::CallScopedMethod(d, ..)
+            | Insn::CallFreeFunction(d, ..)
+            | Insn::CallStaticScoped(d, ..)
+            | Insn::CallCollMethod(d, ..) => Some(*d),
             _ => None,
         }
     }
@@ -10724,24 +10737,25 @@ impl<'a> BytecodeCompiler<'a> {
                 };
                 self.pattern_layout = None;
                 if let Some(val_reg) = compiled {
-                    // class-perf collection-return store: `q_local = coll_fn(..)`.
-                    // The callee's body hands its queue/array result through the
-                    // `pending_ret_collection` side channel (RetCollection); a
-                    // COMPILED caller previously declined the whole method on
-                    // this shape (`blocking_target`). Emit AssignPendingColl to
-                    // copy that snapshot whole into the named local collection.
-                    // It must be the instruction IMMEDIATELY following the call:
-                    // the VM loop's call-delegation look-ahead keeps the pending
-                    // alive across exactly this insn, then drops it. A
-                    // collection-returning call in any REQUIRED position is only
-                    // meaningfully stored by a collection local, so this shape
-                    // (bare local lhs + call rhs) selects the store gate.
+                    // class-perf collection-return store (§13.4):
+                    // `q_local = coll_fn(..)`. The callee hands a queue /
+                    // array result through the `pending_ret_collection` side
+                    // channel, which the call's exec arm records in
+                    // `vm_ret_coll`; AssignPendingColl copies it whole into
+                    // the local (or assigns the scalar result when nothing was
+                    // handed back). Only when the value register is the
+                    // result of the LAST call instruction emitted for the
+                    // RHS, so the recorded collection is this call's.
                     if self.method_mode
                         && matches!(rvalue.kind, ExprKind::Call { .. })
-                        && self.local_coll_lhs_key(lvalue).is_some()
+                        && let Some(key) = self.local_coll_lhs_key(lvalue)
+                        && self.insns[start..]
+                            .iter()
+                            .rev()
+                            .find_map(Self::call_insn_dest)
+                            == Some(val_reg)
                     {
-                        let key = self.local_coll_lhs_key(lvalue).unwrap();
-                        self.emit(Insn::AssignPendingColl(key.into_boxed_str()));
+                        self.emit(Insn::AssignPendingColl(key.into_boxed_str(), val_reg));
                         return true;
                     }
                     if width > 0 && !via_new {
@@ -18196,8 +18210,8 @@ impl<'a> BytecodeCompiler<'a> {
                     f(x as RegId);
                 }
             }
-            // class-perf collection-return store: no register inputs.
-            Insn::AssignPendingColl(_) => {}
+            // class-perf collection-return store: reads the call's result.
+            Insn::AssignPendingColl(_, v) => f(*v),
             // Step 9g: a static-property READ has no register inputs.
             Insn::LoadClassStatic(..) => {}
             Insn::StoreClassStatic(_, src) => f(*src),
@@ -20021,9 +20035,9 @@ impl<'a> BytecodeCompiler<'a> {
                 // Collection-return hand-off defines no SSA value (the
                 // result leaves via the side-channel snapshot store).
                 Insn::RetCollection(..) => {}
-                // class-perf collection-return store writes the side-channel
-                // snapshot into a collection (no SSA register defined).
-                Insn::AssignPendingColl(_) => {}
+                // The collection-return store writes a collection, not a
+                // register (no SSA value defined).
+                Insn::AssignPendingColl(..) => {}
                 // `$cast`: the 1/0 result's width is statically 32, but the
                 // register route also re-defines the dest slot at a runtime
                 // width (the frame arm's fit) — drop both from tracking.

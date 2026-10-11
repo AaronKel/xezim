@@ -291,7 +291,7 @@ fn method_tier_threshold() -> u32 {
 /// lowering, register allocation, block layout. Stale entries with an old
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3033;
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3034;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -6602,6 +6602,10 @@ pub struct Simulator {
     /// return arrays/queues). The caller's assign-from-call consumes it with
     /// a whole-collection copy; a plain value return leaves it None.
     pending_ret_collection: Option<String>,
+    /// The collection the last compiled call instruction got back through
+    /// `pending_ret_collection` (None for a plain value return). Only the
+    /// `AssignPendingColl` that may follow the call reads it.
+    vm_ret_coll: Option<String>,
     /// Innermost-first stack of whether each currently-active function returns
     /// a collECTION (queue / unsized dynamic array). The `Return` statement
     /// reads the top to decide whether a LITERAL return value (`return '{...}`,
@@ -12057,6 +12061,7 @@ impl Simulator {
             }),
             timescale_scope_override: None,
             pending_ret_collection: None,
+            vm_ret_coll: None,
             fn_ret_collection_stack: Vec::new(),
             current_scope: String::new(),
             m_block_scope: String::new(),
@@ -30162,12 +30167,8 @@ impl Simulator {
                     debug_assert!(false, "foreach insn in isolated comb exec");
                     break;
                 }
-                Insn::RetCollection(..) => {
+                Insn::RetCollection(..) | Insn::AssignPendingColl(..) => {
                     debug_assert!(false, "ret-collection insn in isolated comb exec");
-                    break;
-                }
-                Insn::AssignPendingColl(_) => {
-                    debug_assert!(false, "collect-store insn in isolated comb exec");
                     break;
                 }
                 Insn::LoadConst(dest, val) => {
@@ -30963,12 +30964,8 @@ impl Simulator {
                     debug_assert!(false, "foreach insn in isolated comb exec");
                     break;
                 }
-                Insn::RetCollection(..) => {
+                Insn::RetCollection(..) | Insn::AssignPendingColl(..) => {
                     debug_assert!(false, "ret-collection insn in isolated comb exec");
-                    break;
-                }
-                Insn::AssignPendingColl(_) => {
-                    debug_assert!(false, "collect-store insn in isolated comb exec");
                     break;
                 }
                 Insn::LoadConst(dest, val) => {
@@ -32413,6 +32410,7 @@ impl Simulator {
                 // specially; the historic path below is unchanged.
                 if let Some(v) = self.vm_try_direct_call(handle, method, base, n) {
                     self.vm_regs[*dest as usize] = v;
+                    self.vm_ret_coll = self.pending_ret_collection.clone();
                     local_count += 1;
                 } else {
                     // class-perf row 2: resolve the callee once more for the
@@ -32443,12 +32441,12 @@ impl Simulator {
                         self.vm_drain_arg_temps(base, n);
                     }
                     self.vm_regs[*dest as usize] = result;
-                    // class-perf collection-return: now the COMPILED CALLER can
-                    // consume a collection result via the immediately-following
-                    // `AssignPendingColl` insn (which this VM loop's call
-                    // delegation look-ahead keeps alive). A collection-returning
-                    // call in any other position cannot be read by the caller,
-                    // so the delegation site drops the pending there.
+                    // class-perf collection-return: only a following
+                    // `AssignPendingColl` can consume a collection result, so
+                    // move it there; a `pending_ret_collection` surviving here
+                    // could only leak into an outer, unrelated assign (the AST
+                    // path's `assign_pending_ret_collection` TAKES it too).
+                    self.vm_ret_coll = self.pending_ret_collection.take();
                     local_count += 1;
                 }
             }
@@ -32474,6 +32472,7 @@ impl Simulator {
                     self.vm_drain_arg_temps(base, n);
                 }
                 self.vm_regs[*dest as usize] = result;
+                self.vm_ret_coll = self.pending_ret_collection.clone();
                 local_count += 1;
             }
             Insn::CallFreeFunction(dest, fname, arg_start, n_args) => 'call: {
@@ -32497,6 +32496,7 @@ impl Simulator {
                     && let Some(v) = self.vm_try_direct_free_fn_call(fd, pkg.as_deref(), base, n)
                 {
                     self.vm_regs[*dest as usize] = v;
+                    self.vm_ret_coll = self.pending_ret_collection.clone();
                     local_count += 1;
                     break 'call;
                 }
@@ -32590,6 +32590,7 @@ impl Simulator {
                     }
                 }
                 self.vm_regs[*dest as usize] = result;
+                self.vm_ret_coll = self.pending_ret_collection.clone();
                 local_count += 1;
             }
             Insn::CallStaticScoped(dest, names, arg_start, n_args) => {
@@ -32608,6 +32609,7 @@ impl Simulator {
                     self.vm_drain_arg_temps(base, n);
                 }
                 self.vm_regs[*dest as usize] = v;
+                self.vm_ret_coll = self.pending_ret_collection.clone();
                 local_count += 1;
             }
             Insn::LoadClassStatic(dest, names) => {
@@ -32763,10 +32765,8 @@ impl Simulator {
                     self.vm_drain_arg_temps(base, n);
                 }
                 self.vm_regs[*dest as usize] = result;
-                // class-perf collection-return: the compiled CALLER consumes a
-                // pending collection store via `AssignPendingColl`; if this
-                // call's result isn't immediately stored, the exec_insns call
-                // delegation look-ahead drops the pending.
+                // class-perf collection-return leak guard (see CallMethod).
+                self.vm_ret_coll = self.pending_ret_collection.take();
                 local_count += 1;
             }
             // Step 9b-ii: element READ of a class member collection
@@ -33060,6 +33060,22 @@ impl Simulator {
                 self.pending_ret_collection = Some(RET_SNAP.to_string());
                 local_count += 1;
             }
+            // §13.4 `q = f(..)` into a bare local collection: the tail of the
+            // interpreter's blocking assign after a call RHS. The collection
+            // the call handed back is copied whole into `q`; with none (a
+            // plain value return) the call's result is assigned instead.
+            Insn::AssignPendingColl(key, val) => {
+                let bare = Self::split_local_coll_marker(key).unwrap_or(key);
+                let span = crate::ast::Span::dummy();
+                let lv = Self::hier_ident_expr(Self::iface_path_segs(bare, span), span);
+                self.pending_ret_collection = self.vm_ret_coll.take();
+                if !self.assign_pending_ret_collection(&lv) {
+                    let v = self.vm_regs[*val as usize].clone();
+                    self.assign_value(&lv, &v);
+                    self.settle_after_proc_write();
+                }
+                local_count += 1;
+            }
             _ => unreachable!("unexpected opcode in class executor"),
         }
         local_count
@@ -33273,39 +33289,9 @@ impl Simulator {
                 | Insn::StoreCollElem(..)
                 | Insn::Cast(..)
                 | Insn::ForeachKeys(..)
-                | Insn::RetCollection(..) => {
+                | Insn::RetCollection(..)
+                | Insn::AssignPendingColl(..) => {
                     local_count += self.exec_class_opcode(&insns[pc]);
-                    // class-perf collection-return store: a callee whose
-                    // body returned a queue leaves `pending_ret_collection`
-                    // set for the COMPILED CALLER to consume. The callee can
-                    // only be meaningfully stored by the immediately-following
-                    // `AssignPendingColl` (`q_local = coll_fn(...)`); any other
-                    // consumer cannot read a collection value, so drop the
-                    // pending here unless that insn follows. This is the
-                    // compiled-mirror of the AST's assign_pending_ret_collection
-                    // (which takes/drops pending on every blocking assign).
-                    if !matches!(insns.get(pc + 1), Some(Insn::AssignPendingColl(_))) {
-                        self.pending_ret_collection = None;
-                    }
-                }
-                // class-perf collection-return store: copy the callee's
-                // `pending_ret_collection` snapshot whole into the named
-                // local collection (bare queue / unsized dynamic array), then
-                // drop it. Mirrors the AST `assign_pending_ret_collection`
-                // byname path; a strain surviving here is a no-op.
-                Insn::AssignPendingColl(key) => {
-                    let Some(src) = self.pending_ret_collection.take() else {
-                        break;
-                    };
-                    let bare = key.strip_prefix('\u{1}').unwrap_or(key);
-                    let dst = self
-                        .dyn_name_lookup(bare)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| bare.to_string());
-                    if dst != src {
-                        self.copy_whole_queue(&dst, &src);
-                    }
-                    self.settle_after_proc_write();
                 }
                 // Advance a compiled foreach: pop the slot's next key into
                 // the var register; `ok` = 0 at exhaustion (loop exit).
