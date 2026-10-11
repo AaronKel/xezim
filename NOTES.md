@@ -253,6 +253,16 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   sub-object members together with the enclosing object (§18.5.9). Reading a
   nested packed-struct field or packed-array element through a class handle
   no longer returns 0. (#255, reported by rharikrishna25)
+* `randomize()` solves `sum()` constraints over elements of 16 bits or more,
+  where the sum wraps at the element width as §7.12.3 requires. A reduction
+  with a `with` clause has the clause expression's width and signedness, and
+  `size() inside {…}` picks a size in the set. (#295, reported by Ganesh-TNL)
+* Packed-struct arrays local to a task or function keep their field layout,
+  so `a[i].f` reads and writes work and `foreach` field constraints solve.
+  (#296, reported by Ganesh-TNL)
+* `std::randomize()` solves dynamic arrays and queues local to automatic
+  tasks jointly with the other variables, and `bit` array elements are
+  solved unsigned. (#297, reported by Ganesh-TNL)
 
 **Usability**
 
