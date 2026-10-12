@@ -92503,7 +92503,7 @@ impl Simulator {
     /// chain or declaring module instance, then the class name. A class of
     /// the compilation unit keeps the object's creation scope.
     fn class_m_root(&self, cname: &str) -> String {
-        let mut path = cname.to_string();
+        let mut path = self.class_source_name(cname).to_string();
         let mut outer = cname.to_string();
         for _ in 0..16 {
             match self
@@ -158401,9 +158401,22 @@ impl Simulator {
     /// (`class p::C`) as the reference simulator prints it.
     fn class_typename_head(&self, base: &str) -> String {
         match self.module.class_decl_pkg.get(base) {
-            Some(pkg) => format!("class {}::{}", pkg, base),
+            Some(pkg) => format!("class {}::{}", pkg, self.class_source_name(base)),
             None => format!("class {}", base),
         }
+    }
+
+    /// The name a package class was declared with. A class whose name is
+    /// also declared in another package is elaborated under its qualified
+    /// spelling `pkg::C` (§26.3, see `xezim_core::pkg_scope`); this strips
+    /// that prefix again for output that names the class.
+    fn class_source_name<'a>(&self, base: &'a str) -> &'a str {
+        self.module
+            .class_decl_pkg
+            .get(base)
+            .and_then(|pkg| base.strip_prefix(pkg.as_str()))
+            .and_then(|rest| rest.strip_prefix("::"))
+            .unwrap_or(base)
     }
 
     /// `class_typename_with_args` from a specialization's raw `#(...)` text.
