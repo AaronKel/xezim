@@ -360,6 +360,8 @@ mod randomize_foreach_accept;
 mod randomize_issues_295_297;
 #[path = "classes/randomize_issues_298_299.rs"]
 mod randomize_issues_298_299;
+#[path = "classes/randomize_issue_301_wide2d.rs"]
+mod randomize_issue_301_wide2d;
 #[path = "classes/randomize_shift_mask_wide_peer.rs"]
 mod randomize_shift_mask_wide_peer;
 #[path = "classes/randomize_inside_range.rs"]

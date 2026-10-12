@@ -6460,6 +6460,11 @@ pub struct Simulator {
     /// for `rand` class-handle members (a cyclic object graph would otherwise
     /// recurse forever).
     randomize_depth: usize,
+    /// Failed randomize() calls reported so far, per class or
+    /// `std::randomize` call site (`rand_fail_warn`).
+    rand_fail_reports: HashMap<String, u32>,
+    /// Whether the `XEZIM_RAND_DIAG` hint has been printed.
+    rand_fail_hinted: bool,
     /// One work/time budget shared by an outer randomize call and every
     /// recursive rand-object solve it starts.
     randomize_budget_depth: usize,
@@ -12010,6 +12015,8 @@ impl Simulator {
             constraint_mode_disabled: HashMap::default(),
             static_constraint_disabled: HashSet::default(),
             randomize_depth: 0,
+            rand_fail_reports: HashMap::default(),
+            rand_fail_hinted: false,
             randomize_budget_depth: 0,
             randomize_budget_remaining: 0,
             randomize_budget_deadline: None,
@@ -67774,7 +67781,16 @@ impl Simulator {
         if rev.is_empty() {
             return None;
         }
-        let (handle, prop) = match &cur.kind {
+        let (handle, prop) = self.prop_chain_root(cur)?;
+        rev.reverse();
+        Some((handle, prop, rev))
+    }
+
+    /// The object and member a plain or handle-qualified member reference
+    /// names (`w`, `o.w`, `y.a.w`, `expr.w`), for the packed-property
+    /// select paths.
+    fn prop_chain_root(&mut self, cur: &Expression) -> Option<(usize, String)> {
+        Some(match &cur.kind {
             ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
                 let name = &h.path[0].name.name;
                 if self
@@ -67805,6 +67821,26 @@ impl Simulator {
                 }
                 (obj, h.path[1].name.name.clone())
             }
+            // `y.a.w[i][j]`: a member of an object reached through a chain
+            // of handle members.
+            ExprKind::Ident(h)
+                if h.root.is_none()
+                    && h.path.len() > 2
+                    && h.path.iter().all(|s| s.selects.is_empty()) =>
+            {
+                let mut obj = self.eval_ident_handle(&h.path[0].name.name)?;
+                for seg in &h.path[1..h.path.len() - 1] {
+                    if obj == 0 || obj >= self.heap.len() {
+                        return None;
+                    }
+                    self.prop_class_type(obj, &seg.name.name)?;
+                    obj = self.member_handle(obj, &seg.name.name)?;
+                }
+                if obj == 0 || obj >= self.heap.len() {
+                    return None;
+                }
+                (obj, h.path.last()?.name.name.clone())
+            }
             ExprKind::MemberAccess { expr: base, member } => {
                 let obj = self.eval_handle_expr(base)?;
                 if obj == 0 || obj >= self.heap.len() {
@@ -67813,9 +67849,118 @@ impl Simulator {
                 (obj, member.name.clone())
             }
             _ => return None,
+        })
+    }
+
+    /// The packed value `prop` of `h` and its indices `idx_exprs` select
+    /// into: the property itself when it is a multi-dimensional packed
+    /// array, or (§7.4) an element of a fixed unpacked array property whose
+    /// element type is one (`bit [3:0][7:0] arr [3]`, `arr[i][2]`), the
+    /// unpacked indices consumed. Returns the value, its packed dimensions
+    /// and the packed indices.
+    fn class_packed_operand(
+        &mut self,
+        h: usize,
+        prop: &str,
+        idx_exprs: &[&Expression],
+    ) -> Option<(Value, Vec<(i64, i64)>, Vec<Value>)> {
+        if let Some(dims) = self.class_prop_packed_dims(h, prop) {
+            let base = self.read_member_value(h, prop)?;
+            let idx = idx_exprs.iter().map(|ie| self.eval_expr(ie)).collect();
+            return Some((base, dims, idx));
+        }
+        if idx_exprs.is_empty() {
+            return None;
+        }
+        let (udims, _) = self.fixed_foreach_dims(h, prop)?;
+        if idx_exprs.len() < udims.len() {
+            return None;
+        }
+        let mut cn = self
+            .heap
+            .get(h)
+            .and_then(|o| o.as_ref())
+            .map(|i| i.class_name.clone())?;
+        let dt = loop {
+            let cd = self.module.classes.get(&cn)?;
+            if let Some(dt) = cd.property_types.get(prop) {
+                break dt.clone();
+            }
+            cn = cd.extends.clone()?;
         };
-        rev.reverse();
-        Some((handle, prop, rev))
+        let pdims = super::elaborate::packed_full_dims_chained(
+            &dt,
+            &self.module.parameters,
+            &self.module.typedef_types,
+        )?;
+        if pdims.len() < 2 {
+            return None;
+        }
+        let idx: Vec<Value> = idx_exprs.iter().map(|ie| self.eval_expr(ie)).collect();
+        let mut sfx = String::new();
+        for v in &idx[..udims.len()] {
+            sfx.push_str(&format!("[{}]", v.to_i64()?));
+        }
+        let elem = self.class_elem_load(h, prop, &sfx)?;
+        Some((elem, pdims, idx[udims.len()..].to_vec()))
+    }
+
+    /// §7.4.1/§11.5.1: a part-select of a multi-dimensional packed class
+    /// property, after any element selects (`w[5][8:5]`, `w[6:5]`,
+    /// `y.a.w[i][4 +: 2]`): the labels of the next dimension, each
+    /// spanning one element of it. None when `base` is not such a
+    /// property.
+    fn class_packed_part_select(
+        &mut self,
+        base: &Expression,
+        kind: crate::ast::expr::RangeKind,
+        left: &Expression,
+        right: &Expression,
+    ) -> Option<Value> {
+        let mut idx_exprs: Vec<&Expression> = Vec::new();
+        let mut cur = base;
+        while let ExprKind::Index { expr: b, index } = &cur.kind {
+            idx_exprs.push(index);
+            cur = b;
+        }
+        idx_exprs.reverse();
+        let (h, prop) = self.prop_chain_root(cur)?;
+        let (base_v, dims, idx) = self.class_packed_operand(h, &prop, &idx_exprs)?;
+        let &(dl, dr) = dims.get(idx.len())?;
+        let l = self.eval_expr(left);
+        let r = self.eval_expr(right);
+        let count = (dl - dr).unsigned_abs() + 1;
+        let ew = Self::packed_chain_width(base_v.width as u64, &dims, idx.len() + 1);
+        let (first, last) = match (l.to_i64(), r.to_i64()) {
+            (Some(a), Some(b)) if !l.has_xz() && !r.has_xz() => match kind {
+                crate::ast::expr::RangeKind::Constant => (a, b),
+                crate::ast::expr::RangeKind::IndexedUp => (a, a + b - 1),
+                crate::ast::expr::RangeKind::IndexedDown => (a - b + 1, a),
+            },
+            _ => (i64::MIN, i64::MIN),
+        };
+        let n = (first - last).unsigned_abs() + 1;
+        let out_w = (n * ew) as u32;
+        let Some((blsb, _)) = Self::packed_chain_slice(base_v.width as u64, &dims, &idx) else {
+            return Some(Value::new(out_w));
+        };
+        let lo_b = dl.min(dr);
+        let slot = |k: i64| -> Option<u64> {
+            let off = k - lo_b;
+            if off < 0 || off as u64 >= count {
+                return None;
+            }
+            Some(if dl >= dr {
+                off as u64
+            } else {
+                count - 1 - off as u64
+            })
+        };
+        let (Some(a), Some(b)) = (slot(first), slot(last)) else {
+            return Some(Value::new(out_w));
+        };
+        let lsb = blsb + a.min(b) * ew;
+        Some(base_v.range_select((lsb + out_w as u64 - 1) as usize, lsb as usize))
     }
 
     /// Bit slice (lsb, width) addressed by an index chain into a packed
@@ -74656,6 +74801,24 @@ impl Simulator {
             ExprKind::Index { expr, index } => {
                 // Element select on a packed multi-dimensional CLASS property.
                 if let Some((h, prop, idx_exprs)) = self.prop_index_chain_parts(expr, index) {
+                    // §7.4: an element of an unpacked array property of
+                    // multi-dimensional packed elements, then packed selects.
+                    if idx_exprs.len() >= 2
+                        && !self.class_prop_packed_dims(h, &prop).is_some()
+                        && let Some((ev, pd, pidx)) =
+                            self.class_packed_operand(h, &prop, &idx_exprs)
+                        && !pidx.is_empty()
+                        && pidx.len() <= pd.len()
+                    {
+                        return match Self::packed_chain_slice(ev.width as u64, &pd, &pidx) {
+                            Some((lsb, w)) => ev.range_select((lsb + w - 1) as usize, lsb as usize),
+                            None => Value::new(Self::packed_chain_width(
+                                ev.width as u64,
+                                &pd,
+                                pidx.len(),
+                            ) as u32),
+                        };
+                    }
                     if let Some(dims) = self.class_prop_packed_dims(h, &prop) {
                         if idx_exprs.len() <= dims.len() {
                             let idx: Vec<Value> =
@@ -75731,6 +75894,13 @@ impl Simulator {
                 kind,
                 ..
             } => {
+                // A module-level plain name is never a class property.
+                let plain = matches!(&expr.kind, ExprKind::Ident(h) if h.path.len() == 1);
+                if (!plain || !self.this_stack.is_empty())
+                    && let Some(v) = self.class_packed_part_select(expr, *kind, left, right)
+                {
+                    return v;
+                }
                 // Unpacked array slice: concatenate elements
                 if let ExprKind::Ident(hier) = &expr.kind {
                     let name = self.resolve_hier_name(hier);
@@ -104575,6 +104745,9 @@ impl Simulator {
                             // first, then the elements (see
                             // `std_randomize_sized`).
                             if let Some(ok) = self.std_randomize_sized(constraints, &targets) {
+                                if !ok {
+                                    self.rand_fail_warn_std(constraints);
+                                }
                                 return Value::from_u64(ok as u64, 32);
                             }
                             let mut satisfied = false;
@@ -104749,6 +104922,9 @@ impl Simulator {
                             // 1 unconditionally reported success for an
                             // unsatisfiable set (`v >= 100; v <= 5;`) and for a
                             // narrow band the i64 interval solver cannot reach.
+                            if !satisfied {
+                                self.rand_fail_warn_std(constraints);
+                            }
                             return Value::from_u64(if satisfied { 1 } else { 0 }, 32);
                         }
                     }
@@ -142231,6 +142407,36 @@ impl Simulator {
         Some(key)
     }
 
+    /// Whether the collection element `key` (`<h>#m[i]`, or `m[i]` of
+    /// `handle`) belongs to a `rand` member of its object's class.
+    fn coll_key_is_rand(&self, handle: usize, key: &str) -> bool {
+        let (h, rest) = match key.split_once('#') {
+            Some((h, r)) => (h.parse::<usize>().unwrap_or(handle), r),
+            None => (handle, key),
+        };
+        self.prop_is_rand(h, rest.split('[').next().unwrap_or(""))
+    }
+
+    /// Whether `prop` is declared `rand`/`randc` in the class of `h` or a
+    /// base class.
+    fn prop_is_rand(&self, h: usize, prop: &str) -> bool {
+        let mut cur = self
+            .heap
+            .get(h)
+            .and_then(|o| o.as_ref())
+            .map(|i| i.class_name.clone());
+        while let Some(cn) = cur {
+            let Some(cd) = self.module.classes.get(&cn) else {
+                return false;
+            };
+            if cd.random_properties.contains(prop) {
+                return true;
+            }
+            cur = cd.extends.clone();
+        }
+        false
+    }
+
     fn coll_elem_expr_key(&mut self, e: &Expression) -> Option<String> {
         if let Some(k) = self.class_array_of_coll_key(e) {
             return Some(k);
@@ -145339,6 +145545,8 @@ impl Simulator {
         // below cannot honour (see `rand_order_sensitive`) goes to the joint
         // solver first; the trials stay the fallback.
         let mut trials = 1000;
+        // The joint solver proved that the set has no solution.
+        let mut csp_unsat = false;
         let has_soft = Self::rand_has_soft(&constraints);
         if csp_ok
             && rand_obj_props.is_empty()
@@ -145376,7 +145584,10 @@ impl Simulator {
                 }
                 out => {
                     match out {
-                        rand_csp::CspOutcome::Unsat => trials = 0,
+                        rand_csp::CspOutcome::Unsat => {
+                            trials = 0;
+                            csp_unsat = true;
+                        }
                         rand_csp::CspOutcome::NotApplicable => csp_ok = false,
                         _ => {}
                     }
@@ -146720,6 +146931,7 @@ impl Simulator {
                                 inst.properties.insert(name, val);
                             }
                         }
+                        csp_unsat = true;
                         break;
                     }
                     rand_csp::CspOutcome::NotApplicable => csp_ok = false,
@@ -146802,6 +147014,11 @@ impl Simulator {
                 &constraint_src_files,
                 diag,
             );
+        }
+        // §18.6.3: say why the outermost call returns 0 (a budget overrun
+        // has already been reported).
+        if self.randomize_depth == 0 && !self.randomize_budget_exhausted {
+            self.rand_fail_warn(&class_name, &constraints, &constraint_src_files, csp_unsat);
         }
         // §18.4: randomize() failed — no value was actually produced, so give
         // every tentatively-drawn randc value back to its permutation cycle.
@@ -149566,6 +149783,11 @@ impl Simulator {
                         let Some(key) = self.coll_elem_expr_key(side) else {
                             continue;
                         };
+                        // §18.3: an element of a state collection
+                        // (`x != q[i]`, `q` not rand) is never assigned.
+                        if !self.coll_key_is_rand(handle, &key) {
+                            continue;
+                        }
                         let w = self
                             .read_coll_elem(&key)
                             .map(|v| v.width)
@@ -149908,7 +150130,31 @@ impl Simulator {
                     .fixed_foreach_dims(handle, &arr_name)
                     .or_else(|| self.packed_prop_foreach_dims(handle, &arr_name))
                 else {
-                    return false;
+                    // §18.5.8.1: a loop over a state vector (`bit [0:3]
+                    // it;`) only supplies indices: solve the body once per
+                    // index, as an unrolled loop would.
+                    if rand_set.contains(&arr_name) || self.prop_is_rand(handle, &arr_name) {
+                        return false;
+                    }
+                    let names: Vec<String> = vars
+                        .iter()
+                        .filter_map(|v| v.as_ref().map(|id| id.name.clone()))
+                        .collect();
+                    let Some(dims) = self.state_foreach_dims(handle, array, &arr_name, names.len())
+                    else {
+                        return false;
+                    };
+                    if names.is_empty() || names.len() > dims.len() {
+                        return false;
+                    }
+                    let mut changed = false;
+                    self.for_each_index(&names, &dims, |sim| {
+                        if sim.solve_forced(handle, body, rand_set) {
+                            changed = true;
+                        }
+                        None::<()>
+                    });
+                    return changed;
                 };
                 // One loop variable per leading dimension (§12.7.3).
                 let idx_names: Vec<String> = vars
@@ -150701,9 +150947,22 @@ impl Simulator {
         handle: usize,
         array: &Expression,
     ) -> Option<Vec<(i64, i64)>> {
-        use crate::ast::types::UnpackedDimension as UD;
         let (root, members) = Self::foreach_member_chain(array)?;
-        let mut level = self.class_prop_struct(handle, &root)?;
+        self.struct_chain_foreach_dims(handle, &root, &members)
+    }
+
+    /// The loop bounds of the struct-member chain `root.m1…mn` of `handle`
+    /// (`root` a struct property): the last member's fixed unpacked
+    /// dimensions, or, with none, its packed dimensions when it is a
+    /// multi-dimensional packed array (§7.4.1).
+    fn struct_chain_foreach_dims(
+        &mut self,
+        handle: usize,
+        root: &str,
+        members: &[String],
+    ) -> Option<Vec<(i64, i64)>> {
+        use crate::ast::types::UnpackedDimension as UD;
+        let mut level = self.class_prop_struct(handle, root)?;
         let (last, path) = members.split_last()?;
         for m in path {
             let (dt, dims) = Self::struct_member_decl(&level, m)?;
@@ -150715,9 +150974,15 @@ impl Simulator {
                 _ => return None,
             }
         }
-        let (_, dims) = Self::struct_member_decl(&level, last)?;
+        let (dt, dims) = Self::struct_member_decl(&level, last)?;
         if dims.is_empty() {
-            return None;
+            let params = self.instance_param_scope(handle);
+            let pd = crate::compiler::elaborate::packed_full_dims_chained(
+                &dt,
+                &params,
+                &self.module.typedef_types,
+            )?;
+            return Some(pd.iter().map(|&(l, r)| (l.min(r), l.max(r))).collect());
         }
         let mut out = Vec::with_capacity(dims.len());
         for d in &dims {
@@ -150738,6 +151003,37 @@ impl Simulator {
             }
         }
         Some(out)
+    }
+
+    /// The loop bounds (lo, hi) of every dimension of `root.m1…mn` when
+    /// `root` holds a class handle (as may the members after it) and the
+    /// rest names a fixed unpacked or a packed multi-dimensional array of
+    /// that object, or a member of one of its struct properties.
+    fn sub_member_foreach_dims(
+        &mut self,
+        handle: usize,
+        root: &str,
+        members: &[String],
+    ) -> Option<Vec<(i64, i64)>> {
+        self.prop_class_type(handle, root)?;
+        let mut h = self.member_handle(handle, root)?;
+        let mut rest = members;
+        while rest.len() > 1 && self.prop_class_type(h, &rest[0]).is_some() {
+            h = self.member_handle(h, &rest[0])?;
+            rest = &rest[1..];
+        }
+        if !matches!(self.heap.get(h), Some(Some(_))) {
+            return None;
+        }
+        match rest {
+            [last] => self
+                .fixed_foreach_dims(h, last)
+                .or_else(|| self.packed_prop_foreach_dims(h, last))
+                .map(|d| d.0),
+            // A member of a struct property of the sub-object (`a.s.f`).
+            [first, more @ ..] => self.struct_chain_foreach_dims(h, first, more),
+            [] => None,
+        }
     }
 
     /// The `(root, members)` of a foreach array that names a member of a
@@ -151083,7 +151379,12 @@ impl Simulator {
         // An array MEMBER of a struct property (`foreach (u.arr[i])`).
         if Self::foreach_member_chain(array).is_some() {
             if let Some(dims) = self.member_foreach_dims(handle, array) {
-                if idx_names.len() != dims.len() || Self::foreach_body_unmodeled(body) {
+                // §12.7.3: fewer loop variables than dimensions iterate the
+                // leading ones.
+                if vars.iter().any(|v| v.is_none())
+                    || idx_names.len() > dims.len()
+                    || Self::foreach_body_unmodeled(body)
+                {
                     return None;
                 }
                 let body = (**body).clone();
@@ -151092,6 +151393,24 @@ impl Simulator {
                 });
                 return Some(failed.is_none());
             }
+        }
+        // §18.5.9: a loop over an array member of a rand sub-object
+        // (`foreach (a.w[i])`, `w` unpacked or packed): every element the
+        // loop names is checked.
+        if let Some((root, members)) = Self::foreach_member_chain(array)
+            && let Some(dims) = self.sub_member_foreach_dims(handle, &root, &members)
+        {
+            if vars.iter().any(|v| v.is_none())
+                || idx_names.len() > dims.len()
+                || Self::foreach_body_unmodeled(body)
+            {
+                return None;
+            }
+            let body = (**body).clone();
+            let failed = self.for_each_index(&idx_names, &dims, |sim| {
+                (!sim.item_holds(handle, &body)).then_some(())
+            });
+            return Some(failed.is_none());
         }
         let arr_name = Self::foreach_base_name(array)?;
         let dims = match self.fixed_foreach_dims(handle, &arr_name) {
