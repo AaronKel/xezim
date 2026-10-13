@@ -35007,6 +35007,11 @@ impl Simulator {
                             self.packed_store(eid, bv, bx);
                         } else {
                             let mut val = self.vm_regs[*val_reg as usize].resize_for_assign(*width);
+                            // §6.11.2/§10.7: a 2-state element (`int a[4]`)
+                            // stores x/z bits of the RHS as 0.
+                            if self.signal_two_state[eid] {
+                                val = val.to_two_state();
+                            }
                             val.is_signed = self.signal_signed[eid];
                             if self.signal_table[eid] != val {
                                 write_sig!(self, eid, val);
@@ -64747,6 +64752,12 @@ impl Simulator {
                         } else {
                             val.resize(width)
                         };
+                        // §6.11.2/§10.7: a 2-state element (`int a[4]`)
+                        // stores an x or z bit of the RHS as 0. Stored
+                        // verbatim, `a[k] = a[k] * 3 + x_bit` kept x.
+                        if self.signal_two_state.get(id).copied().unwrap_or(false) {
+                            resized = resized.to_two_state();
+                        }
                         // Adopt the element's declared signedness — a
                         // signed RHS (e.g. an `integer`) stored verbatim
                         // made `reg [15:0] a[]` elements read as signed.
@@ -64772,6 +64783,10 @@ impl Simulator {
                     } else {
                         val.resize(width)
                     };
+                    // §6.11.2: a 2-state element takes x/z bits as 0.
+                    if self.signal_two_state.get(id).copied().unwrap_or(false) {
+                        resized = resized.to_two_state();
+                    }
                     resized.is_signed = self.signal_signed[id];
                     let changed = self.signal_table[id] != resized;
                     if changed {
@@ -70216,6 +70231,10 @@ impl Simulator {
                 } else {
                     v.resize(w)
                 };
+                // §6.24.1: a 2-state target type takes x/z bits as 0.
+                if super::elaborate::is_type_two_state_resolved(&dt, &self.module.typedef_types) {
+                    out = out.to_two_state();
+                }
                 out.is_signed = super::elaborate::is_type_signed(&dt);
                 out
             }
@@ -70320,6 +70339,13 @@ impl Simulator {
                         } else {
                             inner_v.resize(w)
                         };
+                        // §6.24.1: a 2-state typedef target takes x/z as 0.
+                        if super::elaborate::is_type_two_state_resolved(
+                            &dt,
+                            &self.module.typedef_types,
+                        ) {
+                            out = out.to_two_state();
+                        }
                         out.is_signed = super::elaborate::is_type_signed(&dt);
                         return out;
                     }

@@ -13740,6 +13740,12 @@ impl<'a> BytecodeCompiler<'a> {
                         return Some(r);
                     }
                     self.emit(Insn::Resize(r, w));
+                    // §6.24.1: the cast value is what a variable of the
+                    // target type holds, so a 2-state target (`int'`,
+                    // `bit [7:0]'`) maps x/z bits to 0.
+                    if crate::compiler::elaborate::is_type_two_state(&dt) {
+                        self.emit(Insn::DropXz(r));
+                    }
                     if crate::compiler::elaborate::is_type_signed(&dt) {
                         self.emit(Insn::SetSigned(r));
                     } else {
