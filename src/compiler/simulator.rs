@@ -61091,6 +61091,10 @@ impl Simulator {
                 // re-dispatches (and demotes) exactly as before.
                 let mut ts_fast = false;
                 let mut ts_native_bailed = false;
+                // A native x-read bail keeps its write records: the stores it
+                // made before the bail are already in the table, and the
+                // executor's re-run below finds them unchanged.
+                let mut ts_keep_recs = false;
                 #[cfg(feature = "jit")]
                 if self.proc_depth == 0 && self.ts_jit_on {
                     if let Some(Some(f)) = self.ts_jit_fns.get(eidx) {
@@ -61115,8 +61119,13 @@ impl Simulator {
                                     }
                                 }
                                 1 => {
-                                    self.prof_ts_bail_xread += 1;
-                                    ts_native_bailed = true;
+                                    // An x read: the executor below re-runs
+                                    // the stream and hands it to the x-plane
+                                    // executor, as for a stream with no native
+                                    // code, instead of the four-state VM. The
+                                    // native code has no `SaveSig`, so nothing
+                                    // needs restoring first.
+                                    ts_keep_recs = true;
                                 }
                                 _ => {
                                     self.prof_ts_bail_abort += 1;
@@ -61130,7 +61139,9 @@ impl Simulator {
                 if !ts_fast && !ts_native_bailed && self.proc_depth == 0 {
                     let arena_kind = self.ts_hdr.get(eidx).map_or(0, |h| h.kind());
                     if arena_kind != 0 {
-                        self.ts_rec_n = 0;
+                        if !ts_keep_recs {
+                            self.ts_rec_n = 0;
+                        }
                         self.ts_direct_writes = true;
                         let ok = self.ts_guard_and_exec_arena(eidx);
                         self.ts_direct_writes = false;
@@ -61170,7 +61181,9 @@ impl Simulator {
                         }
                     } else if let Some(CombPlan::Ts(ts)) = self.comb_plan.get(eidx) {
                         let tp: *const super::bytecode::TwoStateBlock = std::sync::Arc::as_ptr(ts);
-                        self.ts_rec_n = 0;
+                        if !ts_keep_recs {
+                            self.ts_rec_n = 0;
+                        }
                         self.ts_direct_writes = true;
                         self.ts_cur_eidx = eidx as u32;
                         let ok = self.ts_guard_and_exec(unsafe { &*tp });
