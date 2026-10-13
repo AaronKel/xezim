@@ -64057,9 +64057,12 @@ impl Simulator {
                         || self.signals.contains_key(&elem)
                         || (may_create && base.contains('.'))
                     {
+                        // A block-local fixed array's element is fitted to
+                        // its declared type (see `fit_block_local_array_elem`).
+                        let fitted = self.fit_block_local_array_elem(&base, &elem, val.clone());
                         let prev = self.get_signal_value_by_name(&elem);
-                        let changed = prev.as_ref() != Some(val);
-                        self.set_signal_value_by_name(&elem, val.clone());
+                        let changed = prev.as_ref() != Some(&fitted);
+                        self.set_signal_value_by_name(&elem, fitted);
                         return changed;
                     }
                     // An element of a CLASS-PROPERTY collection of structs
@@ -64174,7 +64177,7 @@ impl Simulator {
             // which case the value is stored as-is (unchanged).
             let mut fitted = match self.assoc_elem_width(&an) {
                 Some(w) if w != val.width && !val.is_real => val.resize_for_assign(w),
-                _ => val.clone(),
+                _ => self.fit_block_local_array_elem(&an, &elem_name, val.clone()),
             };
             // The element takes its declared signedness, not the RHS's
             // (`byte m[int]; m[k] = 8'hF0` is -16).
@@ -64817,6 +64820,9 @@ impl Simulator {
                     }
                     _ => val.clone(),
                 };
+                if !elem_is_string {
+                    fitted = self.fit_block_local_array_elem(&name, &elem_name, fitted);
+                }
                 // The element takes its declared signedness, not the RHS's
                 // (`bit [3:0] aa[int]; aa[k] = 9` is 9, not -7).
                 if let Some(sg) = self.assoc_elem_signed(&name).filter(|_| {
@@ -101685,6 +101691,47 @@ impl Simulator {
         Some(v)
     }
 
+    /// §6.21/§10.7: an element of a FIXED unpacked array declared in a
+    /// procedural block has no slot in the typed signal table; its declared
+    /// width is recorded per element (`exec_stmt_var_decl`). It is assigned
+    /// like any variable of the element type: fitted to that width, with the
+    /// declared signedness and, for a 2-state type, x/z bits as 0. Stored at
+    /// the RHS's own size, `logic [1:0] s[4] = '{0,1,2,3}` held 32-bit signed
+    /// ints, so `s[2]` read -2 and `s[2] == 2` was false. Anything else (an
+    /// associative or dynamic collection, a string or real element) is
+    /// returned unchanged.
+    fn fit_block_local_array_elem(&self, name: &str, elem_name: &str, val: Value) -> Value {
+        if val.is_real || self.is_associative_array(name) || self.is_string_collection(name) {
+            return val;
+        }
+        let Some(&w) = self.widths.get(elem_name).filter(|&&w| w > 0) else {
+            return val;
+        };
+        let Some(dt) = self.module.var_decl_types.get(name) else {
+            return val;
+        };
+        // Integral element types only: a class handle or struct element
+        // keeps its own representation.
+        if !matches!(
+            super::elaborate::resolve_typedef_chain(dt, &self.module.typedef_types),
+            crate::ast::types::DataType::IntegerVector { .. }
+                | crate::ast::types::DataType::IntegerAtom { .. }
+                | crate::ast::types::DataType::Enum(_)
+        ) {
+            return val;
+        }
+        let mut fitted = if val.width != w {
+            val.resize_for_assign(w)
+        } else {
+            val
+        };
+        if super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types) {
+            fitted = fitted.to_two_state();
+        }
+        fitted.is_signed = self.type_is_signed_concrete(dt);
+        fitted
+    }
+
     fn assoc_elem_width(&self, name: &str) -> Option<u32> {
         if let Some(&w) = self.module.assoc_elem_widths.get(name) {
             return Some(w);
@@ -115029,6 +115076,21 @@ impl Simulator {
         };
         if elem_w > 0 && !v.is_real && v.width != elem_w {
             v = v.resize_for_assign(elem_w);
+        }
+        // §10.9.2/§10.7: the item is assigned to an element of the declared
+        // type, so it takes that type's signedness and (2-state) drops x/z.
+        // A block-local `logic [1:0] s[4] = '{0,1,2,3}` kept the items' `int`
+        // signedness, so `s[2]` read -2.
+        if !v.is_real
+            && matches!(
+                super::elaborate::resolve_typedef_chain(dt, &self.module.typedef_types),
+                DataType::IntegerVector { .. } | DataType::IntegerAtom { .. }
+            )
+        {
+            if super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types) {
+                v = v.to_two_state();
+            }
+            v.is_signed = self.type_is_signed_concrete(dt);
         }
         // A `real` leaf keeps its real value even when the element signal was
         // never flagged real (array elements are synthesized without the flag);
