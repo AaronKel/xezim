@@ -28,11 +28,18 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// Run `src` with top `top`: its `T|` lines, exit code and stderr.
 fn run(tag: &str, src: &str, top: &str) -> (Vec<String>, i32, String) {
+    run_with(tag, src, top, &[])
+}
+
+/// `run` with extra command-line flags.
+fn run_with(tag: &str, src: &str, top: &str, flags: &[&str]) -> (Vec<String>, i32, String) {
     let d = scratch(tag);
     std::fs::write(d.join("tb.sv"), src).unwrap();
     let out = Command::new(xezim())
         .current_dir(&d)
+        .args(flags)
         .args(["-s", top, "tb.sv"])
+        .env_remove("XEZIM_RELAX_DRIVER_CONFLICTS")
         .output()
         .expect("run xezim");
     let _ = std::fs::remove_dir_all(&d);
@@ -605,10 +612,11 @@ endmodule
 /// assigns (§6.5), a continuous assign plus a procedural write (§6.5), a
 /// variable of an `always_comb`/`always_latch` written by another process
 /// (§9.2.2.2), of an `always_ff` written by a non-`always_ff` process
-/// (§9.2.2.4) — each per written bit.
+/// (§9.2.2.4) — each per written bit. `--relax-driver-conflicts` turns each
+/// into a warning; none of these shapes is a hard error.
 #[test]
 fn illegal_variable_drivers_are_compile_errors() {
-    let cases: [(&str, &str); 13] = [
+    let cases: [(&str, &str, Option<&str>); 13] = [
         (
             "v1",
             r#"
@@ -619,6 +627,7 @@ module v1;
   initial begin a = 0; b = 1; #1 $display("T|v=%b", v); end
 endmodule
 "#,
+            None,
         ),
         (
             "v2",
@@ -629,6 +638,7 @@ module v2;
   initial begin a = 0; #1 v = 1; #1 $display("T|v=%b", v); end
 endmodule
 "#,
+            Some("T|v=1"),
         ),
         (
             "v3",
@@ -640,6 +650,7 @@ module v3;
   initial begin #1 clk = 1; #1 $display("T|v=%b", v); end
 endmodule
 "#,
+            Some("T|v=0"),
         ),
         (
             "v6",
@@ -650,6 +661,7 @@ module v6;
   initial begin #1 v = 1; #1 $display("T|v=%b", v); end
 endmodule
 "#,
+            Some("T|v=1"),
         ),
         (
             "v8",
@@ -662,6 +674,7 @@ module v8;
   initial begin a = 0; b = 1; #1 $display("T|overlap v=%b", v); end
 endmodule
 "#,
+            Some("T|overlap v=1010"),
         ),
         (
             "w1",
@@ -672,6 +685,7 @@ module w1;
   initial begin #1 v = 0; #1 $display("T|v=%b", v); end
 endmodule
 "#,
+            Some("T|v=0"),
         ),
         (
             "w2",
@@ -682,6 +696,7 @@ module w2;
   initial begin v = 0; #1 clk = 1; #1 $display("T|v=%b", v); end
 endmodule
 "#,
+            Some("T|v=1"),
         ),
         (
             "w6",
@@ -693,6 +708,7 @@ module w6;
   initial begin #1 v[0] = 0; #1 $display("T|v=%b", v); end
 endmodule
 "#,
+            Some("T|v=x0"),
         ),
         (
             "w7",
@@ -704,6 +720,7 @@ module w7;
   initial #1 $display("T|v=%b", v);
 endmodule
 "#,
+            None,
         ),
         (
             "w8",
@@ -715,6 +732,7 @@ module w8;
   initial #1 $display("T|v=%b", v);
 endmodule
 "#,
+            Some("T|v=1"),
         ),
         (
             "w10",
@@ -727,6 +745,7 @@ module w10;
   initial #1 $display("T|v=%b", v);
 endmodule
 "#,
+            Some("T|v=1111"),
         ),
         (
             "w11",
@@ -739,6 +758,7 @@ module w11;
   initial begin #1 clk = 1; #1 $display("T|v=%h", v); end
 endmodule
 "#,
+            Some("T|v=1"),
         ),
         (
             "w13",
@@ -752,16 +772,33 @@ module w13;
   initial #1 $display("T|v=%b", v);
 endmodule
 "#,
+            Some("T|v=01011111"),
         ),
     ];
-    for (top, src) in cases {
+    for (top, src, relaxed) in cases {
         let (lines, code, stderr) = run(top, src, top);
         assert_eq!(code, 1, "{top}: exit code, stderr:\n{stderr}");
         assert!(lines.is_empty(), "{top}: simulated anyway: {lines:?}");
         assert!(
-            stderr.contains("Variable 'v"),
+            stderr.contains("Variable 'v") && stderr.contains("--relax-driver-conflicts"),
             "{top}: no driver diagnostic in:\n{stderr}"
         );
+        // Every shape is one the reference reports as a SUPPRESSIBLE error,
+        // so `--relax-driver-conflicts` downgrades it to a warning and the
+        // design runs, printing what the reference prints with the error
+        // suppressed. `None`: the two writers race (two continuous assigns,
+        // two always_comb blocks on one variable) and the surviving value is
+        // implementation-defined, so only the run itself is checked.
+        let (lines, code, stderr) = run_with(top, src, top, &["--relax-driver-conflicts"]);
+        assert_eq!(code, 0, "{top}: relaxed exit code, stderr:\n{stderr}");
+        assert!(
+            stderr.contains("[xezim][warning] Variable 'v"),
+            "{top}: no relaxed warning in:\n{stderr}"
+        );
+        match relaxed {
+            Some(want) => assert_eq!(lines, [want], "{top}: relaxed output"),
+            None => assert_eq!(lines.len(), 1, "{top}: relaxed output {lines:?}"),
+        }
     }
 }
 
@@ -944,4 +981,31 @@ endmodule
     );
     assert_eq!(code, 1);
     assert!(lines.is_empty());
+}
+
+/// `XEZIM_RELAX_DRIVER_CONFLICTS=1` is the same switch as the flag: the
+/// common `initial v = 0;` beside `always_ff ... v <= ...;` runs with a warning.
+#[test]
+fn relax_driver_conflicts_env_var() {
+    let src = r#"
+module w2;
+  logic clk = 0, v;
+  always_ff @(posedge clk) v <= 1;
+  initial begin v = 0; #1 clk = 1; #1 $display("T|v=%b", v); end
+endmodule
+"#;
+    let d = scratch("relax_env");
+    std::fs::write(d.join("tb.sv"), src).unwrap();
+    let out = Command::new(xezim())
+        .current_dir(&d)
+        .args(["-s", "w2", "tb.sv"])
+        .env("XEZIM_RELAX_DRIVER_CONFLICTS", "1")
+        .output()
+        .expect("run xezim");
+    let _ = std::fs::remove_dir_all(&d);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("T|")).collect();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(lines, ["T|v=1"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("[xezim][warning] Variable 'v'"));
 }
