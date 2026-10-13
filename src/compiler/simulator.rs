@@ -1316,6 +1316,78 @@ fn strip_genblk_segments(name: &str) -> Option<String> {
     Some(stripped.join("."))
 }
 
+/// Continuous-assignment targets indexed by leaf name, for the edge-select
+/// alias sharing in `rewrite_edge_select_sensitivities` (built once, on the
+/// first edge term that selects a bit of a vector).
+mod edgesel_writers {
+    use super::*;
+
+    pub(super) fn base_ident(e: &Expression) -> Option<String> {
+        match &e.kind {
+            ExprKind::Paren(inner) => base_ident(inner),
+            ExprKind::Index { expr, .. } | ExprKind::RangeSelect { expr, .. } => base_ident(expr),
+            ExprKind::Ident(h) => Some(
+                h.path
+                    .iter()
+                    .map(|s| s.name.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
+            _ => None,
+        }
+    }
+    pub(super) fn leaf(n: &str) -> &str {
+        n.rsplit('.').next().unwrap_or(n)
+    }
+
+    #[derive(Default)]
+    pub(super) struct WriterIndex {
+        /// Leaf name -> indices into `continuous_assigns`.
+        pub cont: HashMap<String, Vec<usize>>,
+        /// Leaf name (of the target, or of the parent net a port target
+        /// connects to) -> indices into `pending_cont_assign`.
+        pub pend: HashMap<String, Vec<usize>>,
+    }
+
+    impl WriterIndex {
+        pub(super) fn build(module: &ElaboratedModule) -> Self {
+            let mut ix = WriterIndex::default();
+            fn targets(e: &Expression) -> Vec<&Expression> {
+                match &e.kind {
+                    ExprKind::Concatenation(parts) => parts.iter().collect(),
+                    _ => vec![e],
+                }
+            }
+            for (i, ca) in module.continuous_assigns.iter().enumerate() {
+                for t in targets(&ca.lhs) {
+                    if let Some(b) = base_ident(t) {
+                        ix.cont.entry(leaf(&b).to_string()).or_default().push(i);
+                    }
+                }
+            }
+            for (i, p) in module.pending_cont_assign.iter().enumerate() {
+                for t in targets(&p.lhs_source) {
+                    let Some(b) = base_ident(t) else {
+                        continue;
+                    };
+                    let mut leaves = vec![leaf(&b).to_string()];
+                    if let Some(mb) = p.ctx.port_map.get(&b).and_then(base_ident) {
+                        leaves.push(leaf(&mb).to_string());
+                    }
+                    leaves.dedup();
+                    for l in leaves {
+                        let v = ix.pend.entry(l).or_default();
+                        if v.last() != Some(&i) {
+                            v.push(i);
+                        }
+                    }
+                }
+            }
+            ix
+        }
+    }
+}
+
 thread_local! {
     static SKIP_FN_BODY_READS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
@@ -9686,6 +9758,7 @@ impl Simulator {
         // Per vector: the bit ranges whose bits are always equal (see
         // `replicated_bit_ranges`), computed on first use.
         let mut repl_cache: HashMap<String, Vec<(i64, i64)>> = HashMap::default();
+        let mut writer_index: Option<edgesel_writers::WriterIndex> = None;
         let mut new_assigns: Vec<super::elaborate::ContinuousAssignment> = Vec::new();
         let mut new_signals: Vec<String> = Vec::new();
         let dbg = std::env::var_os("XEZIM_DUMP_EDGE_SENS").is_some();
@@ -9852,9 +9925,11 @@ impl Simulator {
                 // an edge on the range's lowest bit at the same time. Edge
                 // terms on such bits share ONE alias instead of one per bit.
                 if idxs.len() == 1 && module.signals.contains_key(resolved.as_str()) {
-                    let ranges = repl_cache
-                        .entry(resolved.clone())
-                        .or_insert_with(|| Self::replicated_bit_ranges(module, &resolved));
+                    let ranges = repl_cache.entry(resolved.clone()).or_insert_with(|| {
+                        let index = writer_index
+                            .get_or_insert_with(|| edgesel_writers::WriterIndex::build(module));
+                        Self::replicated_bit_ranges(module, &resolved, index)
+                    });
                     if let Some(&(lo, _)) = ranges
                         .iter()
                         .find(|(lo, hi)| *lo <= idxs[0] && idxs[0] <= *hi)
@@ -9948,26 +10023,12 @@ impl Simulator {
     /// assignments and the sub-module ones still pending materialization
     /// are searched; a pending one is rewritten only when its target can
     /// name `v` (same leaf name, directly or through a port connection).
-    fn replicated_bit_ranges(module: &ElaboratedModule, v: &str) -> Vec<(i64, i64)> {
-        fn base_ident(e: &Expression) -> Option<String> {
-            match &e.kind {
-                ExprKind::Paren(inner) => base_ident(inner),
-                ExprKind::Index { expr, .. } | ExprKind::RangeSelect { expr, .. } => {
-                    base_ident(expr)
-                }
-                ExprKind::Ident(h) => Some(
-                    h.path
-                        .iter()
-                        .map(|s| s.name.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("."),
-                ),
-                _ => None,
-            }
-        }
-        fn leaf(n: &str) -> &str {
-            n.rsplit('.').next().unwrap_or(n)
-        }
+    fn replicated_bit_ranges(
+        module: &ElaboratedModule,
+        v: &str,
+        index: &edgesel_writers::WriterIndex,
+    ) -> Vec<(i64, i64)> {
+        use edgesel_writers::{base_ident, leaf};
         fn const_val(e: &Expression, params: &HashMap<String, Value>) -> Option<i64> {
             match &e.kind {
                 ExprKind::Number(NumberLiteral::Integer { value, .. }) => {
@@ -10080,10 +10141,13 @@ impl Simulator {
                 }
             }
         };
-        for ca in &module.continuous_assigns {
+        let none: Vec<usize> = Vec::new();
+        for &i in index.cont.get(vleaf).unwrap_or(&none) {
+            let ca = &module.continuous_assigns[i];
             classify(&ca.lhs, Some(&ca.rhs));
         }
-        for p in &module.pending_cont_assign {
+        for &i in index.pend.get(vleaf).unwrap_or(&none) {
+            let p = &module.pending_cont_assign[i];
             let src = &*p.lhs_source;
             let may_name_v = |e: &Expression| -> bool {
                 base_ident(e).is_some_and(|b| {
