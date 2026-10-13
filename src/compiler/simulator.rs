@@ -69416,11 +69416,71 @@ impl Simulator {
                 }
                 out
             }
+            // `$__wres_tri(acc, ctl1, data1, ctl2, data2, ...)` — resolve the
+            // tristate primitives driving a net (`bufif*`/`notif*`/MOS, each
+            // lowered to `ctl ? data : z`) together with its other drivers
+            // `acc`, bit by bit. A primitive whose control is 1 drives its
+            // data, 0 drives nothing. One whose control is unknown drives
+            // `L`/`H` (§28.4 Table 28-5, §28.7): its value OR z. Those are
+            // applied after every known driver: the bit keeps the value both
+            // possibilities agree on, else it is `x` — `H` beside a strong 1
+            // is 1, beside a 0 or with nothing else it is `x`. The plain `?:`
+            // merge gave `x` even where another driver settles the bit.
+            "$__wres_tri" => {
+                if args.len() < 3 {
+                    return Value::new(1);
+                }
+                let acc = self.eval_expr(&args[0]);
+                let mut drivers: Vec<(LogicBit, Value)> = Vec::with_capacity(args.len() / 2);
+                for pair in args[1..].chunks(2) {
+                    let [c, d] = pair else { break };
+                    let ctl = self.eval_expr(c);
+                    // The control's truth value, as the `?:` it came from.
+                    let bits = (0..ctl.width.max(1) as usize).map(|i| ctl.get_bit(i));
+                    let cb = if bits.clone().any(|b| b == LogicBit::One) {
+                        LogicBit::One
+                    } else if bits.into_iter().all(|b| b == LogicBit::Zero) {
+                        LogicBit::Zero
+                    } else {
+                        LogicBit::X
+                    };
+                    if cb != LogicBit::Zero {
+                        drivers.push((cb, self.eval_expr(d)));
+                    }
+                }
+                let w = drivers
+                    .iter()
+                    .map(|(_, d)| d.width)
+                    .fold(acc.width, u32::max)
+                    .max(1);
+                let bit = |v: &Value, i: usize, pad: LogicBit| {
+                    if i < v.width as usize {
+                        v.get_bit(i)
+                    } else {
+                        pad
+                    }
+                };
+                let mut out = Value::zero(w);
+                for i in 0..w as usize {
+                    let mut b = bit(&acc, i, LogicBit::Z);
+                    for (_, d) in drivers.iter().filter(|(c, _)| *c == LogicBit::One) {
+                        b = Self::wire_resolve_bit(b, bit(d, i, LogicBit::Zero));
+                    }
+                    for (_, d) in drivers.iter().filter(|(c, _)| *c != LogicBit::One) {
+                        if Self::wire_resolve_bit(b, bit(d, i, LogicBit::Zero)) != b {
+                            b = LogicBit::X;
+                        }
+                    }
+                    out.set_bit(i, b);
+                }
+                out
+            }
             // §28.4 pull-strength marker. A lone pull driver just carries
             // its value; multi-driver resolution unwraps it (see
             // `resolve_multi_driver_nets`), so this identity path only runs
             // when a pullup/pulldown is the net's sole driver.
-            "$__pull" => args
+            // `$__supply`/`$__weak` mark the other §28.12 levels the same way.
+            "$__pull" | "$__supply" | "$__weak" => args
                 .first()
                 .map(|a| self.eval_expr(a))
                 .unwrap_or_else(|| Value::new(1)),
