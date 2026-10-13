@@ -9683,6 +9683,9 @@ impl Simulator {
             )
         };
         let mut aliases: HashMap<String, String> = HashMap::default(); // canon expr -> alias
+        // Per vector: the bit ranges whose bits are always equal (see
+        // `replicated_bit_ranges`), computed on first use.
+        let mut repl_cache: HashMap<String, Vec<(i64, i64)>> = HashMap::default();
         let mut new_assigns: Vec<super::elaborate::ContinuousAssignment> = Vec::new();
         let mut new_signals: Vec<String> = Vec::new();
         let dbg = std::env::var_os("XEZIM_DUMP_EDGE_SENS").is_some();
@@ -9843,6 +9846,28 @@ impl Simulator {
                 if idxs.len() == 1 && module.arrays.contains_key(resolved.as_str()) {
                     continue;
                 }
+                // §10.3.2: bits written by one `assign v[A +: N] = {N{b}}`
+                // (one-bit `b`, no other driver) are equal at every moment
+                // and change in the same delta, so an edge on any of them is
+                // an edge on the range's lowest bit at the same time. Edge
+                // terms on such bits share ONE alias instead of one per bit.
+                if idxs.len() == 1 && module.signals.contains_key(resolved.as_str()) {
+                    let ranges = repl_cache
+                        .entry(resolved.clone())
+                        .or_insert_with(|| Self::replicated_bit_ranges(module, &resolved));
+                    if let Some(&(lo, _)) = ranges
+                        .iter()
+                        .find(|(lo, hi)| *lo <= idxs[0] && idxs[0] <= *hi)
+                    {
+                        if dbg && lo != idxs[0] {
+                            eprintln!(
+                                "[EDGESEL] {}[{}] shares the alias of bit {}",
+                                resolved, idxs[0], lo
+                            );
+                        }
+                        idxs[0] = lo;
+                    }
+                }
                 let canon = format!("{}|{:?}", resolved, idxs);
                 let span = ee.expr.span;
                 // The alias RHS is the ORIGINAL select expression (with the
@@ -9911,6 +9936,203 @@ impl Simulator {
         module.continuous_assigns.extend(new_assigns);
         module.always_blocks = always;
         deferred
+    }
+
+    /// Bit ranges of the packed vector `v` that hold one replicated bit:
+    /// each range is written by exactly one continuous assignment of the
+    /// form `v[lo..=hi] = {N{b}}` with `b` one bit wide and `N` the range
+    /// width, and no other continuous assignment writes any of its bits
+    /// (a net may have several drivers, which resolve; then the bits need
+    /// not be equal). Within such a range every bit is the same value at
+    /// every moment, written by the same evaluation. Both the elaborated
+    /// assignments and the sub-module ones still pending materialization
+    /// are searched; a pending one is rewritten only when its target can
+    /// name `v` (same leaf name, directly or through a port connection).
+    fn replicated_bit_ranges(module: &ElaboratedModule, v: &str) -> Vec<(i64, i64)> {
+        fn base_ident(e: &Expression) -> Option<String> {
+            match &e.kind {
+                ExprKind::Paren(inner) => base_ident(inner),
+                ExprKind::Index { expr, .. } | ExprKind::RangeSelect { expr, .. } => {
+                    base_ident(expr)
+                }
+                ExprKind::Ident(h) => Some(
+                    h.path
+                        .iter()
+                        .map(|s| s.name.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                ),
+                _ => None,
+            }
+        }
+        fn leaf(n: &str) -> &str {
+            n.rsplit('.').next().unwrap_or(n)
+        }
+        fn const_val(e: &Expression, params: &HashMap<String, Value>) -> Option<i64> {
+            match &e.kind {
+                ExprKind::Number(NumberLiteral::Integer { value, .. }) => {
+                    value.replace('_', "").parse::<i64>().ok()
+                }
+                ExprKind::Paren(inner) => const_val(inner, params),
+                ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                    let raw = h
+                        .path
+                        .iter()
+                        .map(|s| s.name.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    let v = params.get(&raw)?;
+                    if v.has_xz() {
+                        return None;
+                    }
+                    i64::try_from(v.to_u64()?).ok()
+                }
+                ExprKind::Binary { op, left, right } => {
+                    let l = const_val(left, params)?;
+                    let r = const_val(right, params)?;
+                    match op {
+                        BinaryOp::Add => l.checked_add(r),
+                        BinaryOp::Sub => l.checked_sub(r),
+                        BinaryOp::Mul => l.checked_mul(r),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        let params = &module.parameters;
+        let vleaf = leaf(v);
+        // (lo, hi, replicated) per write of `v`; None = a write of unknown
+        // extent (concatenation target, dynamic select).
+        let mut writes: Vec<Option<(i64, i64, bool)>> = Vec::new();
+        let mut classify = |lhs: &Expression, rhs: Option<&Expression>| {
+            let whole = |e: &Expression| -> Option<String> {
+                match &e.kind {
+                    ExprKind::Paren(inner) => {
+                        base_ident(inner).filter(|_| matches!(inner.kind, ExprKind::Ident(_)))
+                    }
+                    ExprKind::Ident(_) => base_ident(e),
+                    _ => None,
+                }
+            };
+            let one_bit = |e: &Expression| -> bool {
+                let mut e = e;
+                while let ExprKind::Paren(inner) = &e.kind {
+                    e = inner;
+                }
+                match &e.kind {
+                    ExprKind::Index { expr, index } => {
+                        whole(expr).is_some() && const_val(index, params).is_some()
+                    }
+                    ExprKind::Ident(_) => whole(e)
+                        .and_then(|n| module.signals.get(n.as_str()).map(|s| s.width == 1))
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            };
+            match &lhs.kind {
+                ExprKind::Concatenation(parts) => {
+                    if parts.iter().any(|p| base_ident(p).as_deref() == Some(v)) {
+                        writes.push(None);
+                    }
+                }
+                ExprKind::Ident(_) | ExprKind::Paren(_) if whole(lhs).as_deref() == Some(v) => {
+                    writes.push(Some((i64::MIN, i64::MAX, false)));
+                }
+                ExprKind::Index { expr, index } if whole(expr).as_deref() == Some(v) => {
+                    match const_val(index, params) {
+                        Some(i) => writes.push(Some((i, i, false))),
+                        None => writes.push(None),
+                    }
+                }
+                ExprKind::RangeSelect {
+                    expr,
+                    kind,
+                    left,
+                    right,
+                } if whole(expr).as_deref() == Some(v) => {
+                    let (Some(l), Some(r)) = (const_val(left, params), const_val(right, params))
+                    else {
+                        writes.push(None);
+                        return;
+                    };
+                    let (lo, hi) = match kind {
+                        RangeKind::Constant => (l.min(r), l.max(r)),
+                        RangeKind::IndexedUp => (l, l + r - 1),
+                        RangeKind::IndexedDown => (l - r + 1, l),
+                    };
+                    let repl = rhs.is_some_and(|rhs| match &rhs.kind {
+                        ExprKind::Replication { count, exprs } => {
+                            exprs.len() == 1
+                                && const_val(count, params) == Some(hi - lo + 1)
+                                && one_bit(&exprs[0])
+                        }
+                        _ => false,
+                    });
+                    writes.push(Some((lo, hi, repl)));
+                }
+                _ => {
+                    // Any other target naming `v` (a member or a nested
+                    // select): extent unknown.
+                    if base_ident(lhs).as_deref() == Some(v) {
+                        writes.push(None);
+                    }
+                }
+            }
+        };
+        for ca in &module.continuous_assigns {
+            classify(&ca.lhs, Some(&ca.rhs));
+        }
+        for p in &module.pending_cont_assign {
+            let src = &*p.lhs_source;
+            let may_name_v = |e: &Expression| -> bool {
+                base_ident(e).is_some_and(|b| {
+                    leaf(&b) == vleaf
+                        || p.ctx
+                            .port_map
+                            .get(&b)
+                            .is_some_and(|m| base_ident(m).is_some_and(|mb| leaf(&mb) == vleaf))
+                })
+            };
+            let hit = match &src.kind {
+                ExprKind::Concatenation(parts) => parts.iter().any(may_name_v),
+                _ => may_name_v(src),
+            };
+            if !hit {
+                continue;
+            }
+            let rw = |e: &Expression| {
+                super::elaborate::rewrite_expr(
+                    e,
+                    &p.ctx.prefix,
+                    &p.ctx.port_map,
+                    &p.ctx.local_names,
+                    &p.ctx.interface_map,
+                )
+            };
+            let lhs = rw(src);
+            let rhs = matches!(p.rhs_source.kind, ExprKind::Replication { .. })
+                .then(|| rw(&p.rhs_source));
+            classify(&lhs, rhs.as_ref());
+        }
+        if writes.iter().any(|w| w.is_none()) {
+            return Vec::new();
+        }
+        let writes: Vec<(i64, i64, bool)> = writes.into_iter().flatten().collect();
+        let mut out = Vec::new();
+        for (i, &(lo, hi, repl)) in writes.iter().enumerate() {
+            if !repl || hi <= lo {
+                continue;
+            }
+            let shared = writes
+                .iter()
+                .enumerate()
+                .any(|(j, &(l2, h2, _))| j != i && l2 <= hi && lo <= h2);
+            if !shared {
+                out.push((lo, hi));
+            }
+        }
+        out
     }
 
     /// Can a pending always block stay lazy through `Simulator::new` (see
