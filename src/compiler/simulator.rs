@@ -74370,7 +74370,6 @@ impl Simulator {
                     // code, and it used to allocate three times per read (the
                     // class-context name, one `extends` clone per ancestor
                     // level, and the property key).
-                    if hier.path.len() == 1 {}
                     let is_static_prop = match self.class_context_stack.last() {
                         Some(Some(_))
                             if !self.class_member_names().statics.contains(name.as_str()) =>
@@ -123926,19 +123925,6 @@ impl Simulator {
         None
     }
 
-    /// §8.25: derive the per-specialization signature of an ANCESTOR class
-    /// reached through a CONCRETE subclass — e.g. `ext1::ID()` where
-    /// `ext1 extends uvm_tlm_extension#(ext1)`. A static call like
-    /// `ext1::ID()` carries no `#(spec)` and has no instance, so `current_spec`
-    /// is None and inherited statics key the shared `Class::member` cell,
-    /// colliding across sibling specializations (`ext1::ID()` and
-    /// `ext2::ID()` returned the same singleton). Walk the receiver's extends
-    /// chain rebinding each parent's type params from `extends_type_args` until
-    /// `ancestor` is bound, and return its `(base, sig)` so the caller can seed
-    /// `current_spec`. Mirrors the assoc-key carry loop.
-    /// A method's type parameters belong to its declaring specialization,
-    /// even when a parameterized receiver reuses the same parameter names.
-    #[inline(never)]
     /// Phase 2: the interned specialization id for a concrete instance's spec
     /// `(base, sig)` (0 when unspecialized / unparameterized). Called at every
     /// plan / skip / fast-call lookup so a parameterized class's caches are keyed
@@ -123962,6 +123948,19 @@ impl Simulator {
         next
     }
 
+    /// §8.25: derive the per-specialization signature of an ANCESTOR class
+    /// reached through a CONCRETE subclass — e.g. `ext1::ID()` where
+    /// `ext1 extends uvm_tlm_extension#(ext1)`. A static call like
+    /// `ext1::ID()` carries no `#(spec)` and has no instance, so `current_spec`
+    /// is None and inherited statics key the shared `Class::member` cell,
+    /// colliding across sibling specializations (`ext1::ID()` and
+    /// `ext2::ID()` returned the same singleton). Walk the receiver's extends
+    /// chain rebinding each parent's type params from `extends_type_args` until
+    /// `ancestor` is bound, and return its `(base, sig)` so the caller can seed
+    /// `current_spec`. Mirrors the assoc-key carry loop.
+    /// A method's type parameters belong to its declaring specialization,
+    /// even when a parameterized receiver reuses the same parameter names.
+    #[inline(never)]
     fn inherited_method_spec(&self, handle: usize, declaring: &str) -> Option<(String, String)> {
         let origin = self.class_origin(declaring);
         if !self.class_is_parameterized(origin) {
@@ -128201,11 +128200,6 @@ impl Simulator {
                 // specialization into `current_spec` and leaves a 2-segment
                 // `rt_i.all`) resolves to the per-spec static-collection key,
                 // like the `Specialization` and class-name arms above.
-                // A leading TYPEDEF-ALIAS segment of a parameterized-class
-                // specialization (`typedef rt#(int) rt_i;` — the call path
-                // lifts the specialization into `current_spec` and leaves a
-                // 2-segment `rt_i.all`): resolve to the per-spec
-                // static-collection key like the `Specialization` arm.
                 if h.path[0].selects.is_empty()
                     && !self.module.classes.contains_key(&h.path[0].name.name)
                     && !self
@@ -128264,28 +128258,6 @@ impl Simulator {
                     return self.handle_collection_name(hd, &h.path[1].name.name);
                 }
                 obj_member(self, &h.path[0].name.name, &h.path[1].name.name)
-            }
-            // Flattened `TypedefAlias::member` (2 segments, leading a class
-            // typedef specialization alias): resolve the alias's per-spec
-            // static-collection key like the MemberAccess arms above. Reachable
-            // when a Specialization-wrapping arm already consumed the head —
-            // without it the whole-copy read resolved to None.
-            ExprKind::Ident(h) if h.path.len() == 2 => {
-                if !h.path[0].selects.is_empty()
-                    || self.module.classes.contains_key(&h.path[0].name.name)
-                {
-                    return None;
-                }
-                if let Some((base, sig)) = self.resolve_typedef_spec(&h.path[0].name.name) {
-                    if self.member_is_static_coll(&base, &h.path[1].name.name) {
-                        let saved = self.current_spec.take();
-                        self.current_spec = Some((base.clone(), sig.clone()));
-                        let key = self.static_prop_key(&base, &h.path[1].name.name);
-                        self.current_spec = saved;
-                        return key;
-                    }
-                }
-                None
             }
             // Flattened `ClassName::static_handle.member` (3+ segments, e.g.
             // a singleton property reached through a static handle `m_inst`,
@@ -159823,7 +159795,6 @@ impl Simulator {
         arg_base: usize,
         n: usize,
     ) -> Option<Value> {
-        use super::bytecode::Insn;
         if !fast_calls_enabled() || n != 0 || method == "new" {
             return None;
         }
