@@ -15824,8 +15824,11 @@ impl Simulator {
                 DataType::IntegerAtom { kind, .. } => match kind {
                     IntegerAtomType::Byte => DpiOaElem::I8,
                     IntegerAtomType::ShortInt => DpiOaElem::I16,
-                    IntegerAtomType::Int | IntegerAtomType::Integer => DpiOaElem::I32,
-                    IntegerAtomType::LongInt | IntegerAtomType::Time => DpiOaElem::I64,
+                    IntegerAtomType::Int => DpiOaElem::I32,
+                    IntegerAtomType::LongInt => DpiOaElem::I64,
+                    // 4-state: svLogicVecVal elements (H.7.4).
+                    IntegerAtomType::Integer => DpiOaElem::Logic(32),
+                    IntegerAtomType::Time => DpiOaElem::Logic(64),
                 },
                 DataType::Real { kind, .. } => match kind {
                     crate::ast::types::RealType::ShortReal => DpiOaElem::F32,
@@ -15852,18 +15855,32 @@ impl Simulator {
         }
         match dt {
             DataType::IntegerAtom { kind, .. } => match kind {
-                IntegerAtomType::Int
-                | IntegerAtomType::Integer
-                | IntegerAtomType::Byte
-                | IntegerAtomType::ShortInt => Some(if out_dir {
-                    DpiArgKind::Int32Out
-                } else {
-                    DpiArgKind::Int32In
-                }),
-                IntegerAtomType::LongInt | IntegerAtomType::Time => Some(if out_dir {
+                IntegerAtomType::Int | IntegerAtomType::Byte | IntegerAtomType::ShortInt => {
+                    Some(if out_dir {
+                        DpiArgKind::Int32Out
+                    } else {
+                        DpiArgKind::Int32In
+                    })
+                }
+                IntegerAtomType::LongInt => Some(if out_dir {
                     DpiArgKind::Int64Out
                 } else {
                     DpiArgKind::Int64In
+                }),
+                // §35.5.6 / H.7.4: `integer` and `time` are 4-state packed
+                // vectors (`logic signed [31:0]`, `logic [63:0]`), so an
+                // svLogicVecVal* like any packed logic. They went by value
+                // as an int / long long, and C reading the svLogicVecVal*
+                // its prototype names dereferenced the value and crashed.
+                IntegerAtomType::Integer => Some(if out_dir {
+                    DpiArgKind::VecLogicOut(32)
+                } else {
+                    DpiArgKind::VecLogicIn(32)
+                }),
+                IntegerAtomType::Time => Some(if out_dir {
+                    DpiArgKind::VecLogicOut(64)
+                } else {
+                    DpiArgKind::VecLogicIn(64)
                 }),
             },
             DataType::IntegerVector {
