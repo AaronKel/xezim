@@ -3765,15 +3765,15 @@ impl Simulator {
                 dist_weights,
                 ..
             } => {
-                if *is_dist
+                // The weights of a wide operand are modelled only on one
+                // segment (a field, an aligned select). Over a whole wide
+                // variable the dist still constrains it to its items
+                // (§18.5.4: the value is in the set of a nonzero weight);
+                // the value is then drawn uniformly over them.
+                let unweighted = *is_dist
                     && !csp.wide.is_empty()
                     && self.csp_wide_touch(csp, expr, env)
-                    && !matches!(self.csp_ae(csp, expr, env), Some(Ae::Var(..)))
-                {
-                    // The weights of a wide operand are modelled only on one
-                    // segment (a field, an aligned select).
-                    return None;
-                }
+                    && !matches!(self.csp_ae(csp, expr, env), Some(Ae::Var(..)));
                 let set: Vec<ConstraintRange> = if *is_dist {
                     // §18.5.4: a zero weight removes the value.
                     let mut kept = Vec::new();
@@ -3794,7 +3794,7 @@ impl Simulator {
                 };
                 let n =
                     self.csp_inside(csp, expr, &set, env, false, SrcItem::Item(item.clone()))?;
-                if *is_dist {
+                if *is_dist && !unweighted {
                     self.csp_dist(csp, expr, &range, dist_weights, env);
                 }
                 Some(n)
@@ -8585,11 +8585,74 @@ impl Simulator {
                 }
             }
         }
-        Some(if neg {
+        let set = if neg {
             Self::csp_wide_and(alts)
         } else {
             Self::csp_wide_or(alts)
-        })
+        };
+        if neg || !matches!(set, Node::Or(_)) {
+            return Some(set);
+        }
+        // `x inside {K1, K2, …}` over constants: each segment of `x` takes
+        // the bits of one of the values there. That domain restriction is
+        // implied by the disjunction, which alone only acts once all but
+        // one alternative are excluded, so a search drawing 64-bit segments
+        // at random would almost never meet a value.
+        let mut proj = vec![set];
+        if let Some(seg) = self.csp_wide_value_projection(csp, expr, ranges, env) {
+            proj.extend(seg);
+        }
+        Some(Self::csp_wide_and(proj))
+    }
+
+    /// The per-segment domains `expr inside {K1, K2, …}` implies when every
+    /// item is a constant value: segment `x[a+:n]` in `{Ki[a+:n]}`.
+    fn csp_wide_value_projection(
+        &mut self,
+        csp: &mut Csp,
+        expr: &Expression,
+        ranges: &[ConstraintRange],
+        env: &Env,
+    ) -> Option<Vec<Node>> {
+        let (w, s) = self.csp_wide_ws(csp, expr, env)?;
+        let mut consts = Vec::with_capacity(ranges.len());
+        for r in ranges {
+            let ConstraintRange::Value(v) = r else {
+                return None;
+            };
+            let (vw, vs) = self.csp_wide_ws(csp, v, env)?;
+            let (cw, cs) = (w.max(vw), s && vs);
+            if cw != w {
+                return None;
+            }
+            if !self.csp_free(csp, v, env) {
+                return None;
+            }
+            consts.push(self.csp_wide_op(csp, v, cw, cs, env)?);
+        }
+        let x = self.csp_wide_op(csp, expr, w, s, env)?;
+        let mut out = Vec::new();
+        for &(lo, vw, v) in &x.vars {
+            let set = dom_norm(
+                consts
+                    .iter()
+                    .map(|c| {
+                        let k = c.word(lo, lo + vw) as i128;
+                        (k, k)
+                    })
+                    .collect(),
+            );
+            let one = Self::literal_of(&Value::from_u64(1, 1), crate::ast::Span::dummy());
+            let src = self.csp_src(csp, SrcItem::Expr(one), &Env::default(), vec![v]);
+            out.push(Node::In {
+                lin: Lin::var(v),
+                set,
+                neg: false,
+                fits: Vec::new(),
+                src,
+            });
+        }
+        Some(out)
     }
 
     /// §18.4: the wide variables left out of the solve take random values
