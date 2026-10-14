@@ -71189,12 +71189,14 @@ impl Simulator {
                     out.is_signed = super::elaborate::is_type_signed(&dt);
                     return out;
                 }
-                let w = super::elaborate::resolve_type_width(
-                    &dt,
-                    Some(&self.module.parameters),
-                    Some(&self.module.typedefs),
-                )
-                .max(1);
+                let w = self.bound_type_param_width(&dt).unwrap_or_else(|| {
+                    super::elaborate::resolve_type_width(
+                        &dt,
+                        Some(&self.module.parameters),
+                        Some(&self.module.typedefs),
+                    )
+                    .max(1)
+                });
                 let mut out = if v.is_real {
                     Self::real_to_int(v.to_f64(), w)
                 } else {
@@ -71341,6 +71343,16 @@ impl Simulator {
                     {
                         let n = self.eval_expr(&args[0]).to_u64().unwrap_or(32) as u32;
                         return inner_v.resize(n.max(1));
+                    }
+                    // (d) §8.25/§6.24.1: a class TYPE PARAMETER (`T'(v)`)
+                    // casts to the type the active object or specialization
+                    // binds to it.
+                    if let Some(b) = self.resolve_type_param_binding(&nm)
+                        && let Some(w) = self.concrete_type_width(b.trim())
+                    {
+                        let mut out = inner_v.resize(w.max(1));
+                        out.is_signed = self.bound_type_is_signed(b.trim());
+                        return out;
                     }
                 }
                 // Unknown cast target: pass the operand through unchanged.
@@ -113710,6 +113722,18 @@ impl Simulator {
             w = w.checked_mul((l - r).unsigned_abs() + 1)?;
         }
         u32::try_from(w).ok()
+    }
+
+    /// Whether the type a class type parameter is bound to (`byte`,
+    /// `bit signed [7:0]`, a typedef name) is signed.
+    fn bound_type_is_signed(&self, b: &str) -> bool {
+        matches!(b, "byte" | "shortint" | "int" | "longint" | "integer")
+            || b.split_whitespace().nth(1) == Some("signed")
+            || self
+                .module
+                .typedef_types
+                .get(b)
+                .is_some_and(super::elaborate::is_type_signed)
     }
 
     /// Packed-aggregate field layout of a CALL's declared return type:
