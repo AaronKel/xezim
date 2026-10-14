@@ -93,6 +93,8 @@ mod queue_local_shadow_restore;
 mod queue_member_init;
 #[path = "collections/queue_ops_and_dist.rs"]
 mod queue_ops_and_dist;
+#[path = "collections/queue_store_element_type.rs"]
+mod queue_store_element_type;
 #[path = "collections/sibling_static_collection_collision.rs"]
 mod sibling_static_collection_collision;
 #[path = "collections/sort_with_clause.rs"]

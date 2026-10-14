@@ -81628,7 +81628,19 @@ impl Simulator {
             if let Some(s) = self.instance_assoc_member(&lname) {
                 lname = std::borrow::Cow::Owned(s);
             }
-            if self.module.arrays.contains_key(&*lname) {
+            // §10.10: a class queue / dynamic-array member (`<handle>#q`)
+            // has no `arrays` row, but `obj.q = {obj.q, v}` is the same
+            // unpacked-array concatenation.
+            let mut class_dyn = false;
+            if matches!(rvalue.kind, ExprKind::Concatenation(_))
+                && !self.module.arrays.contains_key(&*lname)
+                && let Some(n) = self.expr_assoc_name(lvalue)
+                && self.class_queue_prop(&n)
+            {
+                lname = std::borrow::Cow::Owned(n);
+                class_dyn = true;
+            }
+            if self.module.arrays.contains_key(&*lname) || class_dyn {
                 // Queue/array slice assignment: lq = rq[a:b]
                 if let ExprKind::RangeSelect {
                     expr: rbase,
@@ -81762,24 +81774,31 @@ impl Simulator {
                     };
                     // Expand queue/array elements in concat (e.g. q = {q, 4})
                     let all_vals = self.unpacked_concat_operand_values(items);
-                    let is_dyn = self.module.dynamic_arrays.contains(&*lname);
+                    let is_dyn = class_dyn || self.module.dynamic_arrays.contains(&*lname);
                     let (lo, hi, _w) = self
                         .module
                         .arrays
                         .get(&*lname)
                         .copied()
                         .unwrap_or((0, -1, 32));
-                    for (i, v) in all_vals.iter().enumerate() {
+                    let n_vals = all_vals.len();
+                    for (i, v) in all_vals.into_iter().enumerate() {
                         let idx = lo + i as i64;
                         // Dynamic arrays/queues grow to fit; only fixed
                         // arrays are bounded by their declared range.
                         if !is_dyn && idx > hi {
                             break;
                         }
-                        self.set_signal_value_by_name(&format!("{}[{}]", lname, idx), v.clone());
+                        // §10.10: each item is an element-typed value.
+                        let v = if is_dyn {
+                            self.fit_queue_push_elem(&lname, v)
+                        } else {
+                            v
+                        };
+                        self.set_signal_value_by_name(&format!("{}[{}]", lname, idx), v);
                     }
                     if is_dyn {
-                        self.set_queue_size(&lname, all_vals.len() as u64);
+                        self.set_queue_size(&lname, n_vals as u64);
                     }
                     self.settle_after_proc_write();
                     return;
@@ -119430,6 +119449,32 @@ impl Simulator {
         }
         v.is_signed = signed;
         v
+    }
+
+    /// Whether `name` is the instance store (`<handle>#m`) of a queue or
+    /// dynamic-array property `m` of that object's class.
+    fn class_queue_prop(&self, name: &str) -> bool {
+        let Some((h, m)) = name.split_once('#') else {
+            return false;
+        };
+        let Some(inst) = h
+            .parse::<usize>()
+            .ok()
+            .and_then(|h| self.heap.get(h)?.as_ref())
+        else {
+            return false;
+        };
+        let mut cur = Some(inst.class_name.as_str());
+        for _ in 0..64 {
+            let Some(cd) = cur.and_then(|c| self.module.classes.get(c)) else {
+                return false;
+            };
+            if cd.properties.contains_key(m) {
+                return cd.queue_properties.contains_key(m);
+            }
+            cur = cd.extends.as_deref();
+        }
+        false
     }
 
     /// `integral_queue_elem` for a STATIC queue property stored as `coll`:
