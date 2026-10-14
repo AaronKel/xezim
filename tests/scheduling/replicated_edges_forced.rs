@@ -4,8 +4,9 @@
 //! it differ from the others, so a vector some `force` targets keeps one
 //! alias per bit.
 //!
-//! The ignored tests pin driver-resolution gaps found next to that rule
-//! (they predate the shared aliases). Expected values are the reference
+//! Next to that rule: a forced bit holds against part-select drivers
+//! (§10.6.2), and a gate or pull on one bit resolves with the vector's
+//! driver by strength (§28.12). Expected values are the reference
 //! simulator's.
 use std::path::PathBuf;
 use std::process::Command;
@@ -93,7 +94,6 @@ fn force_on_a_bit_of_a_part_select_driven_vector() {
 }
 
 #[test]
-#[ignore = "a gate or pull driving one bit of a part-select-driven vector does not resolve with the vector's continuous driver"]
 fn gate_and_pull_on_one_bit_of_a_driven_vector() {
     let src = r#"
 `timescale 1ns/1ns
