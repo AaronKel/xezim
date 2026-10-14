@@ -319,3 +319,25 @@ endmodule
         ["T|pk a8 a8 9 8 8", "T|L 234 12 12", "T|M 3 3 12", "T|N 24"]
     );
 }
+
+/// §8.25/§6.18: a typedef of a class TYPE parameter (`typedef T payload_t;`)
+/// follows each specialization.
+#[test]
+#[ignore = "a class typedef of a type parameter keeps the default type's width in every specialization"]
+fn typedef_of_a_type_parameter() {
+    let src = r#"
+class G #(type T = int);
+  typedef T payload_t;
+  payload_t p;
+  T d;
+  function int w(); return $bits(payload_t); endfunction
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new;
+    $display("T|tp %0d %0d %0d %0d %0d %0d", $bits(g.p), $bits(h.p), $bits(g.d), $bits(h.d), g.w(), h.w());
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|tp 8 64 8 64 8 64"]);
+}
