@@ -123389,7 +123389,12 @@ impl Simulator {
         if !self.class_statics.contains_key(&key) {
             // Key head is `DeclClass` or `DeclClass#spec`; strip the spec
             // suffix to find the class whose initial value seeds the cell.
-            let head = key.split("::").next().unwrap_or("");
+            // The class name itself may be qualified (`pkg::C`, a class
+            // whose name another package also declares, §26.3).
+            let head = key
+                .strip_suffix(prop)
+                .and_then(|h| h.strip_suffix("::"))
+                .unwrap_or(&key);
             let decl_class = head.split('#').next().unwrap_or(head);
             // Collect the initial value: first try `properties` (static
             // class members), then `param_defaults` (class localparam
