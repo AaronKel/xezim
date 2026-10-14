@@ -130392,26 +130392,58 @@ impl Simulator {
         if method_name == "new" {
             return None;
         }
-        // IEEE 1800-2023 §8.10: a class-scope `::` access names a STATIC
-        // class member. A method reached this way that is not declared
-        // `static` (no instance receiver) is an error, not a silent call —
-        // reference simulators reject it at compile time (`Illegal to access
-        // non-static method 'm' outside its class scope`). xezim's dispatch
-        // reaches here only for the `Class::method(...)` shapes, so firing
-        // once is safe; the error is fatal, matching the reference.
         if self.class_has_method(class_name, method_name)
             && !self.is_static_method(class_name, method_name)
-            && self
+        {
+            // §8.23: inside a non-static method of `class_name` or of a
+            // class derived from it, `Class::m()` names `Class`'s `m` on the
+            // implicit `this`, bound non-virtually (like `super.m()`).
+            let this_h = self.this_stack.last().copied().flatten().unwrap_or(0);
+            let this_cls = self
+                .heap
+                .get(this_h)
+                .and_then(|o| o.as_ref())
+                .map(|i| i.class_name.clone());
+            if let Some(rt) = this_cls
+                && this_h != 0
+                && self.class_is_a(&rt, class_name)
+            {
+                let mut cur = Some(class_name.to_string());
+                while let Some(cname) = cur {
+                    let Some((has, parent)) = self
+                        .module
+                        .classes
+                        .get(&cname)
+                        .map(|cd| (cd.methods.contains_key(method_name), cd.extends.clone()))
+                    else {
+                        break;
+                    };
+                    if has {
+                        return Some(self.exec_method_in_class_hierarchy(
+                            this_h,
+                            &cname,
+                            method_name,
+                            args,
+                        ));
+                    }
+                    cur = parent.map(|p| p.split('#').next().unwrap_or(&p).to_string());
+                }
+            }
+            // §8.10: anywhere else a class-scope `::` access names a STATIC
+            // member; a non-static method reached this way has no instance.
+            // The reference simulator rejects it; report it once, fatally.
+            if self
                 .nonstatic_scope_reported
                 .insert((class_name.to_string(), method_name.to_string()))
-        {
-            let msg = format!(
-                "Illegal to access non-static method '{}' outside its class scope (IEEE 1800-2023 §8.10): {}::{} requires an instance",
-                method_name, class_name, method_name
-            );
-            self.emit_severity_text("Fatal", &msg);
-            self.fatal_finish_number = Some(1);
-            self.finished = true;
+            {
+                let msg = format!(
+                    "Illegal to access non-static method '{}' outside its class scope: {}::{} requires an instance",
+                    method_name, class_name, method_name
+                );
+                self.emit_severity_text("Fatal", &msg);
+                self.fatal_finish_number = Some(1);
+                self.finished = true;
+            }
             return Some(Value::zero(32));
         }
         let mut cur = Some(class_name.to_string());
