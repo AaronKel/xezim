@@ -31,7 +31,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§7.9.11: a class associative-array property's `'{default: v}` initializer is dropped"]
 fn class_assoc_default_initializer() {
     let src = r#"
 class holder; logic [7:0] wa[int] = '{default: 8'h5A}; endclass
@@ -231,6 +230,49 @@ endmodule
             "T|e 0101 0011 7 xxxx 0000",
             "T|f 0101 0011 xxxx 0000",
             "T|g 1 1",
+        ]
+    );
+}
+
+#[test]
+fn class_assoc_pattern_initializers_and_assignments() {
+    let src = r#"
+class holder;
+  logic [7:0] wa[int] = '{default: 8'h5A};
+  logic [7:0] wb[int] = '{1: 8'h11, 3: 8'h33, default: 8'hEE};
+  int ia[string] = '{"a": 1, default: -1};
+  logic [7:0] wc[int];
+  function void setc(); wc = '{2: 8'h22, default: 8'hCC}; endfunction
+endclass
+class kid extends holder; endclass
+module top;
+  holder h, h2; kid k;
+  logic [7:0] ma[int] = '{default: 8'h77};
+  initial begin
+    h = new; h2 = new; k = new;
+    $display("T|a %h %h %0d", h.wa[9], h.wa[1], h.wa.num());
+    $display("T|b %h %h %h %0d", h.wb[1], h.wb[3], h.wb[4], h.wb.num());
+    $display("T|c %0d %0d %0d", h.ia["a"], h.ia["zz"], h.ia.num());
+    h.setc();
+    $display("T|d %h %h %0d %h", h.wc[2], h.wc[5], h.wc.num(), h2.wc[5]);
+    h.wa[9] = 8'h01; h.wa.delete(9);
+    $display("T|e %h %h", h.wa[9], k.wb[7]);
+    $display("T|f %h %0d", ma[3], ma.num());
+    h2.wa = '{default: 8'h99};
+    $display("T|g %h %h", h2.wa[0], h.wa[0]);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|a 5a 5a 0",
+            "T|b 11 33 ee 2",
+            "T|c 1 -1 1",
+            "T|d 22 cc 1 xx",
+            "T|e 5a ee",
+            "T|f 77 0",
+            "T|g 99 5a",
         ]
     );
 }

@@ -6331,6 +6331,10 @@ pub struct Simulator {
     /// settled. Today the queue is framework-only (no producer is
     /// wired up); drain is a no-op when empty, so behavior is unchanged.
     pending_reactive: Vec<crate::ast::stmt::Statement>,
+    /// §7.9.11: the `default:` value of a class associative-array member
+    /// (`<handle>#<member>`) that an assignment pattern gave it, read for
+    /// every key the array does not hold.
+    class_assoc_defaults: HashMap<String, Value>,
     pub monitor_prev: HashMap<String, Value>,
     /// Previously-printed values of the active `$monitor`'s non-`$time`
     /// arguments. `$monitor` re-prints only when one of these changes
@@ -12380,6 +12384,7 @@ impl Simulator {
             clocking_vis: HashMap::default(),
             deferred_clocking_conts: Vec::new(),
             pending_reactive: Vec::new(),
+            class_assoc_defaults: HashMap::default(),
             active_union_tag: HashMap::default(),
             max_time,
             tick_s,
@@ -76464,6 +76469,12 @@ impl Simulator {
                     if let Some(ev) = self.signals.get(&elem_name) {
                         return ev.clone();
                     }
+                    // §7.9.11: a `default:` the array was assigned.
+                    if !self.class_assoc_defaults.is_empty()
+                        && let Some(v) = self.class_assoc_defaults.get(&an)
+                    {
+                        return v.clone();
+                    }
                     // §7.8.6: a missing key reads the element type's default
                     // (x for `integer m[int]`, a signed 0 for `int`); §7.10.1:
                     // so does a queue or dynamic-array read past the end.
@@ -115996,6 +116007,17 @@ impl Simulator {
                 let h = self.eval_ident_handle(&base_nm).unwrap_or(0);
                 (h, hi.path[1].name.name.clone())
             }
+            // A bare member inside a method (`m = '{...}`): `this`'s store.
+            ExprKind::Ident(hi) if hi.path.len() == 1 && hi.path[0].selects.is_empty() => {
+                let nm = &hi.path[0].name.name;
+                match self.instance_assoc_member(nm) {
+                    Some(scoped) => match scoped.split_once('#') {
+                        Some((h, m)) if m == nm => (h.parse().unwrap_or(0), m.to_string()),
+                        _ => (0, String::new()),
+                    },
+                    None => (0, String::new()),
+                }
+            }
             _ => (0, String::new()),
         };
         if handle == 0 {
@@ -116020,13 +116042,7 @@ impl Simulator {
         // Associative array: `'{k:v,...}` — keyed items.
         if cd.assoc_properties.contains_key(member) {
             let val_w = cd.properties.get(member).map(|s| s.width).unwrap_or(32);
-            for item in items {
-                if let AssignmentPatternItem::Keyed(k, v) = item {
-                    let kv = self.eval_expr(k);
-                    let key = self.assoc_key_str(&scoped, &kv);
-                    self.pattern_leaf_at_elem_width(&format!("{}[{}]", scoped, key), v, val_w);
-                }
-            }
+            self.assign_class_assoc_pattern(&scoped, val_w, items);
             return true;
         }
         // Queue / dynamic array: positional items are the elements; they set
@@ -116043,6 +116059,66 @@ impl Simulator {
             return true;
         }
         false
+    }
+
+    /// §7.9.11 / §10.9.2: assign the pattern `'{k: v, ..., default: d}` to
+    /// the class associative-array member stored at `scoped`
+    /// (`<handle>#<member>`): it replaces the array's contents with the keyed
+    /// items, and `d` becomes the value read for every other key.
+    fn assign_class_assoc_pattern(
+        &mut self,
+        scoped: &str,
+        val_w: u32,
+        items: &[AssignmentPatternItem],
+    ) {
+        for k in self
+            .signals
+            .keys_with_elem_prefix(&Self::name_with_suffix(scoped, "["))
+        {
+            self.signals.remove(&k);
+        }
+        self.class_assoc_defaults.remove(scoped);
+        let elem_dt = self
+            .class_member_coll_type(scoped)
+            .cloned()
+            .filter(|dt| matches!(self.resolve_dt_ref(dt), DataType::Struct(_)));
+        for item in items {
+            match item {
+                AssignmentPatternItem::Keyed(k, v) => {
+                    let kv = self.eval_expr(k);
+                    let key = self.assoc_key_str(scoped, &kv);
+                    let target = Self::name_with_key(scoped, &key);
+                    match &elem_dt {
+                        Some(dt) => self.assign_pattern_or_leaf(&target, dt, v),
+                        None => self.pattern_leaf_at_elem_width(&target, v, val_w),
+                    }
+                }
+                AssignmentPatternItem::Default(e) if elem_dt.is_none() => {
+                    let mut v = if val_w > 0 {
+                        self.eval_expr_ctx(e, val_w)
+                    } else {
+                        self.eval_expr(e)
+                    };
+                    if val_w > 0 && !v.is_real && v.width != val_w {
+                        v = v.resize_for_assign(val_w);
+                    }
+                    if let Some(dt) = self.class_member_coll_type(scoped) {
+                        if super::elaborate::is_type_two_state_resolved(
+                            dt,
+                            &self.module.typedef_types,
+                        ) {
+                            v = v.to_two_state();
+                        }
+                        v.is_signed = super::elaborate::is_type_signed_resolved(
+                            dt,
+                            &self.module.typedef_types,
+                        );
+                    }
+                    self.class_assoc_defaults.insert(scoped.to_string(), v);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Evaluate one collection-element pattern item at its ELEMENT width and
@@ -143278,6 +143354,17 @@ impl Simulator {
                         self.fill_sized_new(&scoped, n_expr, src_expr);
                         continue;
                     }
+                }
+                // §7.9.11: an associative-array property's pattern
+                // initializer (`int m[int] = '{1: 5, default: -1}`) fills the
+                // per-instance store and records its default.
+                if let ExprKind::AssignmentPattern(items) = &init.kind
+                    && cdef.assoc_properties.contains_key(&pname)
+                {
+                    let scoped = format!("{}#{}", handle, pname);
+                    let val_w = cdef.properties.get(&pname).map(|s| s.width).unwrap_or(32);
+                    self.assign_class_assoc_pattern(&scoped, val_w, items);
+                    continue;
                 }
                 // Only re-evaluate side-effect-free initializers. Ones that call
                 // a function or constructor (`= new`, `= f()`) can recurse or
