@@ -147,3 +147,5 @@ mod queue_struct_pop;
 mod deferred_retsnap_slow_path;
 #[path = "collections/assoc_locator_methods.rs"]
 mod assoc_locator_methods;
+#[path = "collections/struct_dynamic_members.rs"]
+mod struct_dynamic_members;

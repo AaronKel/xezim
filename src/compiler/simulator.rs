@@ -7610,6 +7610,20 @@ pub struct Simulator {
     /// only name a typedef) can resolve to — the cheap gate in front of
     /// `class_struct_coll_name`'s receiver walk.
     struct_coll_member_prop_names: std::cell::OnceCell<HashSet<String>>,
+    /// Bit `len % 64` set for the length of every name in
+    /// `struct_coll_member_prop_names`: rejects most names without hashing.
+    struct_coll_member_len_mask: std::cell::Cell<u64>,
+    /// Struct-member collections that live inside an associative-array
+    /// ELEMENT (`aa[k].q`): growing one creates the element (§7.8.6), see
+    /// `mark_struct_coll_owner_present`.
+    assoc_elem_colls: HashSet<String>,
+    /// `(callee member, caller member)` collection copy-backs of the dynamic
+    /// members of an output/inout/ref struct formal, drained into the call's
+    /// queue writebacks (see `bind_unpacked_struct_formal`).
+    pending_struct_coll_wb: Vec<(String, String)>,
+    /// The staged dynamic members of a struct a `return` handed back (see
+    /// `stage_ret_struct_colls`), for the caller's assignment to copy.
+    pending_ret_struct: Option<String>,
     /// See `class_member_names`.
     class_member_names_cell: std::cell::OnceCell<ClassMemberNames>,
     /// Every bare name a `__vif_local__` key was ever created for (never
@@ -12784,6 +12798,10 @@ impl Simulator {
             multidim_members: None,
             struct_capable_prop_names: std::cell::OnceCell::new(),
             struct_coll_member_prop_names: std::cell::OnceCell::new(),
+            struct_coll_member_len_mask: std::cell::Cell::new(0),
+            assoc_elem_colls: HashSet::default(),
+            pending_struct_coll_wb: Vec::new(),
+            pending_ret_struct: None,
             class_member_names_cell: std::cell::OnceCell::new(),
             vif_local_names: HashSet::default(),
             method_def_cache: std::cell::RefCell::new(HashMap::default()),
@@ -64730,8 +64748,11 @@ impl Simulator {
                 })
             };
             if let Some(base) = base.filter(|b| !base_is_packed_member(self, b)) {
+                // An ASSOCIATIVE member (`s.aa["k"] = v`) is keyed, not
+                // indexed: the keyed write below formats its key (§7.8).
                 if !self.signal_name_to_id.contains_key(base.as_ref())
                     && !self.signals.contains_key(&*base)
+                    && !self.module.associative_arrays.contains_key(base.as_ref())
                 {
                     let i = self.eval_expr(index).to_i64().unwrap_or(0);
                     // §7.4.1: a bit-select into a FRAME-local unpacked-struct
@@ -76630,6 +76651,11 @@ impl Simulator {
                     if let Some(ev) = self.signals.get(&elem_name) {
                         return ev.clone();
                     }
+                    // A struct member queue of a FIXED array element
+                    // (`fa[1].q[0]`) can have its cells in the signal table.
+                    if is_dyn && let Some(ev) = self.table_elem_value(&elem_name) {
+                        return ev;
+                    }
                     // §7.9.11: a `default:` the array was assigned.
                     if !self.class_assoc_defaults.is_empty()
                         && let Some(v) = self.class_assoc_defaults.get(&an)
@@ -79110,18 +79136,15 @@ impl Simulator {
         lvalue: &Expression,
         rvalue: &Expression,
     ) {
-        // §10.9.2: a pattern written to an unpacked-struct class property.
-        if let ExprKind::AssignmentPattern(items) = &rvalue.kind
-            && !items.is_empty()
-            && !self.no_class_objects()
-            && Self::receiver_prop_name(lvalue).is_some_and(|p| self.struct_prop_name_possible(p))
-            && self.assign_class_struct_prop_pattern(stmt, lvalue, items)
-        {
-            self.settle_after_proc_write();
-            return;
-        }
         if self.simple_blocking_assign(lvalue, rvalue) || self.member_target_assign(lvalue, rvalue)
         {
+            return;
+        }
+        if (matches!(rvalue.kind, ExprKind::AssignmentPattern(_))
+            || self.lvalue_may_name_struct_coll(lvalue))
+            && self.try_struct_aggregate_assign(stmt, lvalue, rvalue)
+        {
+            self.settle_after_proc_write();
             return;
         }
         // §15.5.5: `event_var = other_event / null / q[i]` re-binds
@@ -79369,6 +79392,15 @@ impl Simulator {
                             })
                         })
                     });
+                    // A COLLECTION of structs (`ab = aa`) is not one struct:
+                    // its declared type is the element's. The collection
+                    // copies below own it.
+                    let whole_coll = |sim: &Self, n: &str| {
+                        sim.module.associative_arrays.contains_key(n)
+                            || sim.module.dynamic_arrays.contains(n)
+                            || sim.module.arrays.contains_key(n)
+                    };
+                    let has_dyn = has_dyn && !whole_coll(self, dst) && !whole_coll(self, src);
                     if has_dyn && self.struct_storage_exists(src, &su) {
                         self.copy_unpacked_struct(dst, src, &su);
                         self.settle_after_proc_write();
@@ -79558,8 +79590,12 @@ impl Simulator {
                             | ExprKind::Index { .. }
                     )
                 {
+                    self.pending_ret_struct = None;
                     let v = self.eval_expr(rvalue);
                     if self.spread_into_unpacked_struct(&dst, &su.clone(), &v) {
+                        if self.pending_ret_struct.is_some() {
+                            self.copy_ret_struct_colls(&dst, &su);
+                        }
                         self.settle_after_proc_write();
                         return;
                     }
@@ -81511,6 +81547,20 @@ impl Simulator {
                 for (k, v) in entries {
                     self.signals.insert(k, v);
                 }
+                // §7.2/§7.2.1: a struct element's members are leaves under
+                // the element (`aa[k].m`), and its dynamic members are
+                // collections with sizes of their own — not cells of the
+                // array the raw copy above moved. Copy each element whole.
+                if let Some(su) = self.queue_elem_struct(&rname) {
+                    let (lname, rname) = (lname.into_owned(), rname.into_owned());
+                    for key in self.assoc_top_level_keys(&rname) {
+                        let (d, s) = (format!("{}[{}]", lname, key), format!("{}[{}]", rname, key));
+                        self.copy_unpacked_struct(&d, &s, &su);
+                        if self.get_signal_value_by_name(&d).is_none() {
+                            self.set_signal_value_by_name(&d, Value::zero(1));
+                        }
+                    }
+                }
                 self.settle_after_proc_write();
                 return;
             }
@@ -81706,73 +81756,7 @@ impl Simulator {
                         exprs.iter().collect()
                     };
                     // Expand queue/array elements in concat (e.g. q = {q, 4})
-                    let mut all_vals: Vec<Value> = Vec::new();
-                    for expr in items {
-                        // A queue/array operand — bare (`q`), an instance-
-                        // scoped member (`obj.q`, `arr[i].q`), or a nested
-                        // assoc-of-queue element (`assoc[key]`) —
-                        // contributes each of its elements in order.
-                        let qn = self.array_operand_name(expr).or_else(|| {
-                            self.nested_index_name(expr)
-                                .filter(|cn| self.module.dynamic_arrays.contains(cn))
-                        });
-                        if let Some(ename) = qn {
-                            let esize = self.get_queue_size(&ename) as usize;
-                            for j in 0..esize {
-                                if let Some(v) =
-                                    self.get_signal_value_by_name(&format!("{}[{}]", ename, j))
-                                {
-                                    all_vals.push(v);
-                                }
-                            }
-                            continue;
-                        }
-                        // Slice of a queue: q[a:b]
-                        if let ExprKind::RangeSelect {
-                            expr: rbase,
-                            left,
-                            right,
-                            ..
-                        } = &expr.kind
-                        {
-                            if let ExprKind::Ident(rhier) = &rbase.kind {
-                                let mut rname = self.resolve_hier_name(rhier);
-                                // Instance-scope a member-queue slice
-                                // operand inside a concat (`{q[0:i], …}`).
-                                if let Some(s) = self.instance_assoc_member(&rname) {
-                                    rname = std::borrow::Cow::Owned(s);
-                                }
-                                if self.module.arrays.contains_key(&*rname) {
-                                    let (r_lo_a, r_hi_a, _) = self.module.arrays[&*rname];
-                                    let r_is_dyn = self.module.dynamic_arrays.contains(&*rname);
-                                    let r_upper: i64 = if r_is_dyn {
-                                        (self.get_queue_size(&rname) as i64) - 1
-                                    } else {
-                                        r_hi_a
-                                    };
-                                    self.dollar_bound.push(r_upper);
-                                    let l = self.eval_expr(left).to_i64().unwrap_or(0);
-                                    let r = self.eval_expr(right).to_i64().unwrap_or(0);
-                                    self.dollar_bound.pop();
-                                    if l <= r {
-                                        let lo = l.max(r_lo_a);
-                                        let hi = r.min(r_upper);
-                                        if hi >= lo {
-                                            for idx in lo..=hi {
-                                                if let Some(v) = self.get_signal_value_by_name(
-                                                    &format!("{}[{}]", rname, idx),
-                                                ) {
-                                                    all_vals.push(v);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                        all_vals.push(self.eval_expr(expr));
-                    }
+                    let all_vals = self.unpacked_concat_operand_values(items);
                     let is_dyn = self.module.dynamic_arrays.contains(&*lname);
                     let (lo, hi, _w) = self
                         .module
@@ -81833,6 +81817,81 @@ impl Simulator {
         }
         self.assign_value(lvalue, &val);
         self.settle_after_proc_write();
+    }
+
+    /// §10.10/§11.4.12: the elements an unpacked-array concatenation's
+    /// operands contribute, in order — a queue / array operand (bare, an
+    /// object member, a struct member reached through any selects, an
+    /// associative element that is itself a collection) or a slice of one
+    /// contributes all of its elements; anything else is one element.
+    #[inline(never)]
+    fn unpacked_concat_operand_values(&mut self, items: Vec<&Expression>) -> Vec<Value> {
+        let mut all_vals: Vec<Value> = Vec::new();
+        for expr in items {
+            // A queue/array operand — bare (`q`), an instance-
+            // scoped member (`obj.q`, `arr[i].q`), or a nested
+            // assoc-of-queue element (`assoc[key]`) —
+            // contributes each of its elements in order.
+            let qn = self.array_operand_name(expr).or_else(|| {
+                self.nested_index_name(expr)
+                    .filter(|cn| self.module.dynamic_arrays.contains(cn))
+            });
+            if let Some(ename) = qn {
+                let esize = self.get_queue_size(&ename) as usize;
+                for j in 0..esize {
+                    if let Some(v) = self.get_signal_value_by_name(&format!("{}[{}]", ename, j)) {
+                        all_vals.push(v);
+                    }
+                }
+                continue;
+            }
+            // Slice of a queue: q[a:b]
+            if let ExprKind::RangeSelect {
+                expr: rbase,
+                left,
+                right,
+                ..
+            } = &expr.kind
+            {
+                if let ExprKind::Ident(rhier) = &rbase.kind {
+                    let mut rname = self.resolve_hier_name(rhier);
+                    // Instance-scope a member-queue slice
+                    // operand inside a concat (`{q[0:i], …}`).
+                    if let Some(s) = self.instance_assoc_member(&rname) {
+                        rname = std::borrow::Cow::Owned(s);
+                    }
+                    if self.module.arrays.contains_key(&*rname) {
+                        let (r_lo_a, r_hi_a, _) = self.module.arrays[&*rname];
+                        let r_is_dyn = self.module.dynamic_arrays.contains(&*rname);
+                        let r_upper: i64 = if r_is_dyn {
+                            (self.get_queue_size(&rname) as i64) - 1
+                        } else {
+                            r_hi_a
+                        };
+                        self.dollar_bound.push(r_upper);
+                        let l = self.eval_expr(left).to_i64().unwrap_or(0);
+                        let r = self.eval_expr(right).to_i64().unwrap_or(0);
+                        self.dollar_bound.pop();
+                        if l <= r {
+                            let lo = l.max(r_lo_a);
+                            let hi = r.min(r_upper);
+                            if hi >= lo {
+                                for idx in lo..=hi {
+                                    if let Some(v) = self
+                                        .get_signal_value_by_name(&format!("{}[{}]", rname, idx))
+                                    {
+                                        all_vals.push(v);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+            all_vals.push(self.eval_expr(expr));
+        }
+        all_vals
     }
 
     /// The size and optional source of a §7.5.1 dynamic-array constructor:
@@ -84460,6 +84519,12 @@ impl Simulator {
                         .insert(d.name.name.clone(), data_type.clone());
                     self.note_struct_root(&d.name.name);
                     self.note_struct_type(data_type);
+                    // §6.21: each entry gets FRESH (empty) dynamic members.
+                    if self.struct_colls_possible()
+                        && let Some(su) = self.unpacked_struct_of(data_type)
+                    {
+                        self.fresh_struct_colls(&d.name.name, &su);
+                    }
                     // A decl-init whose SOURCE is an unpacked-struct
                     // CLASS property (`pair_t p = o.orig;`, incl. the
                     // ternary form) must write the leaves member-wise —
@@ -84494,6 +84559,9 @@ impl Simulator {
                                     self.register_packed_leaf_layout(&k, &mdt);
                                     self.widths.insert(k.clone(), dv.width);
                                     self.signals.insert(k, dv);
+                                }
+                                if self.struct_colls_possible() {
+                                    self.fresh_struct_colls(&d.name.name, &su);
                                 }
                                 if let Some(init_expr) = d.init.clone() {
                                     self.init_unpacked_struct_local(d, data_type, &init_expr);
@@ -86232,6 +86300,17 @@ impl Simulator {
                             None => self.eval_expr(e),
                         },
                     };
+                    if self.struct_colls_possible()
+                        && matches!(
+                            e.kind,
+                            ExprKind::Ident(_)
+                                | ExprKind::MemberAccess { .. }
+                                | ExprKind::Index { .. }
+                        )
+                        && self.root_may_hold_struct(e)
+                    {
+                        self.stage_ret_struct_colls(e);
+                    }
                     self.return_value = Some(v);
                     // §25.9: a returned VIRTUAL INTERFACE carries only a
                     // sentinel value; record the instance it is bound to so
@@ -105087,6 +105166,10 @@ impl Simulator {
     }
 
     fn set_queue_size(&mut self, obj_name: &str, size: u64) {
+        if !self.assoc_elem_colls.is_empty() && size > 0 && self.assoc_elem_colls.contains(obj_name)
+        {
+            self.mark_struct_coll_owner_present(obj_name);
+        }
         let leaf = obj_name.rsplit("::").next().unwrap_or(obj_name);
         note_store_write(name_bit(leaf));
         note_store_write(name_bit(obj_name));
@@ -107910,6 +107993,84 @@ impl Simulator {
             }
             self.module.arrays.insert(name.clone(), (0, 63, w));
             self.set_queue_size(&name, 0);
+        }
+        // Every other statically named dynamic member: one inside a NESTED
+        // struct (`s.in.q`), an associative member (`s.aa`), or one below
+        // a fixed member array of structs (`s.rows[1].q`). Each registers
+        // exactly as its runtime classification would.
+        let mut names: Vec<String> = Vec::new();
+        let mut budget = 1usize << 16;
+        for (root, dt) in self
+            .module
+            .var_decl_types
+            .iter()
+            .filter(|(k, _)| !k.contains(['.', '[', ':', '#']))
+        {
+            let Some(su) = self.unpacked_struct_of(dt) else {
+                continue;
+            };
+            let prefixes: Vec<String> = match self.module.arrays.get(root.as_str()) {
+                Some(_) if self.module.dynamic_arrays.contains(root.as_str()) => continue,
+                Some(&(lo, hi, _)) if hi.abs_diff(lo) < 4096 => (lo.min(hi)..=lo.max(hi))
+                    .map(|i| format!("{}[{}]", root, i))
+                    .collect(),
+                Some(_) => continue,
+                None if self.is_associative_array(root) => continue,
+                None if self.module.arrays_2d.contains_key(root.as_str())
+                    || self.module.arrays_nd.contains_key(root.as_str()) =>
+                {
+                    continue;
+                }
+                None => vec![root.clone()],
+            };
+            for p in prefixes {
+                self.collect_struct_member_colls(&p, &su, 0, &mut budget, &mut names);
+            }
+        }
+        for n in names {
+            self.ensure_struct_member_coll(&n);
+        }
+    }
+
+    /// The statically named dynamic members below the struct `su` rooted at
+    /// `base` (see `register_struct_member_collections`).
+    fn collect_struct_member_colls(
+        &self,
+        base: &str,
+        su: &crate::ast::types::StructUnionType,
+        depth: usize,
+        budget: &mut usize,
+        out: &mut Vec<String>,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        for m in &su.members {
+            for d in &m.declarators {
+                if *budget == 0 {
+                    return;
+                }
+                *budget -= 1;
+                let target = format!("{}.{}", base, d.name.name);
+                if d.dimensions.is_empty() {
+                    if let Some(inner) = self.unpacked_struct_of(&m.data_type) {
+                        self.collect_struct_member_colls(&target, &inner, depth + 1, budget, out);
+                    }
+                } else if d.dimensions.len() == 1 && Self::coll_kind_of(&d.dimensions).is_some() {
+                    if !self.module.dynamic_arrays.contains(&target)
+                        && !self.module.associative_arrays.contains_key(&target)
+                    {
+                        out.push(target);
+                    }
+                } else if let Some(inner) = self.unpacked_struct_of(&m.data_type) {
+                    if let Some(tups) = self.member_elem_indices(&d.dimensions) {
+                        for t in tups {
+                            let et = format!("{}{}", target, Self::index_suffix(&t));
+                            self.collect_struct_member_colls(&et, &inner, depth + 1, budget, out);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -113148,8 +113309,19 @@ impl Simulator {
     /// Could `member` be a dynamic/queue/associative member of a struct some
     /// class property resolves to? The class/typedef tables are fixed at run
     /// time, so the answer is computed once.
+    #[inline]
     fn struct_coll_member_possible(&self, member: &str) -> bool {
-        self.struct_coll_member_names().contains(member)
+        let names = self.struct_coll_member_names();
+        !names.is_empty()
+            && self.struct_coll_member_len_mask.get() & (1u64 << (member.len() & 63)) != 0
+            && names.contains(member)
+    }
+
+    /// Whether any struct type declares a dynamic member at all — the gate
+    /// every struct-collection path checks first.
+    #[inline]
+    fn struct_colls_possible(&self) -> bool {
+        !self.struct_coll_member_names().is_empty()
     }
 
     /// The set [`struct_coll_member_possible`] consults: member names that
@@ -113159,7 +113331,17 @@ impl Simulator {
     /// binding can only name a typedef (inline struct type arguments are not
     /// resolvable), and `resolve_dt_ref` resolves through exactly these
     /// tables, so the set is a sound superset of what the probe can match.
+    #[inline]
     fn struct_coll_member_names(&self) -> &HashSet<String> {
+        match self.struct_coll_member_prop_names.get() {
+            Some(set) => set,
+            None => self.init_struct_coll_member_names(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn init_struct_coll_member_names(&self) -> &HashSet<String> {
         self.struct_coll_member_prop_names.get_or_init(|| {
             let mut set: HashSet<String> = HashSet::default();
             let mut work: Vec<DataType> = Vec::new();
@@ -113167,6 +113349,14 @@ impl Simulator {
                 work.extend(cd.property_types.values().cloned());
             }
             work.extend(self.module.typedef_types.values().cloned());
+            // Inline struct types of module / package / local variables
+            // (`struct { int q[$]; } s;`) appear in no typedef table. Only
+            // the unpacked-struct ones can contribute.
+            for dt in self.module.var_decl_types.values() {
+                if matches!(self.resolve_dt_ref(dt), DataType::Struct(su) if !su.packed) {
+                    work.push(dt.clone());
+                }
+            }
             let mut budget = 65536usize;
             while let Some(dt) = work.pop() {
                 if budget == 0 {
@@ -113184,6 +113374,8 @@ impl Simulator {
                     }
                 }
             }
+            let mask = set.iter().fold(0u64, |m, n| m | (1u64 << (n.len() & 63)));
+            self.struct_coll_member_len_mask.set(mask);
             set
         })
     }
@@ -115299,9 +115491,6 @@ impl Simulator {
     /// dimension (a collection mid-path belongs to the nested-collection
     /// machinery, and a packed struct cannot hold one, §7.2.4).
     fn class_struct_coll_name(&mut self, e: &Expression) -> Option<String> {
-        if self.no_class_objects() {
-            return None;
-        }
         // Perf gate, BEFORE any allocation: the chain's trailing member name
         // must be one of the (few) names some reachable struct declares as a
         // dynamic/queue/associative member. The boundary walk below evaluates
@@ -115315,6 +115504,19 @@ impl Simulator {
         if !self.struct_coll_member_possible(trailing) {
             return None;
         }
+        if !self.no_class_objects()
+            && let Some(n) = self.class_struct_coll_walk(e)
+        {
+            return Some(n);
+        }
+        // The same member of a struct held anywhere else: a variable, a
+        // nested struct, or an element of an array (`aa[k].q`, `q[i].d`).
+        self.struct_member_coll_name(e)
+    }
+
+    /// The receiver walk of [`class_struct_coll_name`], past its gate.
+    #[inline(never)]
+    fn class_struct_coll_walk(&mut self, e: &Expression) -> Option<String> {
         // Member names, root-first: `bd.pkt.qmem` → [bd, pkt, qmem];
         // `this.pkt.qmem` and `pkt.qmem` → [pkt, qmem].
         let mut segs: Vec<String> = Vec::new();
@@ -115438,6 +115640,304 @@ impl Simulator {
         elem_w: u32,
     ) {
         let name = format!("{}#{}", handle, key);
+        self.register_coll_name(&name, kind, elem_w, false);
+    }
+
+    /// §7.2.1/§7.5/§7.8/§7.10: the collection a DYNAMIC member of an unpacked
+    /// struct designates — kind, element type and whether an associative
+    /// member is string-keyed — for the flattened storage name `flat`
+    /// (`s.q`, `s.in.q`, `aa[k].q`, `q[2].d`, `fa[1].m`). A struct member
+    /// that is a queue / dynamic / associative array is a collection object
+    /// of its own, named by the path to it, wherever the struct lives: in a
+    /// variable, a nested struct, or an element of any array. The answer
+    /// comes from the declared types alone, so a path composed at run time
+    /// (an associative key, a queue index) classifies exactly like a static
+    /// one. `None` for anything else, including a collection reached through
+    /// a further select (`s.q[1]` is an element, not the collection).
+    fn struct_member_coll_of(&self, flat: &str) -> Option<(StructCollKind, DataType, bool)> {
+        let segs = Self::split_flat_path(flat);
+        if segs.len() < 2 {
+            return None;
+        }
+        // The root's declared type; for an array root this is already the
+        // ELEMENT type, so the root's own selects are consumed.
+        let root = segs[0].0.as_str();
+        let mut dt: DataType = match self.module.var_decl_types.get(root) {
+            Some(d) => d.clone(),
+            None => self.class_member_coll_type(root)?.clone(),
+        };
+        let last = segs.len() - 1;
+        for (j, (seg, nidx)) in segs.iter().enumerate().skip(1) {
+            let su = self.unpacked_struct_of(&dt)?;
+            let (mdt, dims) = Self::struct_member_decl(&su, seg)?;
+            if j == last {
+                if *nidx != 0 || dims.len() != 1 {
+                    return None;
+                }
+                let kind = Self::coll_kind_of(&dims)?;
+                return Some((kind, mdt, self.string_keyed_dim(&dims[0])));
+            }
+            // An intermediate member must be selected down to one element.
+            if *nidx != dims.len() {
+                return None;
+            }
+            dt = mdt;
+        }
+        None
+    }
+
+    /// Put the struct-member collection `name` on the §7.8 collection
+    /// registries (see [`register_coll_name`]) when its declared type says it
+    /// is one. Returns whether `name` is a registered collection afterwards.
+    fn ensure_struct_member_coll(&mut self, name: &str) -> bool {
+        if self.module.dynamic_arrays.contains(name)
+            || self.module.associative_arrays.contains_key(name)
+        {
+            return true;
+        }
+        let Some((kind, dt, string_key)) = self.struct_member_coll_of(name) else {
+            return false;
+        };
+        let elem_w = resolve_type_width(
+            &dt,
+            Some(&self.module.parameters),
+            Some(&self.module.typedefs),
+        )
+        .max(1);
+        self.register_coll_name(name, kind, elem_w, string_key);
+        if self.owner_is_assoc_elem(name) {
+            self.assoc_elem_colls.insert(name.to_string());
+        }
+        true
+    }
+
+    /// Whether some select of `name` that is followed by a member (`aa[k].`)
+    /// selects an element of an associative array.
+    fn owner_is_assoc_elem(&self, name: &str) -> bool {
+        !self.assoc_elem_owners(name).is_empty()
+    }
+
+    /// The associative-array ELEMENTS on the path `name` passes through
+    /// (`aa[k]` of `aa[k].q`, outermost first): every top-level select
+    /// followed by a member whose container is an associative array.
+    fn assoc_elem_owners<'n>(&self, name: &'n str) -> Vec<&'n str> {
+        let bytes = name.as_bytes();
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        let mut open = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'[' => {
+                    if depth == 0 {
+                        open = i;
+                    }
+                    depth += 1;
+                }
+                b']' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0
+                        && bytes.get(i + 1) == Some(&b'.')
+                        && self.is_associative_array(&name[..open])
+                    {
+                        out.push(&name[..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// §7.2.1/§7.8: the storage name of a dynamic member of an unpacked
+    /// struct reached through a select or member chain — `aa[k].q`,
+    /// `q[i].d`, `s.in.q`, `arr[2].m` — registered on first sight, so the
+    /// collection machinery (methods, element cells, `.size`, concatenation
+    /// operands, whole assignment) treats it like a declared collection.
+    /// The trailing member name gates the work: only names some struct type
+    /// declares with a dynamic dimension go further.
+    fn struct_member_coll_name(&mut self, e: &Expression) -> Option<String> {
+        let flat = match &e.kind {
+            ExprKind::MemberAccess { expr: base, member } => {
+                if !self.struct_coll_member_possible(&member.name) {
+                    return None;
+                }
+                // An ELEMENT of a class-property collection of structs
+                // (`c.aa[k].q`, `fa[i].q` in a method) is keyed under the
+                // instance (`<h>#aa[k]`).
+                if matches!(base.kind, ExprKind::Index { .. })
+                    && !self.no_class_objects()
+                    && let Some(row) = self.coll_elem_expr_key(base)
+                    && row.contains('#')
+                {
+                    let f = format!("{}.{}", row, member.name);
+                    if self.ensure_struct_member_coll(&f) {
+                        return Some(f);
+                    }
+                }
+                if !self.root_may_hold_struct(e) {
+                    return None;
+                }
+                self.flat_member_name(e)?
+            }
+            // `foreach (aa[k].q[i])` names its array as ONE hierarchical
+            // identifier whose segments carry the selects.
+            ExprKind::Ident(h)
+                if h.path.len() >= 2
+                    && h.path.last().is_some_and(|s| s.selects.is_empty())
+                    && h.path.iter().any(|s| !s.selects.is_empty()) =>
+            {
+                let last = &h.path.last()?.name.name;
+                if !self.struct_coll_member_possible(last) {
+                    return None;
+                }
+                if !self.root_may_hold_struct(e) {
+                    return None;
+                }
+                let chain = Self::hier_select_chain(h, e.span);
+                self.flat_member_name(&chain)?
+            }
+            _ => return None,
+        };
+        if !self.ensure_struct_member_coll(&flat) {
+            return None;
+        }
+        Some(flat)
+    }
+
+    /// `s.m.first(k)` / `last` / `next` / `prev` on an associative member of
+    /// a struct (§7.9.4-§7.9.7): only for a receiver that IS a registered
+    /// associative array, so a class's own `first()` is untouched.
+    #[cold]
+    #[inline(never)]
+    fn struct_assoc_member_walk(
+        &mut self,
+        hier: &crate::ast::expr::HierarchicalIdentifier,
+        args: &[Expression],
+    ) -> Option<Value> {
+        let len = hier.path.len();
+        let m = hier.path[len - 1].name.name.as_str();
+        if !matches!(m, "first" | "last" | "next" | "prev") {
+            return None;
+        }
+        let base_expr = self.method_receiver_expr(hier, len - 1);
+        let ExprKind::Ident(bh) = &base_expr.kind else {
+            return None;
+        };
+        let bn = self.resolve_hier_name(bh).into_owned();
+        if !self.module.associative_arrays.contains_key(&bn) {
+            return None;
+        }
+        let m = m.to_string();
+        self.eval_builtin_method(&bn, &m, args)
+    }
+
+    /// The value of a collection element cell wherever it lives (the
+    /// `signals` map was already consulted by the caller).
+    #[cold]
+    #[inline(never)]
+    fn table_elem_value(&self, name: &str) -> Option<Value> {
+        self.get_signal_value_by_name(name)
+    }
+
+    /// Whether the variable at the root of the select / member chain `e` is
+    /// declared with an unpacked-struct (element) type — the only roots whose
+    /// flattened paths `struct_member_coll_of` can classify. Answered before
+    /// any name is built, so a class-handle receiver (`obj.q`) costs nothing.
+    fn root_may_hold_struct(&self, e: &Expression) -> bool {
+        let mut cur = e;
+        loop {
+            match &cur.kind {
+                ExprKind::MemberAccess { expr, .. } | ExprKind::Index { expr, .. } => cur = expr,
+                ExprKind::Ident(h) => {
+                    let skip = usize::from(
+                        h.path.len() >= 2 && self.module.packages.contains(&h.path[0].name.name),
+                    );
+                    let Some(seg) = h.path.get(skip) else {
+                        return false;
+                    };
+                    let bare = seg.name.name.as_str();
+                    let root = self.dyn_name_lookup(bare).unwrap_or(bare);
+                    let dt = self
+                        .module
+                        .var_decl_types
+                        .get(root)
+                        .or_else(|| self.module.var_decl_types.get(bare));
+                    return dt.is_some_and(|dt| {
+                        matches!(self.resolve_dt_ref(dt), DataType::Struct(su) if Self::spreads_member_wise(su))
+                    });
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// The select / member-access chain a hierarchical identifier with
+    /// per-segment selects (`a[k].b[i].c`) stands for.
+    fn hier_select_chain(
+        h: &crate::ast::expr::HierarchicalIdentifier,
+        span: crate::ast::Span,
+    ) -> Expression {
+        let mut cur: Option<Expression> = None;
+        for seg in &h.path {
+            let mut e = match cur.take() {
+                None => {
+                    let mut root = h.clone();
+                    root.path = vec![crate::ast::expr::HierPathSegment {
+                        name: seg.name.clone(),
+                        selects: Vec::new(),
+                    }];
+                    root.cached_signal_id = std::cell::Cell::new(None);
+                    root.cached_resolved_name = std::cell::OnceCell::new();
+                    Expression::new(ExprKind::Ident(root), span)
+                }
+                Some(b) => Expression::new(
+                    ExprKind::MemberAccess {
+                        expr: Box::new(b),
+                        member: seg.name.clone(),
+                    },
+                    span,
+                ),
+            };
+            for sel in &seg.selects {
+                e = Expression::new(
+                    ExprKind::Index {
+                        expr: Box::new(e),
+                        index: Box::new(sel.clone()),
+                    },
+                    span,
+                );
+            }
+            cur = Some(e);
+        }
+        cur.expect("non-empty hierarchical path")
+    }
+
+    /// §7.8.6: a write through a dynamic member of an associative-array
+    /// ELEMENT (`aa[k].q.push_back(v)`, `aa[k].q = {...}`) creates that
+    /// element. Record the presence marker `aa[k]` (the cell `exists`,
+    /// `num` and `foreach` enumerate) for every associative ancestor of
+    /// `name`.
+    fn mark_struct_coll_owner_present(&mut self, name: &str) {
+        for elem in self.assoc_elem_owners(name) {
+            if self.get_signal_value_by_name(elem).is_none() {
+                self.set_signal_value_by_name(elem, Value::zero(1));
+            }
+        }
+    }
+
+    /// Put the collection `name` on the §7.8 collection registries, mirroring
+    /// what a directly-declared collection gets: element cells at
+    /// `<name>[k]`, the size shadow at `<name>.size`, queue append-on-write
+    /// for the dynamic/queue kinds, key-stringified reads and default
+    /// element widths for associative ones. Idempotent.
+    fn register_coll_name(
+        &mut self,
+        name: &str,
+        kind: StructCollKind,
+        elem_w: u32,
+        string_key: bool,
+    ) {
+        let name = name.to_string();
         let known = match kind {
             StructCollKind::Dynamic => self.module.dynamic_arrays.contains(&name),
             StructCollKind::Queue => self.module.queue_vars.contains(&name),
@@ -115456,10 +115956,17 @@ impl Simulator {
                 if elem_w > 0 {
                     self.module.assoc_elem_widths.insert(name.clone(), elem_w);
                 }
-                self.set_queue_size(&name, 0);
+                if self
+                    .get_signal_value_by_name(&Self::name_with_suffix(&name, ".size"))
+                    .is_none()
+                {
+                    self.set_queue_size(&name, 0);
+                }
             }
             StructCollKind::Assoc => {
-                self.module.associative_arrays.insert(name.clone(), false);
+                self.module
+                    .associative_arrays
+                    .insert(name.clone(), string_key);
                 if elem_w > 0 {
                     self.module.assoc_elem_widths.insert(name, elem_w);
                 }
@@ -116844,6 +117351,214 @@ impl Simulator {
         self.write_leaf_by_name(target, v);
     }
 
+    /// §7.5/§7.8/§7.10: assign the collection-valued expression `e` to the
+    /// whole collection `name`, whose elements have type `elem_dt`: an
+    /// assignment pattern (positional elements, or `key: value` pairs and a
+    /// `default:` for an associative array), an unpacked-array concatenation,
+    /// another collection, or a call returning one. The old contents are
+    /// replaced, not merged. Returns false (nothing written) for any other
+    /// expression.
+    #[inline(never)]
+    fn assign_whole_coll(
+        &mut self,
+        name: &str,
+        elem_dt: Option<&DataType>,
+        e: &Expression,
+    ) -> bool {
+        let is_assoc = self.is_associative_array(name);
+        // Without a declared element type (a class struct property's member),
+        // items take the registered element width.
+        let elem_w = self
+            .module
+            .arrays
+            .get(name)
+            .map(|t| t.2)
+            .or_else(|| self.module.assoc_elem_widths.get(name).copied())
+            .unwrap_or(32);
+        match &e.kind {
+            ExprKind::AssignmentPattern(items) => {
+                if is_assoc {
+                    self.eval_builtin_method(name, "delete", &[]);
+                    self.module.assoc_defaults.remove(name);
+                    for item in items {
+                        match item {
+                            AssignmentPatternItem::Keyed(k, v) => {
+                                let kv = self.eval_expr(k);
+                                let key = self.assoc_key_str(name, &kv);
+                                let cell = format!("{}[{}]", name, key);
+                                match elem_dt {
+                                    Some(dt) => self.assign_pattern_or_leaf(&cell, dt, v),
+                                    None => self.pattern_leaf_at_elem_width(&cell, v, elem_w),
+                                }
+                            }
+                            AssignmentPatternItem::Default(d) => {
+                                self.module
+                                    .assoc_defaults
+                                    .insert(name.to_string(), d.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !items.is_empty() {
+                        self.mark_struct_coll_owner_present(name);
+                    }
+                } else {
+                    let exprs: Vec<Expression> =
+                        self.pattern_ordered(items).into_iter().cloned().collect();
+                    for (i, x) in exprs.iter().enumerate() {
+                        let cell = format!("{}[{}]", name, i);
+                        match elem_dt {
+                            Some(dt) => self.assign_pattern_or_leaf(&cell, dt, x),
+                            None => self.pattern_leaf_at_elem_width(&cell, x, elem_w),
+                        }
+                    }
+                    self.set_queue_size(name, exprs.len() as u64);
+                }
+                true
+            }
+            ExprKind::Concatenation(exprs) if !is_assoc => {
+                let vals = self.unpacked_concat_operand_values(exprs.iter().collect());
+                let n = vals.len() as u64;
+                for (i, v) in vals.into_iter().enumerate() {
+                    self.set_signal_value_by_name(&format!("{}[{}]", name, i), v);
+                }
+                self.set_queue_size(name, n);
+                true
+            }
+            ExprKind::Call { .. } => {
+                self.pending_ret_collection = None;
+                let _ = self.eval_expr(e);
+                match self.pending_ret_collection.take() {
+                    Some(src) if !is_assoc => {
+                        if src != name {
+                            self.copy_whole_queue(name, &src);
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => {
+                let src = match &e.kind {
+                    ExprKind::Ident(h) => {
+                        let mut nm = self.resolve_hier_name(h).into_owned();
+                        if let Some(sc) = self.instance_assoc_member(&nm) {
+                            nm = sc;
+                        }
+                        Some(nm)
+                    }
+                    _ => self.expr_assoc_name(e),
+                };
+                let Some(src) = src else {
+                    return false;
+                };
+                if src == name {
+                    return true;
+                }
+                if is_assoc && self.is_associative_array(&src) {
+                    self.copy_assoc_entries(name, &src);
+                    true
+                } else if !is_assoc && self.module.dynamic_arrays.contains(&src) {
+                    self.copy_whole_queue(name, &src);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// §7.9.9: `dst = src` between associative arrays — `dst` ends up with
+    /// exactly `src`'s entries.
+    fn copy_assoc_entries(&mut self, dst: &str, src: &str) {
+        self.eval_builtin_method(dst, "delete", &[]);
+        let prefix = format!("{}[", src);
+        let entries: Vec<(String, Value)> = self
+            .signals
+            .keys_with_elem_prefix(&prefix)
+            .into_iter()
+            .filter(|k| k.ends_with(']'))
+            .filter_map(|k| {
+                let v = self.signals.get(&k)?.clone();
+                let key = &k[prefix.len()..k.len() - 1];
+                Some((format!("{}[{}]", dst, key), v))
+            })
+            .collect();
+        let any = !entries.is_empty();
+        for (k, v) in entries {
+            self.signals.insert(k, v);
+        }
+        if let Some(d) = self.module.assoc_defaults.get(src).cloned() {
+            self.module.assoc_defaults.insert(dst.to_string(), d);
+        }
+        if any {
+            self.mark_struct_coll_owner_present(dst);
+        }
+    }
+
+    /// Could `lvalue` name a dynamic member of a struct (`x.q`, `a[k].q`)?
+    /// Only its trailing member name is consulted.
+    #[inline]
+    fn lvalue_may_name_struct_coll(&self, lvalue: &Expression) -> bool {
+        let m = match &lvalue.kind {
+            ExprKind::MemberAccess { member, .. } => member.name.as_str(),
+            ExprKind::Ident(h) if h.path.len() >= 2 => match h.path.last() {
+                Some(seg) => seg.name.name.as_str(),
+                None => return false,
+            },
+            _ => return false,
+        };
+        self.struct_coll_member_possible(m)
+    }
+
+    /// The struct-aggregate assignments the flat-name paths below cannot see:
+    /// a whole dynamic member of a struct reached through a select
+    /// (`aa[k].q = {1, 2}`, §7.2.1), and a pattern written to an
+    /// unpacked-struct class property (§10.9.2). Returns whether it assigned.
+    #[cold]
+    #[inline(never)]
+    fn try_struct_aggregate_assign(
+        &mut self,
+        stmt: &Statement,
+        lvalue: &Expression,
+        rvalue: &Expression,
+    ) -> bool {
+        let trailing_member = match &lvalue.kind {
+            ExprKind::MemberAccess { member, .. } => Some(member.name.as_str()),
+            ExprKind::Ident(h) if h.path.len() >= 2 => h.path.last().map(|s| s.name.name.as_str()),
+            _ => None,
+        };
+        if trailing_member.is_some_and(|m| self.struct_coll_member_possible(m))
+            && self.assign_struct_member_coll(lvalue, rvalue)
+        {
+            return true;
+        }
+        if let ExprKind::AssignmentPattern(items) = &rvalue.kind
+            && !items.is_empty()
+            && !self.no_class_objects()
+            && Self::receiver_prop_name(lvalue).is_some_and(|p| self.struct_prop_name_possible(p))
+            && self.assign_class_struct_prop_pattern(stmt, lvalue, items)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// `aa[k].q = rhs`, `q[i].d = rhs`: a whole assignment to a dynamic member
+    /// of a struct reached through selects (§7.2.1). The flattened-name
+    /// collection paths only see a plain identifier target.
+    #[cold]
+    #[inline(never)]
+    fn assign_struct_member_coll(&mut self, lvalue: &Expression, rvalue: &Expression) -> bool {
+        // A member of a struct CLASS PROPERTY (`c.s.q`, `s.q` in a method)
+        // lives under the instance and has no declared element type there.
+        let Some(name) = self.class_struct_coll_name(lvalue) else {
+            return false;
+        };
+        let dt = self.struct_member_coll_of(&name).map(|(_, dt, _)| dt);
+        self.assign_whole_coll(&name, dt.as_ref(), rvalue)
+    }
+
     /// §10.9.2/§7.2: an assignment pattern written to an unpacked-struct
     /// CLASS PROPERTY (`s = '{x: 1, q: '{2, 3}}` in a method, `c.s = ...`):
     /// each member is assigned its item through the property's member path,
@@ -117012,13 +117727,24 @@ impl Simulator {
         su: &crate::ast::types::StructUnionType,
         items: &[AssignmentPatternItem],
     ) {
-        for (mname, mdt, dims, e, _) in self.bind_struct_pattern_items(su, items) {
+        for (mname, mdt, dims, e, explicit) in self.bind_struct_pattern_items(su, items) {
             let Some(e) = e else {
                 continue;
             };
             let target = format!("{}.{}", base, mname);
             if dims.is_empty() {
                 self.assign_pattern_or_leaf(&target, &mdt, e);
+                continue;
+            }
+            // §10.9.2/§7.2.1: a DYNAMIC member (queue / dynamic / associative)
+            // is a whole collection, assigned like any other — its item is a
+            // collection-valued expression (`'{7, 8}`, `{q, 4}`, `other.q`)
+            // that REPLACES the old contents. A `default:` value names an
+            // element, never a whole collection, so it leaves one alone.
+            if dims.len() == 1 && Self::coll_kind_of(&dims).is_some() {
+                if explicit && self.ensure_struct_member_coll(&target) {
+                    self.assign_whole_coll(&target, Some(&mdt), e);
+                }
                 continue;
             }
             // Array member: spread over every dimension.
@@ -117620,7 +118346,29 @@ impl Simulator {
                     // The destination may be a composed name elaboration never
                     // saw (`pq[0].data`) — register it so `.size()`/push_back
                     // on it hit the collection paths instead of reading 0.
-                    self.module.dynamic_arrays.insert(d.clone());
+                    // §7.9.9: an ASSOCIATIVE member copies its entries by key.
+                    if md.dimensions.len() == 1
+                        && matches!(
+                            md.dimensions[0],
+                            crate::ast::types::UnpackedDimension::Associative { .. }
+                        )
+                    {
+                        self.ensure_struct_member_coll(&sname);
+                        if !self.ensure_struct_member_coll(&d) {
+                            let sk = self.string_keyed_dim(&md.dimensions[0]);
+                            self.register_struct_member_coll_as(
+                                &d,
+                                StructCollKind::Assoc,
+                                &m.data_type,
+                                sk,
+                            );
+                        }
+                        self.copy_assoc_entries(&d, &sname);
+                        continue;
+                    }
+                    if !self.ensure_struct_member_coll(&d) {
+                        self.module.dynamic_arrays.insert(d.clone());
+                    }
                     let n = self.get_queue_size(&sname);
                     for j in 0..n {
                         if let Some(v) = self.get_signal_value_by_name(&format!("{}[{}]", sname, j))
@@ -118203,6 +118951,243 @@ impl Simulator {
             }
         }
         out
+    }
+
+    /// Every DYNAMIC member below the unpacked struct `su` — its own queue /
+    /// dynamic / associative members, and those of nested structs and of
+    /// fixed member arrays of structs — as `(path relative to the struct,
+    /// kind, element type, string-keyed)`. The counterpart of
+    /// `struct_leaf_suffixes`, which skips them.
+    fn struct_coll_members(
+        &self,
+        su: &crate::ast::types::StructUnionType,
+    ) -> Vec<(String, StructCollKind, DataType, bool)> {
+        let mut out = Vec::new();
+        for m in &su.members {
+            for md in &m.declarators {
+                let base = md.name.name.as_str();
+                let inner = self.unpacked_struct_of(&m.data_type);
+                if md.dimensions.is_empty() {
+                    if let Some(inner) = inner {
+                        for (sfx, k, dt, sk) in self.struct_coll_members(&inner) {
+                            out.push((format!("{}.{}", base, sfx), k, dt, sk));
+                        }
+                    }
+                } else if md.dimensions.len() == 1
+                    && let Some(kind) = Self::coll_kind_of(&md.dimensions)
+                {
+                    let string_key = self.string_keyed_dim(&md.dimensions[0]);
+                    out.push((base.to_string(), kind, m.data_type.clone(), string_key));
+                } else if let (Some(inner), Some(tups)) =
+                    (inner, self.member_elem_indices(&md.dimensions))
+                {
+                    let subs = self.struct_coll_members(&inner);
+                    for t in tups {
+                        let elem = format!("{}{}", base, Self::index_suffix(&t));
+                        for (sfx, k, dt, sk) in &subs {
+                            out.push((format!("{}.{}", elem, sfx), *k, dt.clone(), *sk));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `dim` is an associative dimension keyed by `string` (§7.8.1).
+    fn string_keyed_dim(&self, dim: &crate::ast::types::UnpackedDimension) -> bool {
+        matches!(
+            dim,
+            crate::ast::types::UnpackedDimension::Associative { data_type: Some(k), .. }
+                if matches!(
+                    self.resolve_dt_ref(k),
+                    DataType::Simple {
+                        kind: crate::ast::types::SimpleType::String,
+                        ..
+                    }
+                )
+        )
+    }
+
+    /// The paths of [`struct_coll_members`].
+    fn struct_coll_suffixes(&self, su: &crate::ast::types::StructUnionType) -> Vec<String> {
+        self.struct_coll_members(su)
+            .into_iter()
+            .map(|(sfx, ..)| sfx)
+            .collect()
+    }
+
+    /// Register the dynamic member `<base>.<sfx>` of a struct whose storage
+    /// root has no declared type of its own (a formal, a return snapshot).
+    fn register_struct_member_coll_as(
+        &mut self,
+        name: &str,
+        kind: StructCollKind,
+        dt: &DataType,
+        string_key: bool,
+    ) {
+        let w = resolve_type_width(
+            dt,
+            Some(&self.module.parameters),
+            Some(&self.module.typedefs),
+        )
+        .max(1);
+        self.register_coll_name(name, kind, w, string_key);
+    }
+
+    /// Empty the collection `name` (§7.5.3/§7.9.3/§7.10.2.7 `delete()`).
+    fn clear_coll(&mut self, name: &str, kind: StructCollKind) {
+        match kind {
+            StructCollKind::Assoc => {
+                self.eval_builtin_method(name, "delete", &[]);
+            }
+            _ => self.set_queue_size(name, 0),
+        }
+    }
+
+    /// Copy the whole collection `src` onto `dst` (same kind).
+    fn copy_coll(&mut self, dst: &str, src: &str, kind: StructCollKind) {
+        if dst == src {
+            return;
+        }
+        match kind {
+            StructCollKind::Assoc => self.copy_assoc_entries(dst, src),
+            _ => self.copy_whole_queue(dst, src),
+        }
+    }
+
+    /// §6.21/§7.2.1: a fresh automatic struct variable `base` of type `su`
+    /// starts with EMPTY dynamic members of its own. They are named by the
+    /// variable's path (`v.q`), so the enclosing frame's same-named storage
+    /// is snapshotted for restore when this frame pops, and the members are
+    /// registered and emptied.
+    fn fresh_struct_colls(&mut self, base: &str, su: &crate::ast::types::StructUnionType) {
+        for (sfx, kind, dt, sk) in self.struct_coll_members(su) {
+            let n = format!("{}.{}", base, sfx);
+            self.snapshot_queue_local(&n);
+            self.register_struct_member_coll_as(&n, kind, &dt, sk);
+            self.clear_coll(&n, kind);
+        }
+    }
+
+    /// The storage root and type of the unpacked struct `e` names: a
+    /// subroutine local, a formal, a variable, or an element / member of one.
+    fn struct_storage_of(
+        &mut self,
+        e: &Expression,
+    ) -> Option<(String, crate::ast::types::StructUnionType)> {
+        if let Some(r) = self.frame_struct_local(e) {
+            return Some(r);
+        }
+        let n = self.flat_member_name(e)?;
+        let dt = self.p_elem_type(&n)?;
+        let su = self.unpacked_struct_of(&dt)?;
+        Some((n, su))
+    }
+
+    /// §13.4.1: `return s;` of a struct with dynamic members — the packed
+    /// return value cannot carry them, and a subroutine local's storage is
+    /// torn down with its frame, so stage each member under a reserved name
+    /// for the caller's assignment (`copy_ret_struct_colls`).
+    #[cold]
+    #[inline(never)]
+    fn stage_ret_struct_colls(&mut self, e: &Expression) {
+        self.pending_ret_struct = None;
+        let Some((name, su)) = self.struct_storage_of(e) else {
+            return;
+        };
+        let colls = self.struct_coll_members(&su);
+        if colls.is_empty() {
+            return;
+        }
+        const RET_STRUCT: &str = "__xz_ret_struct__";
+        for (sfx, kind, dt, sk) in colls {
+            let src = format!("{}.{}", name, sfx);
+            let dst = format!("{}.{}", RET_STRUCT, sfx);
+            self.register_struct_member_coll_as(&dst, kind, &dt, sk);
+            self.clear_coll(&dst, kind);
+            if self.module.dynamic_arrays.contains(&src)
+                || self.module.associative_arrays.contains_key(&src)
+                || self.ensure_struct_member_coll(&src)
+            {
+                self.copy_coll(&dst, &src, kind);
+            }
+        }
+        self.pending_ret_struct = Some(RET_STRUCT.to_string());
+    }
+
+    /// The caller half of `stage_ret_struct_colls`: `dst = f(...)` gets the
+    /// returned struct's dynamic members.
+    fn copy_ret_struct_colls(&mut self, dst: &str, su: &crate::ast::types::StructUnionType) {
+        let Some(src) = self.pending_ret_struct.take() else {
+            return;
+        };
+        for (sfx, kind, dt, sk) in self.struct_coll_members(su) {
+            let d = format!("{}.{}", dst, sfx);
+            if !self.ensure_struct_member_coll(&d) {
+                self.register_struct_member_coll_as(&d, kind, &dt, sk);
+            }
+            self.clear_coll(&d, kind);
+            self.copy_coll(&d, &format!("{}.{}", src, sfx), kind);
+        }
+    }
+
+    /// Whether the collections `a` and `b` hold the same elements (§7.2.1):
+    /// the same size and equal elements for a queue / dynamic array, the
+    /// same keys with equal values for an associative array. `None` when an
+    /// element carries x/z (the comparison is then unknown).
+    fn coll_contents_eq(&mut self, a: &str, b: &str) -> Option<bool> {
+        let a_ok = self.ensure_struct_member_coll(a);
+        let b_ok = self.ensure_struct_member_coll(b);
+        if !(a_ok && b_ok) {
+            return Some(true);
+        }
+        let pairs: Vec<(Option<Value>, Option<Value>)> = if self.is_associative_array(a) {
+            let mut ka = self.assoc_key_strs(a);
+            let mut kb = self.assoc_key_strs(b);
+            ka.sort();
+            kb.sort();
+            if ka != kb {
+                return Some(false);
+            }
+            ka.iter()
+                .map(|k| {
+                    (
+                        self.get_signal_value_by_name(&format!("{}[{}]", a, k)),
+                        self.get_signal_value_by_name(&format!("{}[{}]", b, k)),
+                    )
+                })
+                .collect()
+        } else {
+            let (na, nb) = (self.get_queue_size(a), self.get_queue_size(b));
+            if na != nb {
+                return Some(false);
+            }
+            (0..na)
+                .map(|i| {
+                    (
+                        self.get_signal_value_by_name(&format!("{}[{}]", a, i)),
+                        self.get_signal_value_by_name(&format!("{}[{}]", b, i)),
+                    )
+                })
+                .collect()
+        };
+        let mut equal = true;
+        for (x, y) in pairs {
+            match (x, y) {
+                (Some(x), Some(y)) => {
+                    if x.has_unknown() || y.has_unknown() {
+                        return None;
+                    }
+                    if x != y {
+                        equal = false;
+                    }
+                }
+                (None, None) => {}
+                _ => equal = false,
+            }
+        }
+        Some(equal)
     }
 
     /// Rearrange a queue so that position `i` holds what used to be at
@@ -119615,8 +120600,15 @@ impl Simulator {
                             self.render_p_typed(&mbase, &m.data_type)
                         } else if let Some(lists) = self.member_dim_indices(&md.dimensions) {
                             self.render_p_elem_lists(&mbase, &m.data_type, &lists)
+                        } else if md.dimensions.len() == 1
+                            && Self::coll_kind_of(&md.dimensions).is_some()
+                            && self.ensure_struct_member_coll(&mbase)
+                        {
+                            // §21.2.1.7: a dynamic member prints its live
+                            // elements, like the same collection declared alone.
+                            self.render_p_var(&mbase)
+                                .unwrap_or_else(|| "'{}".to_string())
                         } else {
-                            // Dynamic / queue / associative member: size unknown here.
                             "'{}".to_string()
                         };
                         parts.push(format!("{}:{}", md.name.name, rendered));
@@ -120730,6 +121722,15 @@ impl Simulator {
                     }
                 }
                 _ => return Some(Value::new(1)),
+            }
+        }
+        // §7.2.1/§11.4.5: a DYNAMIC member compares as the collection it is —
+        // same size (same keys) and equal elements.
+        for sfx in self.struct_coll_suffixes(&su) {
+            match self.coll_contents_eq(&format!("{}.{}", a, sfx), &format!("{}.{}", b, sfx)) {
+                Some(true) => {}
+                Some(false) => equal = false,
+                None => return Some(Value::new(1)),
             }
         }
         Some(if equal {
@@ -133839,6 +134840,15 @@ impl Simulator {
             // because the parser flattens `o.q.push_back(x)` into the same
             // 3-segment Ident shape — without this, `sh.value.push_back(x)` on
             // a queue member silently no-ops and member queues stay empty.
+            // §7.9.4-§7.9.7: the traversal methods of an associative array
+            // reached through a member path (`s.m.first(k)`).
+            if len >= 3
+                && !args.is_empty()
+                && self.struct_colls_possible()
+                && let Some(res) = self.struct_assoc_member_walk(hier, args)
+            {
+                return res;
+            }
             if len >= 2
                 && (Self::is_array_builtin_method(path[len - 1].name.name.as_str())
                     || matches!(
@@ -136292,6 +137302,45 @@ impl Simulator {
         } else {
             None
         };
+        // §13.5/§7.2.1: the formal's DYNAMIC members are collections of its
+        // own (`v.q`): fresh per call, copied in from the actual's members
+        // for input/inout/ref, and copied back on return for
+        // output/inout/ref (queue / dynamic kinds, through the call's
+        // queue writebacks).
+        // An actual that IS the same-named variable (a formal handed on to a
+        // callee whose formal has its name) shares the storage for
+        // output/inout/ref and keeps its contents for an input.
+        if self.struct_colls_possible() {
+            let caller_base = self.flat_member_name(arg);
+            for (sfx, kind, dt, sk) in self.struct_coll_members(&su) {
+                let local = format!("{}.{}", port_name, sfx);
+                let caller = caller_base
+                    .as_ref()
+                    .map(|b| format!("{}.{}", b, sfx))
+                    .filter(|c| self.ensure_struct_member_coll(c));
+                let same = caller.as_deref() == Some(local.as_str());
+                if !(same && copies_out) {
+                    self.snapshot_queue_local(&local);
+                }
+                self.register_struct_member_coll_as(&local, kind, &dt, sk);
+                if same {
+                    if !copies_in {
+                        self.clear_coll(&local, kind);
+                    }
+                    continue;
+                }
+                self.clear_coll(&local, kind);
+                let Some(caller) = caller else {
+                    continue;
+                };
+                if copies_in {
+                    self.copy_coll(&local, &caller, kind);
+                }
+                if copies_out && kind != StructCollKind::Assoc {
+                    self.pending_struct_coll_wb.push((local, caller));
+                }
+            }
+        }
         let mut leaf_pos = 0usize;
         let mut backs = Vec::new();
         for (key, caller_expr, w, is_real) in leaves {
@@ -137994,6 +139043,7 @@ impl Simulator {
                             port.dimensions.is_empty(),
                         );
                         output_bindings.extend(backs);
+                        queue_writebacks.append(&mut self.pending_struct_coll_wb);
                         continue;
                     }
                 }
@@ -139533,6 +140583,7 @@ impl Simulator {
                     &mut locals,
                 ) {
                     output_bindings.extend(backs);
+                    queue_writebacks.append(&mut self.pending_struct_coll_wb);
                     continue;
                 }
             }
@@ -144425,7 +145476,7 @@ impl Simulator {
                     }
                     continue;
                 }
-                if matches!(init.kind, ExprKind::AssignmentPattern(_))
+                if let ExprKind::AssignmentPattern(items) = &init.kind
                     && let Some(su) = self
                         .class_prop_struct(handle, &pname)
                         .filter(Self::spreads_member_wise)
@@ -144433,7 +145484,34 @@ impl Simulator {
                     let base =
                         Self::hier_ident_expr(Self::iface_path_segs(&pname, init.span), init.span);
                     self.assign_class_unpacked_elem(&base, init, &su);
+                    // §7.2.1: the DYNAMIC members take their items as whole
+                    // collections, under the instance (`<h>#s.q`).
+                    if self.struct_colls_possible() {
+                        for (mname, _, dims, e, explicit) in
+                            self.bind_struct_pattern_items(&su, items)
+                        {
+                            if let (Some(e), true) = (
+                                e,
+                                explicit && dims.len() == 1 && Self::coll_kind_of(&dims).is_some(),
+                            ) {
+                                let lhs = Self::append_member_expr(&base, &mname);
+                                self.assign_struct_member_coll(&lhs, e);
+                            }
+                        }
+                    }
                     continue;
+                }
+                // §7.9.11/§8.7: an associative-array property initializer
+                // (`int m[string] = '{"a": 1}`) fills the instance's own
+                // entries; evaluated whole it became one scalar nobody reads.
+                if matches!(init.kind, ExprKind::AssignmentPattern(_))
+                    && cdef.assoc_properties.contains_key(&pname)
+                {
+                    let scoped = format!("{}#{}", handle, pname);
+                    if self.is_associative_array(&scoped) {
+                        self.assign_whole_coll(&scoped, None, init);
+                        continue;
+                    }
                 }
                 let mut val = self.eval_expr(&init);
                 // §11.8.1: the re-evaluated initializer must be stamped with
