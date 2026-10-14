@@ -501,3 +501,15 @@ fn dpi_audit_scalar_arrays_test() {
         "tests/dpi/dpi_audit_scalar_arrays_test.sv",
     );
 }
+
+#[test]
+fn dpi_audit_array_elems_test() {
+    // §35.5.6.1 / H.7 / §10.9.1 (DPI audit, family C): canonical elements of
+    // enum, packed-struct, integer, time and implicit-vector array formals,
+    // and assignment-pattern actuals.
+    assert_dpi_pass(
+        "tests/dpi/dpi_audit_array_elems.c",
+        "dpi_audit_array_elems",
+        "tests/dpi/dpi_audit_array_elems_test.sv",
+    );
+}

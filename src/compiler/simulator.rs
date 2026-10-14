@@ -16428,7 +16428,48 @@ impl Simulator {
                 return (out, vec![(0, n as i64 - 1)]);
             }
         }
+        // §10.9.1: an assignment pattern (`'{1, 2, 3}`, `'{'{1, 2}, '{3, 4}}`)
+        // is an unpacked array value — every element, not just the last.
+        if let Some(r) = self.dpi_collect_pattern(e) {
+            return r;
+        }
         (vec![self.eval_expr(e)], vec![(0, 0)])
+    }
+
+    /// The elements (row-major) and shape of a positional assignment
+    /// pattern used as an unpacked-array actual; None for anything else.
+    fn dpi_collect_pattern(&mut self, e: &Expression) -> Option<(Vec<Value>, Vec<(i64, i64)>)> {
+        let ExprKind::AssignmentPattern(items) = &e.kind else {
+            return None;
+        };
+        if items.is_empty()
+            || !items
+                .iter()
+                .all(|it| matches!(it, crate::ast::expr::AssignmentPatternItem::Ordered(_)))
+        {
+            return None;
+        }
+        let n = items.len() as i64;
+        let nested = items
+            .iter()
+            .all(|it| matches!(it.expr().kind, ExprKind::AssignmentPattern(_)));
+        if nested {
+            let mut out = Vec::new();
+            let mut inner: Option<Vec<(i64, i64)>> = None;
+            for it in items {
+                let (vals, shape) = self.dpi_collect_pattern(it.expr())?;
+                if inner.as_ref().is_some_and(|s| *s != shape) {
+                    return None;
+                }
+                inner = Some(shape);
+                out.extend(vals);
+            }
+            let mut shape = vec![(0, n - 1)];
+            shape.extend(inner.unwrap_or_default());
+            return (shape.len() <= 4).then_some((out, shape));
+        }
+        let out = items.iter().map(|it| self.eval_expr(it.expr())).collect();
+        Some((out, vec![(0, n - 1)]))
     }
 
     /// The `(lo, hi)` of each unpacked dimension of a fixed MULTI-
