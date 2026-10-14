@@ -70357,7 +70357,30 @@ impl Simulator {
             // `resolve_multi_driver_nets`), so this identity path only runs
             // when a pullup/pulldown is the net's sole driver.
             // `$__supply`/`$__weak` mark the other §28.12 levels the same way.
-            "$__pull" | "$__supply" | "$__weak" => args
+            // §28.12 `$__sres(width, pair, ctl, value, ...)`: a net whose
+            // drivers carry strengths, resolved by strength (see
+            // `strength_bit`).
+            "$__sres" => {
+                let w = args
+                    .first()
+                    .and_then(|a| self.eval_expr(a).to_u64())
+                    .unwrap_or(1)
+                    .max(1) as u32;
+                let mut drv: Vec<(u8, &Expression, &Expression)> = Vec::new();
+                for t in args[1..].chunks(3) {
+                    let [c, k, v] = t else { break };
+                    let code = self.eval_expr(c).to_u64().unwrap_or(54) as u8;
+                    drv.push((code, k, v));
+                }
+                let ds =
+                    self.eval_strength_drivers(w, drv.into_iter().map(|(c, k, v)| (c, Some(k), v)));
+                let mut out = Value::zero(w);
+                for i in 0..w as usize {
+                    out.set_bit(i, Self::strength_value_bit(Self::strength_bit(&ds, i)));
+                }
+                out
+            }
+            "$__pull" | "$__supply" | "$__weak" | "$__drive" => args
                 .first()
                 .map(|a| self.eval_expr(a))
                 .unwrap_or_else(|| Value::new(1)),
@@ -110516,6 +110539,48 @@ impl Simulator {
                 "St"
             }
         }
+        // §28.12: a net several drivers resolve reports the strength they
+        // resolve to (bit 0, like the value letter below).
+        if let ExprKind::Ident(h) = &arg.kind
+            && (!self.module.strength_drivers.is_empty() || !self.module.supply_nets.is_empty())
+        {
+            let name = self.resolve_hier_name(h).into_owned();
+            if let Some(drivers) = self.module.strength_drivers.get(&name).cloned() {
+                let w = v.width.max(1);
+                let ds = self.eval_strength_drivers(
+                    w,
+                    drivers
+                        .iter()
+                        .map(|d| (d.s0 * 8 + d.s1, d.ctl.as_ref(), &d.value)),
+                );
+                let (lo, hi) = Self::strength_bit(&ds, 0).unwrap_or((0, 0));
+                return Self::strength_text(lo, hi);
+            }
+            // §6.6.6: a supply net drives at supply strength.
+            if self.module.supply_nets.contains(&name) {
+                return match v.get_bit(0) {
+                    LogicBit::Zero => "Su0".to_string(),
+                    LogicBit::One => "Su1".to_string(),
+                    LogicBit::Z => "HiZ".to_string(),
+                    LogicBit::X => "SuX".to_string(),
+                };
+            }
+        }
+        // §6.6.3: an undriven tri0/tri1 bit is pulled.
+        if let ExprKind::Ident(h) = &arg.kind
+            && !self.module.resolved_net_kinds.is_empty()
+        {
+            let name = self.resolve_hier_name(h).into_owned();
+            match (self.module.resolved_net_kinds.get(&name), v.get_bit(0)) {
+                (Some(super::elaborate::ResolvedNetKind::Tri0), LogicBit::Zero) => {
+                    return "Pu0".to_string();
+                }
+                (Some(super::elaborate::ResolvedNetKind::Tri1), LogicBit::One) => {
+                    return "Pu1".to_string();
+                }
+                _ => {}
+            }
+        }
         let strengths: Option<(String, String)> = if let ExprKind::Ident(h) = &arg.kind {
             let name = self.resolve_hier_name(h);
             self.module
@@ -110537,6 +110602,123 @@ impl Simulator {
             '0' => format!("{}0", abbrev(&s0)),
             'z' | 'Z' => "HiZ".to_string(),
             _ => format!("{}X", abbrev(&s1)),
+        }
+    }
+
+    /// §28.12: evaluate a net's strength drivers — `(s0, s1, on, value)`
+    /// each, `on` the tristate control's truth (`None` when unknown), the
+    /// value at the net's width `w` so an unsized fill (`'1`) covers it.
+    fn eval_strength_drivers<'d>(
+        &mut self,
+        w: u32,
+        drivers: impl Iterator<Item = (u8, Option<&'d Expression>, &'d Expression)>,
+    ) -> Vec<(i8, i8, Option<bool>, Value)> {
+        let mut out = Vec::new();
+        for (code, ctl, value) in drivers {
+            let on = match ctl {
+                None => Some(true),
+                Some(c) => {
+                    let cv = self.eval_expr(c);
+                    let bits = (0..cv.width.max(1) as usize).map(|k| cv.get_bit(k));
+                    if bits.clone().any(|b| b == LogicBit::One) {
+                        Some(true)
+                    } else if bits.into_iter().all(|b| b == LogicBit::Zero) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                }
+            };
+            if on == Some(false) {
+                continue;
+            }
+            let v = self.eval_expr_ctx(value, w);
+            out.push(((code / 8) as i8, (code % 8) as i8, on, v));
+        }
+        out
+    }
+
+    /// §28.12: the strength range bit `i` resolves to from evaluated
+    /// drivers, on the scale -7 (Su0) .. 0 (HiZ) .. 7 (Su1): `(lo, hi)`, a
+    /// single level for an unambiguous value, a span for an ambiguous one
+    /// (`36X` is -3..6). A driver contributes its level for a 0 or 1, the
+    /// span of both its levels for an x, nothing for a z, and its value-or-z
+    /// (`L`/`H`) when its tristate control is unknown. Drivers combine by
+    /// §28.12.2 (see `combine_strength`). `None` when nothing drives it.
+    fn strength_bit(ds: &[(i8, i8, Option<bool>, Value)], i: usize) -> Option<(i8, i8)> {
+        let mut acc: Option<(i8, i8)> = None;
+        for (s0, s1, on, v) in ds {
+            let b = if i < v.width as usize {
+                v.get_bit(i)
+            } else {
+                LogicBit::Zero
+            };
+            let mut r = match b {
+                LogicBit::Zero => (-*s0, -*s0),
+                LogicBit::One => (*s1, *s1),
+                LogicBit::X => (-*s0, *s1),
+                LogicBit::Z => continue,
+            };
+            if on.is_none() {
+                r = (r.0.min(0), r.1.max(0));
+            }
+            if r == (0, 0) {
+                continue;
+            }
+            acc = Some(match acc {
+                None => r,
+                Some(a) => Self::combine_strength(a, r),
+            });
+        }
+        acc
+    }
+
+    /// The logic value of a resolved strength range.
+    fn strength_value_bit(r: Option<(i8, i8)>) -> LogicBit {
+        match r {
+            None | Some((0, 0)) => LogicBit::Z,
+            Some((lo, _)) if lo > 0 => LogicBit::One,
+            Some((_, hi)) if hi < 0 => LogicBit::Zero,
+            _ => LogicBit::X,
+        }
+    }
+
+    /// §28.12.2: combine two strength ranges point by point.
+    fn combine_strength(a: (i8, i8), b: (i8, i8)) -> (i8, i8) {
+        let (mut lo, mut hi) = (i8::MAX, i8::MIN);
+        for p in a.0..=a.1 {
+            for q in b.0..=b.1 {
+                let outs: [i8; 2] = if p.abs() > q.abs() {
+                    [p, p]
+                } else if q.abs() > p.abs() {
+                    [q, q]
+                } else {
+                    [p, q]
+                };
+                for o in outs {
+                    lo = lo.min(o);
+                    hi = hi.max(o);
+                }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// §21.2.1.5: the `%v` text of strength range `(lo, hi)`.
+    fn strength_text(lo: i8, hi: i8) -> String {
+        const NAMES: [&str; 8] = ["Hi", "Sm", "Me", "We", "La", "Pu", "St", "Su"];
+        let n = |l: i8| NAMES[l.unsigned_abs().min(7) as usize];
+        match (lo, hi) {
+            (0, 0) => "HiZ".to_string(),
+            (l, h) if l == h && l < 0 => format!("{}0", n(l)),
+            (l, h) if l == h => format!("{}1", n(h)),
+            (l, h) if l < 0 && h > 0 && -l == h => format!("{}X", n(h)),
+            (l, h) if l < 0 && h > 0 => format!("{}{}X", -l, h),
+            (l, 0) => format!("{}L", n(l)),
+            (0, h) => format!("{}H", n(h)),
+            // A one-valued span names its stronger level first (`651`).
+            (l, h) if h < 0 => format!("{}{}0", -l, -h),
+            (l, h) => format!("{}{}1", h, l),
         }
     }
 

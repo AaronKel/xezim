@@ -408,7 +408,6 @@ fn values_only(l: &str) -> String {
 /// (`36X`), `Pu` for an undriven tri0/tri1 and `Me` for a trireg's charge,
 /// `Su` for supply nets.
 #[test]
-#[ignore = "xezim's 4-state value does not carry a per-bit drive strength, so %v prints the declared or strong strength (St/We) instead of the resolved one; needs strength-carrying net values"]
 fn drive_strength_display_follows_resolution() {
     let got = lines(
         "levels_v",
@@ -958,6 +957,46 @@ endmodule
             "w9"
         ),
         ["T|v=0"]
+    );
+}
+
+/// `%v` of tristate primitives with an unknown control (`StH`), of a pull
+/// beside a tristate (`651`, the span from St1 down to Pu1), of a trireg's
+/// held charge (`Me`), supply nets and undriven tri0/tri1/trireg nets.
+#[test]
+fn drive_strength_display_of_net_kinds() {
+    let got = lines(
+        "kinds_v",
+        r#"
+module k_strength_kinds;
+  tri0 t0; tri1 t1; trireg tr; wand wa;
+  supply0 s0; supply1 s1;
+  logic a, c;
+  trireg tq; assign tq = a;
+  wire v1; bufif1 (v1, a, c);
+  wire v2; assign (pull0, pull1) v2 = a; bufif1 (v2, 1'b1, c);
+  wire [1:0] vv; assign (pull0, strong1) vv = {a, c};
+  initial begin
+    #1 $display("T|w t0=%v t1=%v tr=%v wa=%v s0=%v s1=%v | %b %b %b %b", t0, t1, tr, wa, s0, s1, t0, t1, tr, wa);
+    a = 1; c = 1'bx;
+    #1 $display("T|x tq=%v v1=%v v2=%v | %b %b %b", tq, v1, v2, tq, v1, v2);
+    a = 1'bz; c = 0;
+    #1 $display("T|y tq=%v v1=%v v2=%v | %b %b %b", tq, v1, v2, tq, v1, v2);
+    a = 0; c = 1;
+    #1 $display("T|z tq=%v v1=%v v2=%v | %b %b %b", tq, v1, v2, tq, v1, v2);
+  end
+endmodule
+"#,
+        "k_strength_kinds",
+    );
+    assert_eq!(
+        got,
+        [
+            "T|w t0=Pu0 t1=Pu1 tr=HiZ wa=HiZ s0=Su0 s1=Su1 | 0 1 z z",
+            "T|x tq=St1 v1=StH v2=651 | 1 x 1",
+            "T|y tq=Me1 v1=HiZ v2=HiZ | 1 z z",
+            "T|z tq=St0 v1=St0 v2=St1 | 0 0 1",
+        ]
     );
 }
 
