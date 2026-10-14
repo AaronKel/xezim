@@ -148152,11 +148152,24 @@ impl Simulator {
                     }
                     if let Some(sig) = class_def.properties.get(prop) {
                         if !is_coll {
-                            rand_props.push((prop.clone(), sig.width));
+                            // §8.25/§18.4: a member typed by a class TYPE
+                            // parameter (`rand T r;`) draws at the width and
+                            // signedness of the type this object binds to T.
+                            let bound = sig
+                                .type_name
+                                .as_ref()
+                                .filter(|t| class_def.type_param_names.contains(t))
+                                .and_then(|_| {
+                                    let w = self.class_prop_width_of(handle, prop)?;
+                                    let b = self.class_prop_type_name(handle, prop)?;
+                                    Some((w, self.bound_type_is_signed(b.trim())))
+                                });
+                            let (w, signed) = bound.unwrap_or((sig.width, sig.is_signed));
+                            rand_props.push((prop.clone(), w));
                             if sig.is_real {
                                 real_rand_props.insert(prop.clone());
                             }
-                            if sig.is_signed {
+                            if signed {
                                 signed_rand_props.insert(prop.clone());
                             }
                             static RAND_DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
