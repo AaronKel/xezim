@@ -16612,6 +16612,33 @@ impl Simulator {
         }
     }
 
+    /// §35.5.3: the scope a context import called without an instance
+    /// prefix runs in — where its declaration is. An import declared only in
+    /// a package runs in that package wherever it is called from. One
+    /// declared in a design scope runs in the scope of the code calling it:
+    /// the declaring scope of the running subroutine when that was declared
+    /// in another instance, interface, generate block or package (`u.f()`,
+    /// `pkg::f()`), else the running process's instance. Every such call ran
+    /// in the calling process's instance, so `svGetScope` in an import called
+    /// from a package, interface or generate-block function named the module.
+    fn dpi_context_scope(&self, sv_name: &str) -> String {
+        let pkg = self.module.dpi_import_pkg.get(sv_name);
+        let in_design = self.module.dpi_import_in_design.contains(sv_name);
+        let root = self
+            .m_scope_stack
+            .first()
+            .and_then(|f| f.strip_prefix(M_ROOT_MARK));
+        match (root, pkg) {
+            (_, Some(p)) if !in_design => p.clone(),
+            (Some(r), Some(p)) if self.module.packages.contains(r) => p.clone(),
+            (Some(r), _) => r.to_string(),
+            (None, _) => match self.module.pkg_subr_owner.get(sv_name) {
+                Some(p) if !in_design => p.clone(),
+                _ => self.hier_path(&self.active_instance_scope()),
+            },
+        }
+    }
+
     /// The actuals of an import call in formal order, named ones bound to
     /// their formals and omitted ones taken from the defaults; None when the
     /// call is already positional and complete.
@@ -17017,10 +17044,8 @@ impl Simulator {
             pkg.to_string()
         } else if let Some(prefix) = via {
             self.hier_path(prefix)
-        } else if let Some(pkg) = self.module.pkg_subr_owner.get(sv_name) {
-            pkg.clone()
         } else {
-            self.hier_path(&self.active_instance_scope())
+            self.dpi_context_scope(sv_name)
         };
         let prev_scope = ACTIVE_SCOPE.with(|cell| cell.get());
         if !scope_name.is_empty() {

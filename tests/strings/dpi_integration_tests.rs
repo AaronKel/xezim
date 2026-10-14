@@ -513,3 +513,14 @@ fn dpi_audit_array_elems_test() {
         "tests/dpi/dpi_audit_array_elems_test.sv",
     );
 }
+
+#[test]
+fn dpi_audit_binding_test() {
+    // §13.5.4 / §35.5.3 (DPI audit, family E): named and default actuals of
+    // import calls, and the scope a context import runs in.
+    assert_dpi_pass(
+        "tests/dpi/dpi_audit_binding.c",
+        "dpi_audit_binding",
+        "tests/dpi/dpi_audit_binding_test.sv",
+    );
+}
