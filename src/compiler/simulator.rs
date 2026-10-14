@@ -10694,10 +10694,14 @@ impl Simulator {
         // of an unpacked array of such handles starts null too.
         // The element storage of an array is built further down; its bases
         // are zeroed there (see `vif_vars` below).
+        // §8.4: a class handle starts null as well, so an unpacked array of
+        // class handles joins this set (a scalar one is zeroed elsewhere).
         let vif_vars: std::collections::HashSet<String> = module
             .var_decl_types
             .iter()
-            .filter(|(_, dt)| Self::dt_is_virtual_iface(dt, &module))
+            .filter(|(_, dt)| {
+                Self::dt_is_virtual_iface(dt, &module) || Self::dt_is_class_handle(dt, &module)
+            })
             .map(|(n, _)| n.clone())
             .collect();
         for n in &vif_vars {
@@ -101688,6 +101692,8 @@ impl Simulator {
             .and_then(|(h, m)| h.parse::<usize>().ok().map(|h| (h, m)));
         let dt: &DataType = if let Some((handle, member)) = class_member {
             let mut cur = self.heap.get(handle)?.as_ref()?.class_name.as_str();
+            // An element of a multi-dimensional member (`<h>#m[1]`).
+            let member = member.split('[').next().unwrap_or(member);
             let mut found = None;
             for _ in 0..32 {
                 let cd = self.module.classes.get(cur)?;
@@ -101705,11 +101711,15 @@ impl Simulator {
                 .get(name)
                 .or_else(|| self.module.var_decl_types.get(leaf))?
         };
+        // §7.2.1: a packed struct or union is one integral value too.
         matches!(
             self.resolve_dt_ref(dt),
             DataType::IntegerVector { .. } | DataType::IntegerAtom { .. } | DataType::Enum(_)
         )
         .then_some(dt)
+        .or_else(|| {
+            matches!(self.resolve_dt_ref(dt), DataType::Struct(su) if su.packed).then_some(dt)
+        })
     }
 
     /// Declared signedness of an associative array's integral elements.
@@ -115455,6 +115465,15 @@ impl Simulator {
                             let inner = inner.clone();
                             self.zero_two_state_members(&leaf, &inner);
                         }
+                        // §8.4: a class-handle member starts null.
+                        DT::TypeReference { .. }
+                            if Self::dt_is_class_handle(&resolved, &self.module) =>
+                        {
+                            let cur = self.get_signal_value_by_name(&leaf);
+                            if let Some(v) = cur.filter(|v| v.has_xz()) {
+                                self.set_signal_value_by_name(&leaf, Value::zero(v.width.max(1)));
+                            }
+                        }
                         DT::IntegerVector { kind: IVT::Bit, .. }
                         | DT::IntegerAtom {
                             kind: IAT::Byte | IAT::ShortInt | IAT::Int | IAT::LongInt,
@@ -125923,6 +125942,17 @@ impl Simulator {
     /// §25.9: does `dt` denote a virtual-interface handle type — `virtual
     /// <iface>[.modport]` spelled out, a bare interface type name, or a
     /// typedef chain (package-scoped, `$unit` or local) ending at either?
+    /// Is `dt` a class handle type (a class name, through typedefs)?
+    fn dt_is_class_handle(dt: &DataType, module: &ElaboratedModule) -> bool {
+        match super::elaborate::resolve_typedef_chain(dt, &module.typedef_types) {
+            DataType::TypeReference { name, .. } => {
+                module.classes.contains_key(&name.name.name)
+                    && !module.interfaces.contains(&name.name.name)
+            }
+            _ => false,
+        }
+    }
+
     fn dt_is_virtual_iface(dt: &DataType, module: &ElaboratedModule) -> bool {
         match super::elaborate::resolve_typedef_chain(dt, &module.typedef_types) {
             DataType::Interface { .. } => true,
@@ -128590,6 +128620,10 @@ impl Simulator {
                 // object) and validate the source against that enum's members.
                 if let Some(tn) = self.enum_typename_of_var(&hh.path[0].name.name) {
                     if let Some(members) = self.module.enum_members.get(&tn) {
+                        // An x or z bit matches no member.
+                        if src.has_xz() {
+                            return false;
+                        }
                         return match src.to_u64() {
                             Some(x) => members.iter().any(|(_, mv)| *mv == x),
                             None => false,

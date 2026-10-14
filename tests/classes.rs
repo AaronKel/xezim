@@ -41,6 +41,8 @@ mod compiled_method_static_locals;
 mod class_param_default_scope;
 #[path = "classes/class_property_x_default.rs"]
 mod class_property_x_default;
+#[path = "classes/x_default_neighbours.rs"]
+mod x_default_neighbours;
 #[path = "classes/class_queue_struct_member_arrays.rs"]
 mod class_queue_struct_member_arrays;
 #[path = "classes/class_struct_collection_elements.rs"]
