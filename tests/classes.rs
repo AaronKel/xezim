@@ -43,6 +43,8 @@ mod class_param_default_scope;
 mod class_property_x_default;
 #[path = "classes/x_default_neighbours.rs"]
 mod x_default_neighbours;
+#[path = "classes/x_default_open.rs"]
+mod x_default_open;
 #[path = "classes/class_queue_struct_member_arrays.rs"]
 mod class_queue_struct_member_arrays;
 #[path = "classes/class_struct_collection_elements.rs"]
