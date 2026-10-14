@@ -33913,6 +33913,8 @@ impl Simulator {
                     self.pending_ret_collection = self.vm_ret_coll.take();
                     match resolved_dst {
                         Some(dst) => {
+                            // Consumed: no by-name reader may see it again.
+                            self.pending_ret_collection = None;
                             for (i, v) in vals.iter().enumerate() {
                                 self.set_signal_value_by_name(&format!("{dst}[{i}]"), v.clone());
                             }
@@ -71020,7 +71022,7 @@ impl Simulator {
                         Some(&self.module.typedefs),
                     );
                     if w > 0 {
-                        let src = self.pending_ret_collection.take().unwrap();
+                        let src = self.take_pending_ret_collection().unwrap();
                         if let Some(p) = self.pack_ret_collection(&src, w) {
                             v = p;
                         }
@@ -71141,7 +71143,7 @@ impl Simulator {
                             .or_else(|| self.module.typedefs.get(nm).copied())
                     });
                     if let Some(w) = leaf_w.filter(|&w| w > 0) {
-                        let src = self.pending_ret_collection.take().unwrap();
+                        let src = self.take_pending_ret_collection().unwrap();
                         if let Some(p) = self.pack_ret_collection(&src, w) {
                             inner_v = p;
                         }
@@ -78236,26 +78238,9 @@ impl Simulator {
     /// call just returned (`pending_ret_collection`) is copied whole into a
     /// collection target. `true` when the assignment is done.
     fn assign_pending_ret_collection(&mut self, lvalue: &Expression) -> bool {
-        let Some(src) = self.pending_ret_collection.take() else {
+        let Some(src) = self.take_pending_ret_collection() else {
             return false;
         };
-        // Deferred snapshot: the flat fast channel (`vm_ret_vals`) held the
-        // returned elements; the destination does not resolve to a writable
-        // base, so materialize the historical `__xz_ret_coll__[i]` cells (the
-        // signal writes + width rows + `.size`) from those values before the
-        // whole-queue copy reads them. Byte-identical to what RetCollection
-        // used to write eagerly.
-        const RET_SNAP: &str = "__xz_ret_coll__";
-        if src == RET_SNAP {
-            if let Some(vals) = self.vm_ret_vals.take() {
-                for (i, v) in vals.iter().enumerate() {
-                    let name = format!("{RET_SNAP}[{i}]");
-                    self.set_signal_value_by_name(&name, v.clone());
-                    self.widths.entry(name).or_insert(32);
-                }
-                self.set_queue_size(RET_SNAP, vals.len() as u64);
-            }
-        }
         let dst: Option<String> = self.pending_coll_dst(lvalue);
         let Some(dst) = dst else {
             return false;
@@ -78265,6 +78250,26 @@ impl Simulator {
         }
         self.settle_after_proc_write();
         true
+    }
+
+    /// Take the pending collection return for a consumer that reads it by
+    /// name. A compiled `RetCollection` defers its `__xz_ret_coll__[i]`
+    /// snapshot (the values wait in `vm_ret_vals`); materialize it here so
+    /// every by-name reader sees this call's elements, not an older snapshot.
+    fn take_pending_ret_collection(&mut self) -> Option<String> {
+        const RET_SNAP: &str = "__xz_ret_coll__";
+        let src = self.pending_ret_collection.take()?;
+        if src == RET_SNAP
+            && let Some(vals) = self.vm_ret_vals.take()
+        {
+            for (i, v) in vals.iter().enumerate() {
+                let name = format!("{RET_SNAP}[{i}]");
+                self.set_signal_value_by_name(&name, v.clone());
+                self.widths.entry(name).or_insert(32);
+            }
+            self.set_queue_size(RET_SNAP, vals.len() as u64);
+        }
+        Some(src)
     }
 
     /// Resolve the whole-collection storage name that a collection-return
@@ -81130,7 +81135,7 @@ impl Simulator {
         // A collection RETURNED by the call in `rvalue` (recorded at
         // its `return` statement): copy it into a collection lvalue.
         if matches!(&rvalue.kind, ExprKind::Call { .. }) {
-            if let Some(src) = self.pending_ret_collection.take() {
+            if let Some(src) = self.take_pending_ret_collection() {
                 let dst: Option<std::borrow::Cow<str>> = {
                     let byname = if let ExprKind::Ident(h) = &lvalue.kind {
                         // The LHS may itself be a renamed local dyn
@@ -85917,8 +85922,10 @@ impl Simulator {
                     }
                     // §13.4: `return <collection>` — record the collection's
                     // storage name so the caller's assign can copy elements
-                    // (a packed Value cannot carry them).
+                    // (a packed Value cannot carry them). Values a compiled
+                    // callee left in `vm_ret_vals` belong to an earlier call.
                     self.pending_ret_collection = None;
+                    self.vm_ret_vals = None;
                     // `instance_assoc_member` of a one-segment name, when
                     // computed below: it is also `expr_assoc_name`'s answer.
                     let mut bare_member: Option<Option<String>> = None;
