@@ -5027,8 +5027,9 @@ impl<'a> BytecodeCompiler<'a> {
                 while let Some(c) = cur
                     && guard < 128
                 {
-                    if let Some(pos) =
-                        admission.writeback_positions.get(&(c.to_string(), method.to_string()))
+                    if let Some(pos) = admission
+                        .writeback_positions
+                        .get(&(c.to_string(), method.to_string()))
                     {
                         acc.extend(pos.iter().copied());
                     }
@@ -5559,10 +5560,7 @@ impl<'a> BytecodeCompiler<'a> {
     /// ELEMENT width, when `root` admits to the member element read and the
     /// plan carries multi-dim packed dims for the member. Feeds
     /// `expr_max_width` (self-determined compare/shift contexts).
-    fn member_coll_elem_index_width(
-        &self,
-        root: &crate::ast::expr::Expression,
-    ) -> Option<u32> {
+    fn member_coll_elem_index_width(&self, root: &crate::ast::expr::Expression) -> Option<u32> {
         let (coll, ..) = self.member_coll_elem_target(root)?;
         let dims = self.coll_elem_packed_dims.get(&coll)?;
         if dims.len() != 2 {
@@ -14432,7 +14430,11 @@ impl<'a> BytecodeCompiler<'a> {
                             arg_start,
                             n,
                         ));
-                        self.emit_arg_slot_writeback(args, arg_start, Some((parent.as_str(), member.name.as_str())))?;
+                        self.emit_arg_slot_writeback(
+                            args,
+                            arg_start,
+                            Some((parent.as_str(), member.name.as_str())),
+                        )?;
                         return Some(dest);
                     }
                     self.truncate_insns(call_start);
@@ -14652,7 +14654,9 @@ impl<'a> BytecodeCompiler<'a> {
                         self.emit_arg_slot_writeback(
                             args,
                             arg_start,
-                            this_cls.as_deref().map(|c| (c, h.path[0].name.name.as_str())),
+                            this_cls
+                                .as_deref()
+                                .map(|c| (c, h.path[0].name.name.as_str())),
                         )?;
                         return Some(dest);
                     }

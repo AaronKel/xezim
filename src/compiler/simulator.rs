@@ -33396,16 +33396,10 @@ impl Simulator {
                 // resolution walk + `try_run_compiled_method` prologue
                 // (singleton getters in hot loops). `None` falls through to
                 // the historic interpreter route, byte-identical.
-                let v = if n == 0
-                    && self
-                        .module
-                        .classes
-                        .contains_key(recv)
-                {
+                let v = if n == 0 && self.module.classes.contains_key(recv) {
                     self.vm_try_direct_static_call(recv, method, base, n)
                         .unwrap_or_else(|| {
-                            let (args, temps) =
-                                self.vm_args_with_writeback(recv, method, base, n);
+                            let (args, temps) = self.vm_args_with_writeback(recv, method, base, n);
                             let v = self
                                 .exec_class_scope_static_call(recv, method, &args)
                                 .unwrap_or_else(|| Value::zero(32));
@@ -54875,9 +54869,7 @@ impl Simulator {
             StatementKind::Case { items, .. } => {
                 items.iter().any(|it| self.stmt_has_loop(&it.stmt))
             }
-            StatementKind::RandCase { items } => {
-                items.iter().any(|(_, s)| self.stmt_has_loop(s))
-            }
+            StatementKind::RandCase { items } => items.iter().any(|(_, s)| self.stmt_has_loop(s)),
             StatementKind::ParBlock { stmts, .. } => stmts.iter().any(|s| self.stmt_has_loop(s)),
             _ => false,
         }
@@ -66331,9 +66323,7 @@ impl Simulator {
             && match &lhs.kind {
                 ExprKind::Index { expr, .. } | ExprKind::RangeSelect { expr, .. } => matches!(
                     &expr.kind,
-                    ExprKind::Index { .. }
-                        | ExprKind::MemberAccess { .. }
-                        | ExprKind::Ident(_)
+                    ExprKind::Index { .. } | ExprKind::MemberAccess { .. } | ExprKind::Ident(_)
                 ),
                 _ => false,
             }
@@ -68942,11 +68932,7 @@ impl Simulator {
         // the element `pidx` addressed, not bit 0 of the property.
         let (mut lsb, _) = Self::packed_chain_slice(elem.width as u64, &dims, &pidx)?;
         let slot = |k: i64| {
-            if dl >= dr {
-                k - lo_b
-            } else {
-                hi_b - k
-            }
+            if dl >= dr { k - lo_b } else { hi_b - k }
         };
         let (first, last, n) = match (tail_bit, tail_range) {
             (Some(ix), _) => {
@@ -74382,8 +74368,7 @@ impl Simulator {
                     // code, and it used to allocate three times per read (the
                     // class-context name, one `extends` clone per ancestor
                     // level, and the property key).
-                    if hier.path.len() == 1 {
-                    }
+                    if hier.path.len() == 1 {}
                     let is_static_prop = match self.class_context_stack.last() {
                         Some(Some(_))
                             if !self.class_member_names().statics.contains(name.as_str()) =>
@@ -121819,7 +121804,9 @@ impl Simulator {
                 let found = self
                     .signals
                     .contains_key(&Self::name_with_suffix(&elem_name, ".size"))
-                    || self.signals.any_key_with_prefix(&Self::name_with_suffix(&elem_name, "["))
+                    || self
+                        .signals
+                        .any_key_with_prefix(&Self::name_with_suffix(&elem_name, "["))
                     || self
                         .signals
                         .any_key_with_prefix(&Self::name_with_suffix(&elem_name, "."));
@@ -128059,7 +128046,9 @@ impl Simulator {
                     // name and not an object: resolve the alias's per-spec
                     // static-collection key like the Specialization arm.
                     if !self.module.classes.contains_key(&bh.path[0].name.name)
-                        && !self.signal_name_to_id.contains_key(bh.path[0].name.name.as_str())
+                        && !self
+                            .signal_name_to_id
+                            .contains_key(bh.path[0].name.name.as_str())
                         && self
                             .current_spec
                             .as_ref()
@@ -128212,8 +128201,13 @@ impl Simulator {
                 // static-collection key like the `Specialization` arm.
                 if h.path[0].selects.is_empty()
                     && !self.module.classes.contains_key(&h.path[0].name.name)
-                    && !self.signal_name_to_id.contains_key(h.path[0].name.name.as_str())
-                    && self.current_spec.as_ref().is_none_or(|(b, _)| b != &h.path[0].name.name)
+                    && !self
+                        .signal_name_to_id
+                        .contains_key(h.path[0].name.name.as_str())
+                    && self
+                        .current_spec
+                        .as_ref()
+                        .is_none_or(|(b, _)| b != &h.path[0].name.name)
                 {
                     if let Some((base, sig)) = self.resolve_typedef_spec(&h.path[0].name.name) {
                         if self.member_is_static_coll(&base, &h.path[1].name.name) {
@@ -130407,7 +130401,8 @@ impl Simulator {
         // once is safe; the error is fatal, matching the reference.
         if self.class_has_method(class_name, method_name)
             && !self.is_static_method(class_name, method_name)
-            && self.nonstatic_scope_reported
+            && self
+                .nonstatic_scope_reported
                 .insert((class_name.to_string(), method_name.to_string()))
         {
             let msg = format!(
@@ -143618,7 +143613,9 @@ impl Simulator {
         if compiled_methods_enabled() {
             if let Some(md) = self.method_defining_class(&class_name, method_name) {
                 let spec_id = self.instance_spec_id(handle);
-                if let Some(entry) = self.vm_fast_entry_for(&md.class, method_name, &md.method, spec_id) {
+                if let Some(entry) =
+                    self.vm_fast_entry_for(&md.class, method_name, &md.method, spec_id)
+                {
                     match &entry.accessor {
                         FastAccessor::Getter(field) if args.is_empty() => {
                             let value = self
@@ -157886,9 +157883,7 @@ impl Simulator {
         // here reaches the real gate; one that would fail it keeps the
         // suspend-aware path exactly as before.
         let boost_wait_free = match kind {
-            CompiledBodyKind::Task(t) => {
-                !self.method_body_can_suspend(cname, &t.ports, &t.items)
-            }
+            CompiledBodyKind::Task(t) => !self.method_body_can_suspend(cname, &t.ports, &t.items),
             _ => !self.stmts_have_blocking(body),
         };
         let tier = method_tier_threshold();
@@ -158181,7 +158176,8 @@ impl Simulator {
                 param_able_result,
                 formals,
             });
-            self.compiled_method_plans.insert((cid, mid, spec_id), pre.clone());
+            self.compiled_method_plans
+                .insert((cid, mid, spec_id), pre.clone());
             pre
         };
         // Effective result width: instance-resolved for param-bounded packed
@@ -158599,8 +158595,7 @@ impl Simulator {
                             .get_class_def(class)
                             .and_then(|cd| cd.extends.as_deref())
                         {
-                            let parent =
-                                parent.split('#').next().unwrap_or(parent).to_string();
+                            let parent = parent.split('#').next().unwrap_or(parent).to_string();
                             facts.class_parents.insert(class.clone(), parent);
                         }
                         for method in declaration.methods.values() {
@@ -159175,7 +159170,11 @@ impl Simulator {
             sim.compiled_fast_calls
                 .insert((cid, mid, spec_id), FastCallState::Never);
         };
-        let Some(pre) = self.compiled_method_plans.get(&(cid, mid, spec_id)).cloned() else {
+        let Some(pre) = self
+            .compiled_method_plans
+            .get(&(cid, mid, spec_id))
+            .cloned()
+        else {
             return None; // no plan yet: this call goes the interpreter route
         };
         // Shape guards (permanent): non-input formals need the interpreter's
@@ -159793,9 +159792,7 @@ impl Simulator {
         // method reached this way must be a fatal (reference simulators reject
         // it at compile time) — never a fast-path dispatch. Route through the
         // interpreter's check so the message is emitted once, identically.
-        if self.class_has_method(dclass, method)
-            && !self.is_static_method(dclass, method)
-        {
+        if self.class_has_method(dclass, method) && !self.is_static_method(dclass, method) {
             return None;
         }
         // Built-in interception set (exec_method_call's early arms): keep
