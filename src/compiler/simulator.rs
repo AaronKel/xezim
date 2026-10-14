@@ -6333,7 +6333,9 @@ pub struct Simulator {
     /// testbench observes design state only after design NBAs have
     /// settled. Today the queue is framework-only (no producer is
     /// wired up); drain is a no-op when empty, so behavior is unchanged.
-    pending_reactive: Vec<crate::ast::stmt::Statement>,
+    /// Each entry is one program `initial` block: its statements and its
+    /// instance scope (`""` for a top-level program).
+    pending_reactive: Vec<(Vec<crate::ast::stmt::Statement>, String)>,
     /// §7.9.11: the `default:` value of a class associative-array member
     /// (`<handle>#<member>`) that an assignment pattern gave it, read for
     /// every key the array does not hold.
@@ -18878,14 +18880,23 @@ impl Simulator {
         // pass. Synchronous drain matches the basic-coverage scope — any
         // deeper sub-events scheduled by these statements re-enter the
         // normal active queue and behave correctly.
+        // §24.3: each initial block is a process of its own, so one that
+        // waits does not hold up the next.
         for ib in std::mem::take(&mut self.module.program_initial_blocks) {
             let stmts = match ib.stmt.kind {
                 StatementKind::SeqBlock { stmts, .. } => stmts,
                 other => vec![Statement::new(other, ib.stmt.span)],
             };
-            for s in stmts {
-                self.pending_reactive.push(s);
-            }
+            self.pending_reactive.push((stmts, ib.scope));
+        }
+        // The reactive region of time 0 runs at the end of the time-0 slot;
+        // make sure that slot exists even when no module process starts
+        // at time 0 (a design whose only module activity is a clock).
+        if !self.pending_reactive.is_empty() {
+            let pid = self.next_pid;
+            self.next_pid += 1;
+            self.event_queue
+                .schedule(0, pid, Vec::<Statement>::new().into());
         }
         // Open the XTrace dump (if requested) AFTER initial-block scheduling
         // and time-0 settle so the dictionary captures all elaborated signals
@@ -91350,8 +91361,8 @@ impl Simulator {
         if self.pending_reactive.is_empty() {
             return;
         }
-        let stmts = std::mem::take(&mut self.pending_reactive);
-        self.late_resume_epoch += stmts.len() as u64;
+        let blocks = std::mem::take(&mut self.pending_reactive);
+        self.late_resume_epoch += blocks.iter().map(|(b, _)| b.len() as u64).sum::<u64>();
         // Program-block (`program ... endprogram`, LRM §24) initial blocks
         // execute in the reactive region, but they must use the *same* statement
         // executor as module initials (`run_process_stmts`), not the bare
@@ -91360,13 +91371,23 @@ impl Simulator {
         // module-top and program-top behavior identical. Allocate a fresh pid
         // so process-scoped bookkeeping (disable labels, scope hints) has
         // somewhere to attach.
-        let pid = self.next_pid;
-        self.next_pid += 1;
-        if let Some(first) = stmts.first() {
-            self.process_origin
-                .insert(pid, (first.span, "program initial block"));
+        for (stmts, scope) in blocks {
+            if self.finished {
+                break;
+            }
+            let pid = self.next_pid;
+            self.next_pid += 1;
+            if let Some(first) = stmts.first() {
+                self.process_origin
+                    .insert(pid, (first.span, "program initial block"));
+            }
+            // `%m` and bare names resolve in the program instance.
+            self.current_scope.clone_from(&scope);
+            if !scope.is_empty() {
+                self.process_scope_hint.insert(pid, scope);
+            }
+            self.run_process_stmts(pid, &ProcCont::from_vec(stmts));
         }
-        self.run_process_stmts(pid, &ProcCont::from_vec(stmts));
     }
 
     /// Resume processes waiting on NBA-region completion (such as

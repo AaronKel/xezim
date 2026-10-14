@@ -1,5 +1,8 @@
-//! Open initial-value and default gaps found next to the aggregate class
-//! property x defaults (all ignored). Expected values come from the
+//! Initial values and defaults next to the aggregate class property x
+//! defaults: collection reads past the end or of a missing key (§7.8.6,
+//! §7.10.1), associative-array `default:` initializers (§7.9.11), static and
+//! returned unpacked structs (§6.8, §13.4.1), mixed 2-/4-state packed structs
+//! (§7.2.1) and program instances (§24.3). Expected values come from the
 //! reference simulator.
 
 use xezim::simulate;
@@ -134,7 +137,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§24.3: the initial blocks of an instantiated program run in the active region, before module initial blocks"]
 fn instantiated_program_initial_runs_reactive() {
     let src = r#"
 program prg;
@@ -417,6 +419,38 @@ endmodule
             "T|m xxxx 0000 xxxx 0000",
             "T|r xxxx 0000 0",
             "T|p '{d:x, f:0, i:0, n:x}",
+        ]
+    );
+}
+
+/// §24.3: each initial block of each program instance is a process of its own,
+/// scheduled in the reactive region and named after its instance (`%m`).
+#[test]
+fn program_instances_run_each_initial_block_reactive() {
+    let src = r#"
+program prg;
+  logic [3:0] pv; int pi;
+  initial begin $display("T|prog0 %m %b %0d %0t", pv, pi, $time); #3 $display("T|prog0b %m %0t", $time); end
+  initial $display("T|prog1 %m %0t", $time);
+endprogram
+module top;
+  prg pp();
+  prg pq();
+  initial $display("T|mod %0t", $time);
+  initial begin #1 $display("T|mod1 %0t", $time); #9 $finish; end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|mod 0",
+            "T|prog0 top.pp xxxx 0 0",
+            "T|prog1 top.pp 0",
+            "T|prog0 top.pq xxxx 0 0",
+            "T|prog1 top.pq 0",
+            "T|mod1 1",
+            "T|prog0b top.pp 3",
+            "T|prog0b top.pq 3",
         ]
     );
 }
