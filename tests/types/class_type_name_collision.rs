@@ -532,7 +532,6 @@ endmodule
 /// §7.2/§8.25: a packed struct typedef with a member of a type parameter
 /// is sized by each specialization.
 #[test]
-#[ignore = "a packed struct member typed by a class type parameter keeps the default type's layout"]
 fn struct_typedef_with_a_type_parameter_member() {
     let src = r#"
 class G #(type T = int);
@@ -644,6 +643,44 @@ endmodule
             "T|self 8 8 64 8",
             "T|self2 16 16 16 12",
             "T|val 44 300 4095"
+        ]
+    );
+}
+
+/// §7.2/§8.25: packed structs and unions with type-parameter members —
+/// nested, in a fixed array, as a method local, and the default
+/// specialization — follow each specialization, and their fields store at
+/// the bound width.
+#[test]
+fn packed_aggregates_of_a_type_parameter() {
+    let src = r#"
+class G #(type T = int);
+  typedef struct packed { T a; bit b; } s_t;
+  typedef struct packed { s_t in; T c; } s2_t;
+  typedef union packed { T a; T b; } u_t;
+  s_t s;
+  s2_t s2;
+  u_t u;
+  s_t sa[2];
+  function int ws(); return $bits(s_t); endfunction
+  function int wl(); s_t l; l = '1; return $bits(l); endfunction
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new; G gd = new;
+    $display("T|st %0d %0d %0d %0d %0d", $bits(g.s), $bits(h.s), g.ws(), h.ws(), $bits(gd.s));
+    $display("T|st2 %0d %0d %0d %0d %0d", $bits(g.s2), $bits(h.s2), $bits(g.u), $bits(h.u), g.wl());
+    g.s.a = 300; g.s.b = 1; h.s.a = 300;
+    $display("T|v %0d %0d %0d %h %0d", g.s.a, g.s.b, h.s.a, g.s, $bits(g.sa));
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|st 9 65 9 65 33",
+            "T|st2 17 129 8 64 9",
+            "T|v 44 1 300 059 18"
         ]
     );
 }

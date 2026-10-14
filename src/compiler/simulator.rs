@@ -69988,6 +69988,9 @@ impl Simulator {
                         if let Some(w) = self.bound_type_param_width(dt) {
                             return Value::from_u64(w as u64, 32);
                         }
+                        if let Some(w) = self.bound_agg_width(dt) {
+                            return Value::from_u64(w as u64, 32);
+                        }
                         // Inside a parameterized class method the type may
                         // be sized by a CLASS value parameter
                         // (`$bits(logic [W-1:0])`), which is absent from
@@ -83206,7 +83209,7 @@ impl Simulator {
         let tp_width = tp_concrete
             .as_deref()
             .and_then(|c| self.concrete_type_width(c));
-        let w0 = match tp_width {
+        let w0 = match tp_width.or_else(|| self.bound_agg_width(data_type)) {
             Some(w) => w,
             None => super::elaborate::resolve_type_width(
                 data_type,
@@ -111184,6 +111187,17 @@ impl Simulator {
                     return Some(w);
                 }
                 if let Some(h) = handle {
+                    // §8.25/§7.2: a packed struct or enum whose members name
+                    // a type parameter is sized by this object's bindings.
+                    if Self::agg_names_type_param(cd, prop)
+                        && let Some(dt) = cd.property_types.get(prop)
+                        && let Some(b) =
+                            self.bind_type_params_in(dt, &|n| self.obj_type_param(h, cn, n))
+                    {
+                        let params = self.instance_param_scope(h);
+                        let w = resolve_type_width(&b, Some(&params), Some(&self.module.typedefs));
+                        return Some(w).filter(|w| *w > 0);
+                    }
                     if let Some(w) = self.respec_packed_width(&cn, h, prop) {
                         return Some(w);
                     }
@@ -111219,6 +111233,7 @@ impl Simulator {
             .type_name
             .as_ref()
             .is_some_and(|t| cd.type_param_names.contains(t))
+            || Self::agg_names_type_param(cd, prop)
         {
             return None;
         }
@@ -113796,6 +113811,16 @@ impl Simulator {
                     return None;
                 }
                 if let Some(DataType::Struct(su)) = cd.property_types.get(prop) {
+                    // §8.25: members typed by the class's type parameters
+                    // take this object's bindings (`struct packed { T a; }`).
+                    if !cd.type_param_names.is_empty()
+                        && let Some(DataType::Struct(b)) = self
+                            .bind_type_params_in(&DataType::Struct(su.clone()), &|n| {
+                                self.obj_type_param(handle, cn, n)
+                            })
+                    {
+                        return Some(b);
+                    }
                     return Some(su.clone());
                 }
                 if cd.properties.contains_key(prop) {
@@ -113980,6 +114005,223 @@ impl Simulator {
             w = w.checked_mul((l - r).unsigned_abs() + 1)?;
         }
         u32::try_from(w).ok()
+    }
+
+    /// Whether property `prop` of `cd` is a packed struct or union, or an
+    /// enum, whose members name one of `cd`'s TYPE parameters (§8.25).
+    fn agg_names_type_param(cd: &super::elaborate::ElaboratedClass, prop: &str) -> bool {
+        fn names(dt: &DataType, tps: &[String]) -> bool {
+            match dt {
+                DataType::TypeReference { name, .. } => {
+                    !name.has_scope() && tps.contains(&name.name.name)
+                }
+                DataType::Struct(su) => su.members.iter().any(|m| names(&m.data_type, tps)),
+                DataType::Enum(et) => et.base_type.as_deref().is_some_and(|b| names(b, tps)),
+                _ => false,
+            }
+        }
+        !cd.type_param_names.is_empty()
+            && match cd.property_types.get(prop) {
+                Some(dt @ DataType::Struct(su)) if su.packed => names(dt, &cd.type_param_names),
+                Some(dt @ DataType::Enum(_)) => names(dt, &cd.type_param_names),
+                _ => false,
+            }
+    }
+
+    /// The type the object `handle` binds to type parameter `tp` of its
+    /// class or of the ancestor `decl` (through the `extends` arguments).
+    fn obj_type_param(&self, handle: usize, decl: &str, tp: &str) -> Option<String> {
+        let inst = self.heap.get(handle)?.as_ref()?;
+        let first = self.module.classes.get(inst.class_name.as_str())?.as_ref();
+        let mut buf: [&super::elaborate::ElaboratedClass; 32] = [first; 32];
+        let mut n = 0usize;
+        let mut cd = first;
+        loop {
+            buf[n] = cd;
+            n += 1;
+            if cd.name == decl {
+                let k = n - 1;
+                if k == 0 {
+                    return inst.type_bindings.get(tp).cloned();
+                }
+                return Self::carried_type_binding(&inst.type_bindings, &buf[..n], k, tp)
+                    .or_else(|| inst.type_bindings.get(tp).cloned());
+            }
+            let e = cd.extends.as_deref()?;
+            if n == buf.len() {
+                return None;
+            }
+            cd = self.module.classes.get(e)?.as_ref();
+        }
+    }
+
+    /// §8.25: the data type a class TYPE parameter's binding `b` names: a
+    /// built-in atom, a design typedef, or otherwise a vector of the bound
+    /// width, signedness and value set. `None` for a binding that is no
+    /// integral type this can size (a string, real or class handle).
+    fn bound_type_dt(&self, b: &str) -> Option<DataType> {
+        use crate::ast::types::{IntegerAtomType as A, IntegerVectorType as V, Signing};
+        let span = crate::ast::Span::dummy();
+        let atom = match b {
+            "byte" => Some(A::Byte),
+            "shortint" => Some(A::ShortInt),
+            "int" => Some(A::Int),
+            "longint" => Some(A::LongInt),
+            "integer" => Some(A::Integer),
+            "time" => Some(A::Time),
+            _ => None,
+        };
+        if let Some(kind) = atom {
+            return Some(DataType::IntegerAtom {
+                kind,
+                signing: None,
+                span,
+            });
+        }
+        if self.module.typedef_types.contains_key(b) {
+            return Some(DataType::TypeReference {
+                name: crate::ast::types::TypeName {
+                    scopes: Vec::new(),
+                    name: crate::ast::Identifier {
+                        name: b.to_string(),
+                        span,
+                    },
+                    span,
+                },
+                dimensions: Vec::new(),
+                type_args: Vec::new(),
+                span,
+            });
+        }
+        let w = self.concrete_type_width(b)?;
+        let num = |v: u32| {
+            Box::new(Expression::new(
+                ExprKind::Number(crate::ast::expr::NumberLiteral::Integer {
+                    size: None,
+                    signed: false,
+                    base: crate::ast::expr::NumberBase::Decimal,
+                    value: v.to_string(),
+                    cached_val: std::cell::Cell::new(None),
+                }),
+                span,
+            ))
+        };
+        Some(DataType::IntegerVector {
+            kind: if self.concrete_type_two_state(b) {
+                V::Bit
+            } else {
+                V::Logic
+            },
+            signing: self
+                .concrete_type_signed(b)
+                .unwrap_or(false)
+                .then_some(Signing::Signed),
+            dimensions: vec![crate::ast::types::PackedDimension::Range {
+                left: num(w.saturating_sub(1)),
+                right: num(0),
+                span,
+            }],
+            span,
+        })
+    }
+
+    /// §8.25/§7.2: the width of a struct, union or enum type whose members
+    /// name a class TYPE parameter the active object or specialization binds
+    /// (`struct packed { T a; bit b; }`). `None` for any other type, or
+    /// outside a parameterized class.
+    fn bound_agg_width(&mut self, dt: &DataType) -> Option<u32> {
+        if !matches!(dt, DataType::Struct(_) | DataType::Enum(_)) {
+            return None;
+        }
+        let in_param_class = self.current_spec.is_some()
+            || self
+                .this_stack
+                .last()
+                .copied()
+                .flatten()
+                .and_then(|h| self.heap.get(h)?.as_ref())
+                .is_some_and(|i| !i.type_bindings.is_empty());
+        if !in_param_class {
+            return None;
+        }
+        let b = self.bind_type_params_in(dt, &|n| self.resolve_type_param_binding(n))?;
+        let spec = self.params_with_class_spec();
+        let params = spec.as_ref().unwrap_or(&self.module.parameters);
+        let w = resolve_type_width(&b, Some(params), Some(&self.module.typedefs));
+        Some(w).filter(|w| *w > 0)
+    }
+
+    /// §8.25/§7.2: `dt` — a struct, union or enum whose members name class
+    /// TYPE parameters (`struct packed { T a; bit b; }`) — with each such
+    /// reference replaced by the type `bind` resolves it to. `None` when
+    /// nothing in `dt` was replaced.
+    fn bind_type_params_in(
+        &self,
+        dt: &DataType,
+        bind: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<DataType> {
+        match dt {
+            DataType::TypeReference {
+                name,
+                dimensions,
+                type_args,
+                ..
+            } if !name.has_scope() && type_args.is_empty() => {
+                let b = bind(&name.name.name)?;
+                let mut rep = self.bound_type_dt(b.trim())?;
+                if dimensions.is_empty() {
+                    return Some(rep);
+                }
+                // `T [1:0]`: the written dimensions are the outer ones.
+                if matches!(rep, DataType::IntegerAtom { .. }) {
+                    let b = b.trim();
+                    let w = self.concrete_type_width(b)?;
+                    rep = self.bound_type_dt(&format!(
+                        "{}{}[{}:0]",
+                        if self.concrete_type_two_state(b) {
+                            "bit"
+                        } else {
+                            "logic"
+                        },
+                        if self.concrete_type_signed(b) == Some(true) {
+                            " signed"
+                        } else {
+                            ""
+                        },
+                        w.saturating_sub(1)
+                    ))?;
+                }
+                match &mut rep {
+                    DataType::IntegerVector { dimensions: d, .. }
+                    | DataType::TypeReference { dimensions: d, .. } => {
+                        let mut outer = dimensions.clone();
+                        outer.append(d);
+                        *d = outer;
+                        Some(rep)
+                    }
+                    _ => None,
+                }
+            }
+            DataType::Struct(su) => {
+                let mut out = su.clone();
+                let mut any = false;
+                for m in &mut out.members {
+                    if let Some(t) = self.bind_type_params_in(&m.data_type, bind) {
+                        m.data_type = t;
+                        any = true;
+                    }
+                }
+                any.then(|| DataType::Struct(out))
+            }
+            DataType::Enum(et) => {
+                let b = et.base_type.as_deref()?;
+                let t = self.bind_type_params_in(b, bind)?;
+                let mut out = et.clone();
+                out.base_type = Some(Box::new(t));
+                Some(DataType::Enum(out))
+            }
+            _ => None,
+        }
     }
 
     /// Whether the type a class type parameter is bound to (`byte`,
@@ -152253,6 +152495,9 @@ impl Simulator {
             let concrete = self.class_prop_type_name(handle, prop)?;
             return self.concrete_type_width(&concrete);
         }
+        if Self::agg_names_type_param(cdef, prop) {
+            return self.class_prop_width_impl(&cdef.name, Some(handle), prop);
+        }
         self.respec_packed_width(&cdef.name, handle, prop)
     }
 
@@ -152388,10 +152633,12 @@ impl Simulator {
             // §8.25: the default specialization and an explicit binding can
             // have equal widths but different state domains (int/integer).
             for (prop, sig) in &cdef.properties {
-                if !sig
-                    .type_name
-                    .as_ref()
-                    .is_some_and(|t| cdef.type_param_names.contains(t))
+                let agg = Self::agg_names_type_param(cdef, prop);
+                if !(agg
+                    || sig
+                        .type_name
+                        .as_ref()
+                        .is_some_and(|t| cdef.type_param_names.contains(t)))
                     || cdef.static_properties.contains(prop)
                     || cdef.property_inits.contains_key(prop)
                     || cdef.array_properties.contains_key(prop)
@@ -152399,6 +152646,32 @@ impl Simulator {
                     || cdef.queue_properties.contains_key(prop)
                     || cdef.assoc_properties.contains_key(prop)
                 {
+                    continue;
+                }
+                // §8.25/§6.8: a packed struct or enum naming a type parameter
+                // starts at this object's width, x unless 2-state.
+                if agg {
+                    let Some(w) = self.class_prop_width_impl(&cdef.name, Some(handle), prop) else {
+                        continue;
+                    };
+                    let two_state = cdef.property_types.get(prop).is_some_and(|dt| {
+                        let b = self.bind_type_params_in(dt, &|n| {
+                            self.obj_type_param(handle, &cdef.name, n)
+                        });
+                        super::elaborate::is_type_two_state_resolved(
+                            b.as_ref().unwrap_or(dt),
+                            &self.module.typedef_types,
+                        )
+                    });
+                    let mut v = if two_state {
+                        Value::zero(w)
+                    } else {
+                        Value::new(w)
+                    };
+                    v.is_signed = sig.is_signed;
+                    if let Some(Some(inst)) = self.heap.get_mut(handle) {
+                        inst.properties.insert(prop.clone(), v);
+                    }
                     continue;
                 }
                 if let Some(concrete) = self.class_prop_type_name(handle, prop)
