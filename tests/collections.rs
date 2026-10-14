@@ -69,6 +69,8 @@ mod mailbox_handle_named_like_struct;
 mod member_off_handle_collection_elem;
 #[path = "classes/compiled_method_test_env.rs"]
 mod compiled_method_test_env;
+#[path = "collections/compiled_ret_coll_by_name.rs"]
+mod compiled_ret_coll_by_name;
 #[path = "collections/call_ret_store_into_local_coll.rs"]
 mod call_ret_store_into_local_coll;
 #[path = "collections/local_coll_init_fast_fn_eligible.rs"]
