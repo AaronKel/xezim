@@ -1347,6 +1347,69 @@ mod edgesel_writers {
         /// Leaf name (of the target, or of the parent net a port target
         /// connects to) -> indices into `pending_cont_assign`.
         pub pend: HashMap<String, Vec<usize>>,
+        /// Leaf names some procedural `force` or `assign` (§10.6) targets:
+        /// its bits need not follow their continuous drivers.
+        pub forced: HashSet<String>,
+    }
+
+    /// The targets of `force` / procedural `assign` statements in `s`.
+    fn proc_cont_targets<'a>(s: &'a Statement, out: &mut Vec<&'a Expression>) {
+        use crate::ast::stmt::ProceduralContinuous as PC;
+        match &s.kind {
+            StatementKind::ProceduralContinuous(PC::Force { lvalue, .. })
+            | StatementKind::ProceduralContinuous(PC::Assign { lvalue, .. }) => {
+                match &lvalue.kind {
+                    ExprKind::Concatenation(parts) => out.extend(parts.iter()),
+                    _ => out.push(lvalue),
+                }
+            }
+            StatementKind::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                proc_cont_targets(then_stmt, out);
+                if let Some(e) = else_stmt {
+                    proc_cont_targets(e, out);
+                }
+            }
+            StatementKind::Case { items, .. } => {
+                for it in items {
+                    proc_cont_targets(&it.stmt, out);
+                }
+            }
+            StatementKind::For { body, .. }
+            | StatementKind::Foreach { body, .. }
+            | StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Repeat { body, .. }
+            | StatementKind::ForeachTail { body, .. }
+            | StatementKind::Forever { body }
+            | StatementKind::ForeverTail { body }
+            | StatementKind::RsAction { body } => proc_cont_targets(body, out),
+            StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                for x in stmts {
+                    proc_cont_targets(x, out);
+                }
+            }
+            StatementKind::TimingControl { stmt, .. } | StatementKind::Wait { stmt, .. } => {
+                proc_cont_targets(stmt, out)
+            }
+            StatementKind::RandCase { items } => {
+                for (_, x) in items {
+                    proc_cont_targets(x, out);
+                }
+            }
+            StatementKind::WaitOrder { pass, fail, .. } => {
+                if let Some(p) = pass {
+                    proc_cont_targets(p, out);
+                }
+                if let Some(f) = fail {
+                    proc_cont_targets(f, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     impl WriterIndex {
@@ -1362,6 +1425,49 @@ mod edgesel_writers {
                 for t in targets(&ca.lhs) {
                     if let Some(b) = base_ident(t) {
                         ix.cont.entry(leaf(&b).to_string()).or_default().push(i);
+                    }
+                }
+            }
+            let mut forced: Vec<&Expression> = Vec::new();
+            for b in &module.always_blocks {
+                proc_cont_targets(&b.stmt, &mut forced);
+            }
+            for b in module
+                .initial_blocks
+                .iter()
+                .chain(module.final_blocks.iter())
+            {
+                proc_cont_targets(&b.stmt, &mut forced);
+            }
+            for t in module.tasks.values() {
+                for x in &t.items {
+                    proc_cont_targets(x, &mut forced);
+                }
+            }
+            for f in module.functions.values() {
+                for x in &f.items {
+                    proc_cont_targets(x, &mut forced);
+                }
+            }
+            for e in forced {
+                if let Some(b) = base_ident(e) {
+                    ix.forced.insert(leaf(&b).to_string());
+                }
+            }
+            let pend_sources = module
+                .pending_always
+                .iter()
+                .map(|p| (&*p.source, &p.ctx))
+                .chain(module.pending_initial.iter().map(|p| (&*p.source, &p.ctx)));
+            for (src, ctx) in pend_sources {
+                let mut f: Vec<&Expression> = Vec::new();
+                proc_cont_targets(src, &mut f);
+                for e in f {
+                    if let Some(b) = base_ident(e) {
+                        ix.forced.insert(leaf(&b).to_string());
+                        if let Some(mb) = ctx.port_map.get(&b).and_then(base_ident) {
+                            ix.forced.insert(leaf(&mb).to_string());
+                        }
                     }
                 }
             }
@@ -10063,6 +10169,10 @@ impl Simulator {
         }
         let params = &module.parameters;
         let vleaf = leaf(v);
+        // §10.6.2: a `force` of one bit makes it differ from the others.
+        if index.forced.contains(vleaf) {
+            return Vec::new();
+        }
         // (lo, hi, replicated) per write of `v`; None = a write of unknown
         // extent (concatenation target, dynamic select).
         let mut writes: Vec<Option<(i64, i64, bool)>> = Vec::new();
@@ -123505,6 +123615,22 @@ impl Simulator {
             let has_init = self.module.classes.get(decl_class).is_some_and(|cd| {
                 cd.property_inits.contains_key(prop) || !cd.properties.contains_key(prop)
             });
+            // §6.8: a static of a 4-state type without an initializer
+            // starts x (an enum or packed struct the elaborator seeded 0).
+            let seeds_x = !has_init
+                && !init.is_real
+                && self
+                    .module
+                    .classes
+                    .get(decl_class)
+                    .is_some_and(|cd| self.prop_seeds_x(cd, prop));
+            let init = if seeds_x {
+                let mut d = Value::new(init.width.max(1));
+                d.is_signed = init.is_signed;
+                d
+            } else {
+                init
+            };
             let init = match self.static_cell_width(&key, prop) {
                 Some((w, signed)) if !has_init && !init.is_real && w != init.width => {
                     let mut d = if init.has_xz() {
