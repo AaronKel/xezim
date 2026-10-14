@@ -323,7 +323,6 @@ endmodule
 /// §8.25/§6.18: a typedef of a class TYPE parameter (`typedef T payload_t;`)
 /// follows each specialization.
 #[test]
-#[ignore = "a class typedef of a type parameter keeps the default type's width in every specialization"]
 fn typedef_of_a_type_parameter() {
     let src = r#"
 class G #(type T = int);
@@ -340,4 +339,271 @@ module top;
 endmodule
 "#;
     assert_eq!(t_lines(src), ["T|tp 8 64 8 64 8 64"]);
+}
+
+/// §8.25/§6.18: the type-parameter typedef also sizes stores, method
+/// locals and a static method's return value per specialization; the
+/// default specialization keeps the default type.
+#[test]
+fn typedef_of_a_type_parameter_stores_and_returns() {
+    let src = r#"
+class G #(type T = int);
+  typedef T payload_t;
+  payload_t p;
+  function int lw(); payload_t t; t = 300; return t; endfunction
+  static function payload_t mk(); return 300; endfunction
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new; G gd = new;
+    g.p = 300; h.p = 300; gd.p = 300;
+    $display("T|st %0d %0d %0d %0d", g.p, h.p, gd.p, $bits(gd.p));
+    $display("T|lw %0d %0d", g.lw(), h.lw());
+    $display("T|mk %0d %0d %0d", G#(byte)::mk(), G#(longint)::mk(), $bits(G#(byte)::mk()));
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        ["T|st 44 300 300 32", "T|lw 44 300", "T|mk 44 300 8"]
+    );
+}
+
+/// §7.4/§8.25: packed and unpacked array typedefs of a type parameter, and
+/// a typedef sized by a value parameter, follow each specialization.
+#[test]
+fn array_typedefs_of_class_parameters() {
+    let src = r#"
+class A #(type T = int);
+  typedef T ua_t[3];
+  ua_t u;
+endclass
+class P #(type T = logic [3:0]);
+  typedef T [1:0] pk_t;
+  pk_t k;
+  function int wk(); return $bits(pk_t); endfunction
+endclass
+class V #(int W = 8);
+  typedef logic [W-1:0] word_t;
+  word_t x;
+  function int ww(); return $bits(word_t); endfunction
+endclass
+module top;
+  initial begin
+    A #(byte) a = new; A #(longint) b = new;
+    P #(logic [5:0]) pa = new; P pd = new;
+    V #(12) v = new; V vd = new;
+    a.u[0] = 300; b.u[0] = 300;
+    $display("T|ua %0d %0d %0d %0d", $bits(a.u), $bits(b.u), a.u[0], b.u[0]);
+    $display("T|pk %0d %0d %0d %0d", $bits(pa.k), $bits(pd.k), pa.wk(), pd.wk());
+    v.x = '1; vd.x = '1;
+    $display("T|vw %0d %0d %0d %0d %0d %0d", $bits(v.x), $bits(vd.x), v.ww(), vd.ww(), v.x, vd.x);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|ua 24 192 44 300",
+            "T|pk 12 8 12 8",
+            "T|vw 12 8 12 8 4095 255"
+        ]
+    );
+}
+
+/// §7.10.2.2: `push_back` onto a queue member stores the value converted to
+/// the element type, as an indexed store does.
+#[test]
+#[ignore = "push_back/push_front onto a class queue member does not truncate to the element width"]
+fn queue_member_push_truncates_to_element_type() {
+    let src = r#"
+class A;
+  byte q[$];
+endclass
+class B #(type T = int);
+  typedef T q_t[$];
+  q_t q;
+  function void f(); q.push_back(300); endfunction
+endclass
+module top;
+  initial begin
+    A a = new; B #(byte) b = new; B #(byte) c = new;
+    a.q.push_back(300); b.q.push_back(300); c.f(); c.q.push_front(302);
+    $display("T|q %0d %0d %0d %0d %0d", a.q[0], b.q[0], c.q[0], c.q[1], $bits(b.q));
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|q 44 44 46 44 8"]);
+}
+
+/// §8.25/§8.13: a derived class sees an inherited type-parameter typedef
+/// through its `extends` arguments, a qualified `G#(byte)::payload_t`
+/// names that specialization's type, and typedefs of the typedef, casts
+/// to it and typedefs in a derived class follow along.
+#[test]
+fn inherited_qualified_and_derived_typedefs() {
+    let src = r#"
+class G #(type T = int);
+  typedef T payload_t;
+  typedef payload_t [1:0] pair_t;
+  payload_t p;
+  pair_t pr;
+  function int cv(); return payload_t'(300); endfunction
+endclass
+class D extends G#(shortint);
+  payload_t q;
+  function int wq(); return $bits(payload_t); endfunction
+endclass
+class E #(type U = byte) extends G#(U);
+  payload_t r;
+endclass
+class D2 extends G#(byte);
+  typedef payload_t [2:0] tri_t;
+  tri_t t3;
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new; D d = new; E #(bit [2:0]) e = new; D2 d2 = new;
+    G#(byte)::payload_t x; G#(shortint)::payload_t y;
+    d.q = 100000; d.p = 100000;
+    $display("T|der %0d %0d %0d %0d %0d", $bits(d.q), $bits(d.p), d.wq(), d.q, d.p);
+    e.r = 13; e.p = 13;
+    $display("T|der2 %0d %0d %0d %0d", $bits(e.r), $bits(e.p), e.r, e.p);
+    x = 300; y = 100000;
+    $display("T|q %0d %0d %0d %0d", $bits(x), $bits(y), x, y);
+    $display("T|pr %0d %0d %0d %0d %0d", $bits(g.pr), $bits(h.pr), g.cv(), h.cv(), $bits(d2.t3));
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|der 16 16 16 -31072 -31072",
+            "T|der2 3 3 5 5",
+            "T|q 8 16 44 -31072",
+            "T|pr 16 128 44 300 24"
+        ]
+    );
+}
+
+/// §8.25: `typedef G#(T) self_t;` names the enclosing specialization; an
+/// object a method constructs through it is of that specialization.
+#[test]
+fn self_typedef_built_in_a_method() {
+    let src = r#"
+class G #(type T = int);
+  typedef T payload_t;
+  typedef G#(T) self_t;
+  payload_t p;
+  self_t nxt;
+  function void mk(); nxt = new; endfunction
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new;
+    g.mk(); h.mk();
+    $display("T|self %0d %0d", $bits(g.nxt.p), $bits(h.nxt.p));
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|self 8 64"]);
+}
+
+/// §8.25: `obj.m = new` for a member declared `G#(T)` builds the
+/// specialization `T` is bound to on `obj`.
+#[test]
+#[ignore = "a member declared G#(T) constructed from outside the class takes T's default"]
+fn self_typedef_built_from_outside() {
+    let src = r#"
+class G #(type T = int);
+  typedef G#(T) self_t;
+  T p;
+  self_t nxt;
+endclass
+module top;
+  initial begin
+    G #(byte) g = new;
+    g.nxt = new;
+    $display("T|self %0d", $bits(g.nxt.p));
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|self 8"]);
+}
+
+/// §7.2/§8.25: a packed struct typedef with a member of a type parameter
+/// is sized by each specialization.
+#[test]
+#[ignore = "a packed struct member typed by a class type parameter keeps the default type's layout"]
+fn struct_typedef_with_a_type_parameter_member() {
+    let src = r#"
+class G #(type T = int);
+  typedef struct packed { T a; bit b; } s_t;
+  s_t s;
+  function int ws(); return $bits(s_t); endfunction
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new;
+    $display("T|st %0d %0d %0d %0d", $bits(g.s), $bits(h.s), g.ws(), h.ws());
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|st 9 65 9 65"]);
+}
+
+/// §8.22/§8.25: a class nested in a parameterized class sees the outer
+/// specialization's type-parameter typedef.
+#[test]
+#[ignore = "a nested class does not carry the outer class's type-parameter bindings"]
+fn nested_class_uses_outer_type_parameter_typedef() {
+    let src = r#"
+class G #(type T = int);
+  typedef T payload_t;
+  class N;
+    payload_t x;
+    function int wn(); return $bits(payload_t); endfunction
+  endclass
+  N n;
+  function new(); n = new; endfunction
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new;
+    g.n.x = 300; h.n.x = 300;
+    $display("T|nest %0d %0d %0d %0d %0d %0d", $bits(g.n.x), $bits(h.n.x), g.n.wn(), h.n.wn(), g.n.x, h.n.x);
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|nest 8 64 8 64 44 300"]);
+}
+
+/// §18.4/§8.25: a `rand` member of a type-parameter typedef draws within
+/// the bound type, constrained or not.
+#[test]
+fn randomize_a_type_parameter_typedef_member() {
+    let src = r#"
+class R #(type T = int);
+  typedef T pl_t;
+  rand pl_t r;
+  rand pl_t c;
+  constraint k { c > 5; c < 10; }
+endclass
+module top;
+  initial begin
+    R #(bit [3:0]) a = new; R #(bit [40:0]) b = new;
+    int unsigned mx = 0; int ok = 1;
+    longint unsigned bmx = 0;
+    repeat (40) begin
+      if (!a.randomize()) ok = 0;
+      if (a.r > mx) mx = a.r;
+      if (!(a.c > 5 && a.c < 10)) ok = 0;
+      if (!b.randomize()) ok = 0;
+      if (b.r > bmx) bmx = b.r;
+    end
+    $display("T|rnd %0d %0d %0d %0d %0d", ok, mx < 16, mx > 7, bmx >= 64'd4294967296, $bits(a.r));
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|rnd 1 1 1 1 4"]);
 }
