@@ -76,7 +76,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§21.2.1.7: %p of a class struct property holding unpacked arrays and a handle prints each member as one x"]
 fn percent_p_of_struct_property_with_arrays() {
     let src = r#"
 class inner; int v = 7; endclass

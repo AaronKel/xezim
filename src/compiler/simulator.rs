@@ -90501,6 +90501,11 @@ impl Simulator {
                                         }
                                     }
                                 }
+                                // §21.2.1.7: a call returning an unpacked struct.
+                                if let Some(core) = self.render_p_struct_call(arg) {
+                                    result.push_str(&core);
+                                    continue;
+                                }
                                 // A string-valued CALL or concatenation names no
                                 // variable for the typed paths below, so its bytes
                                 // printed as one huge decimal — UVM AVIPs log
@@ -118580,6 +118585,54 @@ impl Simulator {
         }
     }
 
+    /// §21.2.1.7: `%p` of a call to a module function whose return type is
+    /// an unpacked struct of plain members, member by member. `None` for any
+    /// other argument.
+    fn render_p_struct_call(&mut self, arg: &Expression) -> Option<String> {
+        let ExprKind::Call { func, .. } = &arg.kind else {
+            return None;
+        };
+        let ExprKind::Ident(h) = &func.kind else {
+            return None;
+        };
+        if h.path.len() != 1 {
+            return None;
+        }
+        let rt = self
+            .module
+            .functions
+            .get(&h.path[0].name.name)?
+            .return_type
+            .clone();
+        let su = self.unpacked_struct_of(&rt)?;
+        let plain = su.members.iter().all(|m| {
+            m.declarators.iter().all(|d| d.dimensions.is_empty())
+                && !matches!(self.resolve_dt_ref(&m.data_type), DataType::Struct(_))
+        });
+        if !plain {
+            return None;
+        }
+        let v = self.eval_expr(arg);
+        let leaves: HashMap<String, Value> =
+            self.split_packed_struct("", &su, &v).into_iter().collect();
+        let mut parts = Vec::new();
+        for m in &su.members {
+            for d in &m.declarators {
+                let mut mv = leaves.get(&format!(".{}", d.name.name))?.clone();
+                mv.is_signed = super::elaborate::is_type_signed_resolved(
+                    &m.data_type,
+                    &self.module.typedef_types,
+                );
+                parts.push(format!(
+                    "{}:{}",
+                    d.name.name,
+                    self.render_p_value_typed(&mv, &m.data_type)
+                ));
+            }
+        }
+        Some(format!("'{{{}}}", parts.join(", ")))
+    }
+
     /// Render a packed struct's members by slicing `v`. The FIRST declared
     /// member occupies the most-significant bits (LRM §7.2.1), so offsets are
     /// assigned from the last member up.
@@ -118820,25 +118873,62 @@ impl Simulator {
         for m in &su.members {
             for md in &m.declarators {
                 let key = format!("{}.{}", leaf, md.name.name);
-                let v = self
-                    .heap
-                    .get(handle)
-                    .and_then(|o| o.as_ref())
-                    .and_then(|i| i.properties.get(&key))
-                    .cloned();
-                let rendered = match self.resolve_dt(&m.data_type) {
-                    DataType::Struct(sub) if Self::spreads_member_wise(&sub) => {
-                        self.render_p_class_prop_struct(handle, &key, &sub)
+                // §7.4: a member with fixed unpacked dimensions is a nested
+                // list of its element cells (`<key>[i]`).
+                let rendered = match self.member_dim_indices(&md.dimensions) {
+                    Some(dims) if !md.dimensions.is_empty() => {
+                        self.render_p_class_member_elems(handle, &key, &dims, &m.data_type)
                     }
-                    _ => v
-                        .as_ref()
-                        .map(|vv| self.render_p_value_typed(vv, &m.data_type))
-                        .unwrap_or_else(|| "x".into()),
+                    _ => self.render_p_class_member_cell(handle, &key, &m.data_type),
                 };
                 parts.push(format!("{}:{}", md.name.name, rendered));
             }
         }
         format!("'{{{}}}", parts.join(", "))
+    }
+
+    /// The nested `'{...}` list of the elements of a fixed-array struct
+    /// member stored as cells `<key>[i]...` of object `handle`.
+    fn render_p_class_member_elems(
+        &mut self,
+        handle: usize,
+        key: &str,
+        dims: &[Vec<i64>],
+        dt: &DataType,
+    ) -> String {
+        let Some((idx, rest)) = dims.split_first() else {
+            return self.render_p_class_member_cell(handle, key, dt);
+        };
+        let parts: Vec<String> = idx
+            .iter()
+            .map(|i| self.render_p_class_member_elems(handle, &format!("{}[{}]", key, i), rest, dt))
+            .collect();
+        format!("'{{{}}}", parts.join(", "))
+    }
+
+    /// One struct-member cell `key` of object `handle` for `%p`: a nested
+    /// unpacked struct member-wise, a class handle as `null` until it is set
+    /// (§8.4), anything else by its declared type.
+    fn render_p_class_member_cell(&mut self, handle: usize, key: &str, dt: &DataType) -> String {
+        if let DataType::Struct(sub) = self.resolve_dt(dt)
+            && Self::spreads_member_wise(&sub)
+        {
+            return self.render_p_class_prop_struct(handle, key, &sub);
+        }
+        let v = self
+            .heap
+            .get(handle)
+            .and_then(|o| o.as_ref())
+            .and_then(|i| i.properties.get(key))
+            .cloned();
+        if Self::dt_is_class_handle(dt, &self.module)
+            && v.as_ref().is_none_or(|v| v.to_u64().unwrap_or(0) == 0)
+        {
+            return "null".into();
+        }
+        v.as_ref()
+            .map(|vv| self.render_p_value_typed(vv, dt))
+            .unwrap_or_else(|| "x".into())
     }
 
     /// §21.2.1.7: `%p` of class property `prop` of object `handle` from its
