@@ -372,6 +372,8 @@ mod randomize_issues_303_305;
 mod randomize_issue_301_wide2d;
 #[path = "classes/randomize_wide_sets.rs"]
 mod randomize_wide_sets;
+#[path = "classes/randomize_wide_open.rs"]
+mod randomize_wide_open;
 #[path = "classes/randomize_shift_mask_wide_peer.rs"]
 mod randomize_shift_mask_wide_peer;
 #[path = "classes/randomize_inside_range.rs"]
