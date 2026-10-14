@@ -116104,6 +116104,33 @@ impl Simulator {
             .map(|(_, v)| v)
     }
 
+    /// §13.4.1 / §6.8: the initial leaves of a function's unpacked-struct
+    /// return variable `ret_name` — each member starts at its type's default,
+    /// x for a 4-state member and 0 for a 2-state one.
+    fn struct_return_leaf_seeds(
+        &mut self,
+        ret_name: &str,
+        su: &crate::ast::types::StructUnionType,
+    ) -> Vec<(String, Value)> {
+        let mut defaults = Vec::new();
+        self.struct_leaf_plain_defaults(ret_name, su, 0, &mut defaults);
+        let defaults: HashMap<String, Value> = defaults.into_iter().collect();
+        self.unpacked_struct_leaf_keys(ret_name, su)
+            .into_iter()
+            .map(|(k, w, is_real)| {
+                let seed = if is_real {
+                    Value::from_f64(0.0)
+                } else {
+                    match defaults.get(&k) {
+                        Some(d) if d.width == w => d.clone(),
+                        _ => Value::new(w),
+                    }
+                };
+                (k, seed)
+            })
+            .collect()
+    }
+
     /// Unpacked-struct TYPE of a collection property's element. Resolves the
     /// property's declared (element) DataType over the instance's inheritance
     /// chain, then reduces typedef aliases to its `Struct` if it is one.
@@ -137786,12 +137813,7 @@ impl Simulator {
         // live in the frame under `<fn>.<member>`, like any other local.
         self.register_formal_type_metadata(&ret_name, &fd.return_type, true);
         if let Some(su) = self.unpacked_struct_of(&fd.return_type) {
-            for (k, w, is_real) in self.unpacked_struct_leaf_keys(&ret_name, &su) {
-                let seed = if is_real {
-                    Value::from_f64(0.0)
-                } else {
-                    Value::new(w)
-                };
+            for (k, seed) in self.struct_return_leaf_seeds(&ret_name, &su) {
                 locals.insert(k, seed);
             }
         }
@@ -156786,12 +156808,7 @@ impl Simulator {
                             _ => self.unpacked_struct_of(&f.return_type),
                         };
                         if let Some(su) = su {
-                            for (k, w, is_real) in self.unpacked_struct_leaf_keys(rn, &su) {
-                                let seed = if is_real {
-                                    Value::from_f64(0.0)
-                                } else {
-                                    Value::new(w)
-                                };
+                            for (k, seed) in self.struct_return_leaf_seeds(rn, &su) {
                                 locals.insert(k, seed);
                             }
                         }

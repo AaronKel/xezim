@@ -122,7 +122,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§13.4.1: the unassigned return value of a function of unpacked struct type reads x for its 2-state members"]
 fn function_struct_return_default() {
     let src = r#"
 typedef struct {logic [3:0] d; bit [3:0] f;} rec_t;
@@ -375,6 +374,49 @@ endmodule
             "T|d xxxx1010 0000 1010 1",
             "T|e 1 0000",
             "T|f xxxxxxxx 0000",
+        ]
+    );
+}
+
+#[test]
+fn struct_returns_of_functions_and_methods() {
+    let src = r#"
+typedef struct {logic [3:0] d; bit [3:0] f; int i; integer n;} rec_t;
+typedef struct packed {bit [3:0] b; logic [3:0] l;} mix_t;
+class C;
+  function rec_t m(); endfunction
+  static function rec_t sm(); endfunction
+endclass
+module top;
+  function automatic rec_t fr(); endfunction
+  function rec_t fs(); endfunction
+  function automatic mix_t fm(); endfunction
+  function automatic rec_t fp(); fp.d = 4'h1; endfunction
+  C c;
+  rec_t r;
+  initial begin
+    c = new;
+    $display("T|fret %b %b %0d %0d", fr().d, fr().f, fr().i, fr().n === 'x);
+    $display("T|fs %b %b", fs().d, fs().f);
+    $display("T|fm %b", fm());
+    $display("T|fp %b %b", fp().d, fp().f);
+    $display("T|m %b %b %b %b", c.m().d, c.m().f, C::sm().d, C::sm().f);
+    r = fr();
+    $display("T|r %b %b %0d", r.d, r.f, r.i);
+    $display("T|p %p", fr());
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|fret xxxx 0000 0 1",
+            "T|fs xxxx 0000",
+            "T|fm xxxxxxxx",
+            "T|fp 0001 0000",
+            "T|m xxxx 0000 xxxx 0000",
+            "T|r xxxx 0000 0",
+            "T|p '{d:x, f:0, i:0, n:x}",
         ]
     );
 }
