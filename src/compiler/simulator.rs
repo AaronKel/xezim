@@ -15998,7 +15998,7 @@ impl Simulator {
         })
     }
 
-    fn dpi_return_kind(dt: &DataType) -> Option<DpiRetKind> {
+    fn dpi_return_kind(&self, dt: &DataType) -> Option<DpiRetKind> {
         match dt {
             DataType::Void(_) => Some(DpiRetKind::Void),
             DataType::IntegerAtom { kind, .. } => match kind {
@@ -16031,7 +16031,27 @@ impl Simulator {
                 crate::ast::types::SimpleType::String => Some(DpiRetKind::String),
                 _ => None,
             },
+            // §35.5.6: an enum is interpreted as its base type (`int` when
+            // none is given), so an enum result is whatever its base type's
+            // result is. It had no arm and the import was left unbound.
+            DataType::Enum(e) => match e.base_type.as_deref() {
+                Some(bt) => self.dpi_return_kind(&self.dpi_resolve_typedef(bt)),
+                None => Some(DpiRetKind::Int32),
+            },
             _ => None,
+        }
+    }
+
+    /// The (width, signed) an integral imported-function result is fitted
+    /// to: its declared type's, or, for an enum, its base type's (§35.5.6),
+    /// `int` when none is given.
+    fn dpi_result_integral(&self, dt: &DataType) -> Option<(u32, bool)> {
+        match self.dpi_resolve_typedef(dt) {
+            DataType::Enum(e) => match e.base_type.as_deref() {
+                Some(bt) => self.scalar_formal_integral(bt),
+                None => Some((32, true)),
+            },
+            _ => self.scalar_formal_integral(dt),
         }
     }
 
@@ -16049,10 +16069,12 @@ impl Simulator {
             else {
                 break;
             };
-            if !name.scopes.is_empty() || !dimensions.is_empty() {
+            if !dimensions.is_empty() {
                 break;
             }
-            match self.module.typedef_types.get(&name.name.name) {
+            // §26.3: a package-qualified result type (`pkg::color_e`) names
+            // the package's typedef.
+            match super::elaborate::lookup_scoped_type(name, &self.module.typedef_types) {
                 Some(t) => cur = t.clone(),
                 None => break,
             }
@@ -16063,7 +16085,7 @@ impl Simulator {
     fn dpi_signature(&self, spec: &DpiImportSpec) -> Option<(DpiRetKind, Vec<DpiArgKind>)> {
         match &spec.proto {
             crate::ast::decl::DPIProto::Function(fd) => {
-                let ret = Self::dpi_return_kind(&self.dpi_resolve_typedef(&fd.return_type))?;
+                let ret = self.dpi_return_kind(&self.dpi_resolve_typedef(&fd.return_type))?;
                 let mut args = Vec::with_capacity(fd.ports.len());
                 for p in &fd.ports {
                     args.push(self.dpi_atom_kind(&p.data_type, &p.dimensions, p.direction)?);
@@ -16937,7 +16959,7 @@ impl Simulator {
         // use in `$display` did not).
         if matches!(ret_kind, DpiRetKind::Int32 | DpiRetKind::Int64) {
             if let crate::ast::decl::DPIProto::Function(fd) = &spec.proto {
-                if let Some((w, signed)) = self.scalar_formal_integral(&fd.return_type) {
+                if let Some((w, signed)) = self.dpi_result_integral(&fd.return_type) {
                     if w > 0 && w <= 64 && (w != result.width || signed != result.is_signed) {
                         result = result.resize(w);
                         result.is_signed = signed;

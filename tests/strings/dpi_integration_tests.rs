@@ -456,6 +456,18 @@ fn vpi_timed_and_synch_callbacks() {
 }
 
 #[test]
+fn dpi_issue_306_logic_x_z_and_enum_prototype_test() {
+    // §35.5.6.1 and §35.5.5 (issue #306, reported by rharikrishna25): C
+    // writing or returning sv_x / sv_z reached SV as 1 / 0, and an import
+    // whose prototype uses an enum type was left unbound.
+    assert_dpi_pass(
+        "tests/dpi/issue_306_logic_enum.c",
+        "issue_306_logic_enum",
+        "tests/dpi/issue_306_logic_enum_test.sv",
+    );
+}
+
+#[test]
 fn dpi_issue_306_svlogic_shapes_test() {
     // §35.5.6.1 / Annex H (issue #306 neighbours): x and z through scalar
     // logic outputs, results, inouts, implicit formals and task outputs, and
@@ -464,5 +476,17 @@ fn dpi_issue_306_svlogic_shapes_test() {
         "tests/dpi/issue_306_svlogic_shapes.c",
         "issue_306_svlogic_shapes",
         "tests/dpi/issue_306_svlogic_shapes_test.sv",
+    );
+}
+
+#[test]
+fn dpi_issue_306_enum_shapes_test() {
+    // §35.5.6 (issue #306 neighbours): enums with int, byte, logic,
+    // bit [7:0] and logic [3:0] base types and a package enum, as arguments,
+    // outputs, inouts and results.
+    assert_dpi_pass(
+        "tests/dpi/issue_306_enum_shapes.c",
+        "issue_306_enum_shapes",
+        "tests/dpi/issue_306_enum_shapes_test.sv",
     );
 }
