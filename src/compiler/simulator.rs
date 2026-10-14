@@ -16913,7 +16913,10 @@ impl Simulator {
                 Value::zero(32)
             }
             DpiRetKind::Int32 => {
-                let rv: i32 = unsafe { cif.call(fn_ptr, &arg_refs) };
+                // libffi stores an integral result narrower than ffi_arg as a
+                // whole ffi_arg (8 bytes on x86-64): an i32 buffer was
+                // overrun by 4 bytes on every call.
+                let rv: u64 = unsafe { cif.call(fn_ptr, &arg_refs) };
                 let mut v = Value::from_u64(rv as u32 as u64, 32);
                 v.is_signed = true;
                 v
