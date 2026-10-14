@@ -490,3 +490,14 @@ fn dpi_issue_306_enum_shapes_test() {
         "tests/dpi/issue_306_enum_shapes_test.sv",
     );
 }
+
+#[test]
+fn dpi_audit_scalar_arrays_test() {
+    // §35.5.6.1 / H.7.4 (DPI audit, family A): unpacked arrays of scalar
+    // bit / logic hold one svBit / svLogic byte per element.
+    assert_dpi_pass(
+        "tests/dpi/dpi_audit_scalar_arrays.c",
+        "dpi_audit_scalar_arrays",
+        "tests/dpi/dpi_audit_scalar_arrays_test.sv",
+    );
+}

@@ -4439,12 +4439,16 @@ enum DpiOaElem {
     F64,
     Bit(u32),
     Logic(u32),
+    /// A scalar `bit` / `logic` element: one `svBit` / `svLogic` byte
+    /// (H.7.4), not a one-word vector.
+    SBit,
+    SLogic,
 }
 
 impl DpiOaElem {
     fn bytes(self) -> usize {
         match self {
-            DpiOaElem::I8 => 1,
+            DpiOaElem::I8 | DpiOaElem::SBit | DpiOaElem::SLogic => 1,
             DpiOaElem::I16 => 2,
             DpiOaElem::I32 | DpiOaElem::F32 => 4,
             DpiOaElem::I64 | DpiOaElem::F64 => 8,
@@ -4461,6 +4465,7 @@ impl DpiOaElem {
             DpiOaElem::I32 | DpiOaElem::F32 => 32,
             DpiOaElem::I64 | DpiOaElem::F64 => 64,
             DpiOaElem::Bit(w) | DpiOaElem::Logic(w) => w.max(1),
+            DpiOaElem::SBit | DpiOaElem::SLogic => 1,
         }
     }
 }
@@ -4547,6 +4552,8 @@ impl DpiOpenArrayArg {
                 }
                 DpiOaElem::F32 => dst.copy_from_slice(&(Self::real_of(v) as f32).to_le_bytes()),
                 DpiOaElem::F64 => dst.copy_from_slice(&Self::real_of(v).to_le_bytes()),
+                DpiOaElem::SBit => dst[0] = (v.get_bit(0) == LogicBit::One) as u8,
+                DpiOaElem::SLogic => dst[0] = Simulator::dpi_svlogic_code(v),
                 DpiOaElem::Bit(w) => {
                     let (aval, _) = Simulator::dpi_value_to_logic_words(v, w);
                     for (k, word) in aval.iter().enumerate().take(eb / 4) {
@@ -4607,6 +4614,8 @@ impl DpiOpenArrayArg {
                         Value::from_f64(f32::from_le_bytes(src.try_into().unwrap()) as f64)
                     }
                     DpiOaElem::F64 => Value::from_f64(f64::from_le_bytes(src.try_into().unwrap())),
+                    DpiOaElem::SBit => Value::from_u64((src[0] & 1) as u64, 1),
+                    DpiOaElem::SLogic => Simulator::dpi_svlogic_value(src[0]),
                     DpiOaElem::Bit(w) => {
                         let aval: Vec<u32> = (0..eb / 4).map(word).collect();
                         Simulator::dpi_logic_words_to_value(&aval, &[], w)
@@ -15799,6 +15808,59 @@ impl Simulator {
         Some(fields)
     }
 
+    /// The canonical C element (H.7) of an unpacked array of `dt`, typedefs
+    /// resolved: an enum is its base type (§35.5.6), a packed struct its
+    /// packed vector, a scalar `bit`/`logic` one svBit/svLogic byte, and the
+    /// 4-state atoms `integer`/`time` svLogicVecVal words.
+    fn dpi_oa_elem(&self, dt: &DataType) -> Option<DpiOaElem> {
+        let dt = super::elaborate::resolve_typedef_chain(dt, &self.module.typedef_types);
+        let w = super::elaborate::resolve_type_width(
+            dt,
+            Some(&self.module.parameters),
+            Some(&self.module.typedefs),
+        );
+        Some(match dt {
+            DataType::IntegerAtom { kind, .. } => match kind {
+                IntegerAtomType::Byte => DpiOaElem::I8,
+                IntegerAtomType::ShortInt => DpiOaElem::I16,
+                IntegerAtomType::Int => DpiOaElem::I32,
+                IntegerAtomType::LongInt => DpiOaElem::I64,
+                IntegerAtomType::Integer => DpiOaElem::Logic(32),
+                IntegerAtomType::Time => DpiOaElem::Logic(64),
+            },
+            DataType::Real { kind, .. } => match kind {
+                crate::ast::types::RealType::ShortReal => DpiOaElem::F32,
+                _ => DpiOaElem::F64,
+            },
+            DataType::IntegerVector {
+                kind, dimensions, ..
+            } => {
+                let two = matches!(kind, crate::ast::types::IntegerVectorType::Bit);
+                match (dimensions.is_empty(), two) {
+                    (true, true) => DpiOaElem::SBit,
+                    (true, false) => DpiOaElem::SLogic,
+                    (false, true) => DpiOaElem::Bit(w),
+                    (false, false) => DpiOaElem::Logic(w),
+                }
+            }
+            // An implicitly typed element is a `logic` (§23.2.2.3).
+            DataType::Implicit { dimensions, .. } if dimensions.is_empty() => DpiOaElem::SLogic,
+            DataType::Implicit { .. } => DpiOaElem::Logic(w),
+            DataType::Struct(su) if su.packed && w > 0 => {
+                if self.packed_aggregate_two_state(su) {
+                    DpiOaElem::Bit(w)
+                } else {
+                    DpiOaElem::Logic(w)
+                }
+            }
+            DataType::Enum(e) => match e.base_type.as_deref() {
+                Some(bt) => return self.dpi_oa_elem(bt),
+                None => DpiOaElem::I32,
+            },
+            _ => return None,
+        })
+    }
+
     fn dpi_atom_kind(
         &self,
         dt: &DataType,
@@ -15813,34 +15875,9 @@ impl Simulator {
             PortDirection::Output | PortDirection::Ref | PortDirection::Inout
         );
         if !dims.is_empty() {
-            let w = super::elaborate::resolve_type_width(
-                dt,
-                Some(&self.module.parameters),
-                Some(&self.module.typedefs),
-            );
             // §35.5.6.1/H.7: an open array's elements take their canonical
             // C form — a `byte` array is `char`s, not `int`s.
-            let elem = match dt {
-                DataType::IntegerAtom { kind, .. } => match kind {
-                    IntegerAtomType::Byte => DpiOaElem::I8,
-                    IntegerAtomType::ShortInt => DpiOaElem::I16,
-                    IntegerAtomType::Int => DpiOaElem::I32,
-                    IntegerAtomType::LongInt => DpiOaElem::I64,
-                    // 4-state: svLogicVecVal elements (H.7.4).
-                    IntegerAtomType::Integer => DpiOaElem::Logic(32),
-                    IntegerAtomType::Time => DpiOaElem::Logic(64),
-                },
-                DataType::Real { kind, .. } => match kind {
-                    crate::ast::types::RealType::ShortReal => DpiOaElem::F32,
-                    _ => DpiOaElem::F64,
-                },
-                DataType::IntegerVector { kind, .. } => match kind {
-                    crate::ast::types::IntegerVectorType::Bit => DpiOaElem::Bit(w),
-                    _ => DpiOaElem::Logic(w),
-                },
-                DataType::Implicit { .. } if w <= 32 => DpiOaElem::I32,
-                _ => return None,
-            };
+            let elem = self.dpi_oa_elem(dt)?;
             // §35.5.6.1 / H.12: a formal with several unpacked dimensions
             // (`int a[][]`) is one handle over the whole array, row-major,
             // with a shape per dimension — up to the header's four.
