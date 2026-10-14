@@ -81004,10 +81004,13 @@ impl Simulator {
                 // (`typedef C#(int) c_t; c_t h; h = new;`): the lookup below
                 // only follows NON-parameterized aliases, so `h` stayed null
                 // and every call through it was silently dropped.
-                if let Some((base, sig)) = self
-                    .this_member_typedef_spec(lvalue)
-                    .or_else(|| self.resolve_typedef_spec(&tname))
-                {
+                let member_spec = match self.receiver_member_spec(lvalue) {
+                    Some(s) => Some(s),
+                    None => self
+                        .this_member_typedef_spec(lvalue)
+                        .or_else(|| self.resolve_typedef_spec(&tname)),
+                };
+                if let Some((base, sig)) = member_spec {
                     if let Some(class_def) = self.module.classes.get(&base).cloned() {
                         self.ensure_spec_statics(&base, &sig);
                         let saved_spec = self.current_spec.clone();
@@ -144547,6 +144550,85 @@ impl Simulator {
             cur = cd.extends.clone();
         }
         None
+    }
+
+    /// §8.25: `obj.m = new` where `obj` is another object of a parameterized
+    /// class and `m` is declared through that class's parameters (`self_t
+    /// m;` with `typedef G#(T) self_t;`, or `G#(T) m;`): the specialization
+    /// `(base, sig)` those parameters name on `obj`, as a method of `obj`
+    /// executing `m = new` would build. `None` when the lvalue has no such
+    /// receiver or the member's type takes no parameters.
+    fn receiver_member_spec(&mut self, lvalue: &Expression) -> Option<(String, String)> {
+        let (recv, prop) = Self::split_trailing_member(lvalue)?;
+        // Only a receiver that names an object (no call to run twice).
+        fn names_object(e: &Expression) -> bool {
+            match &e.kind {
+                ExprKind::Ident(_) => true,
+                ExprKind::MemberAccess { expr, .. } => names_object(expr),
+                ExprKind::Index { expr, index } => {
+                    names_object(expr)
+                        && matches!(index.kind, ExprKind::Ident(_) | ExprKind::Number(_))
+                }
+                _ => false,
+            }
+        }
+        if !names_object(&recv) {
+            return None;
+        }
+        let h = self.eval_expr(&recv).to_u64()? as usize;
+        if h == 0 || self.this_stack.last().copied().flatten() == Some(h) {
+            return None;
+        }
+        let inst = self.heap.get(h)?.as_ref()?;
+        if inst.spec.is_none() && inst.type_bindings.is_empty() {
+            return None;
+        }
+        let (cls, spec) = (inst.class_name.clone(), inst.spec.clone());
+        // The class in `obj`'s chain that declares `m`, and its declared type.
+        let mut cur = Some(cls.as_str());
+        let mut decl = None;
+        for _ in 0..64 {
+            let Some(cd) = cur.and_then(|c| self.module.classes.get(c)) else {
+                break;
+            };
+            if let Some(sig) = cd.properties.get(&prop) {
+                decl = Some((
+                    sig.type_name.clone()?,
+                    cd.property_type_args.get(&prop).cloned(),
+                ));
+                break;
+            }
+            cur = cd.extends.as_deref();
+        }
+        let (tn, args) = decl?;
+        let saved_spec = std::mem::replace(&mut self.current_spec, spec);
+        self.this_stack.push(Some(h));
+        self.class_context_stack.push(Some(cls));
+        let out = match args.filter(|a| !a.is_empty()) {
+            // `G#(T) m;`: the arguments resolved through `obj`'s bindings.
+            Some(type_args) => {
+                let dt = DataType::TypeReference {
+                    name: crate::ast::types::TypeName {
+                        scopes: Vec::new(),
+                        name: crate::ast::Identifier {
+                            name: tn,
+                            span: crate::ast::Span::dummy(),
+                        },
+                        span: crate::ast::Span::dummy(),
+                    },
+                    dimensions: Vec::new(),
+                    type_args,
+                    span: crate::ast::Span::dummy(),
+                };
+                self.spec_from_typedef_dt(&dt)
+            }
+            // `self_t m;`: a typedef of a specialization.
+            None => self.resolve_typedef_spec(&tn),
+        };
+        self.class_context_stack.pop();
+        self.this_stack.pop();
+        self.current_spec = saved_spec;
+        out
     }
 
     /// IEEE 1800-2017 §6.20.2 / §8.25: the value of the declared default `e`

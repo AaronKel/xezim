@@ -511,7 +511,6 @@ endmodule
 /// §8.25: `obj.m = new` for a member declared `G#(T)` builds the
 /// specialization `T` is bound to on `obj`.
 #[test]
-#[ignore = "a member declared G#(T) constructed from outside the class takes T's default"]
 fn self_typedef_built_from_outside() {
     let src = r#"
 class G #(type T = int);
@@ -605,4 +604,46 @@ module top;
 endmodule
 "#;
     assert_eq!(t_lines(src), ["T|rnd 1 1 1 1 4"]);
+}
+
+/// §8.25: `obj.m = new` builds the specialization `obj` binds for a member
+/// declared through a typedef of the class (`self_t`), through `G#(T)`
+/// directly, or through a value parameter, at any depth of the handle chain.
+#[test]
+fn members_of_a_specialization_built_from_outside() {
+    let src = r#"
+class G #(type T = int);
+  typedef G#(T) self_t;
+  T p;
+  self_t nxt;
+  G#(T) dn;
+  function void mk(); nxt = new; dn = new; endfunction
+endclass
+class H #(int W = 4);
+  typedef H#(W) self_t;
+  bit [W-1:0] p;
+  self_t nxt;
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new; G #(shortint) k = new; H #(12) hh = new;
+    g.nxt = new; g.dn = new; h.nxt = new();
+    g.nxt.nxt = new;
+    k.mk(); k.nxt.nxt = new;
+    hh.nxt = new;
+    $display("T|self %0d %0d %0d %0d", $bits(g.nxt.p), $bits(g.dn.p), $bits(h.nxt.p), $bits(g.nxt.nxt.p));
+    $display("T|self2 %0d %0d %0d %0d", $bits(k.nxt.p), $bits(k.dn.p), $bits(k.nxt.nxt.p), $bits(hh.nxt.p));
+    g.nxt.p = 300; h.nxt.p = 300; hh.nxt.p = '1;
+    $display("T|val %0d %0d %0d", g.nxt.p, h.nxt.p, hh.nxt.p);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|self 8 8 64 8",
+            "T|self2 16 16 16 12",
+            "T|val 44 300 4095"
+        ]
+    );
 }
