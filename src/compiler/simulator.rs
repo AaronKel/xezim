@@ -69683,6 +69683,28 @@ impl Simulator {
                                 .product();
                             return Value::from_u64(n * *ew as u64, 32);
                         }
+                        // §8.25/§6.18: a typedef of a parameterized class
+                        // (`typedef logic [W-1:0] r;`) is sized by the
+                        // receiver's specialization, not the elaboration-
+                        // time default the table holds.
+                        if let Some(this_h) = self.this_stack.last().copied().flatten()
+                            && self
+                                .heap
+                                .get(this_h)
+                                .and_then(|o| o.as_ref())
+                                .is_some_and(|i| self.class_is_parameterized(&i.class_name))
+                            && !self.module.typedef_unpacked_dims.contains_key(&*name)
+                            && let Some(dt) = self.module.typedef_types.get(&*name).cloned()
+                        {
+                            let params = self.instance_param_scope(this_h);
+                            let w = super::elaborate::resolve_type_width(
+                                &dt,
+                                Some(&params),
+                                Some(&self.module.typedefs),
+                            )
+                            .max(1);
+                            return Value::from_u64(w as u64, 32);
+                        }
                         // §6.18/§23.10: a typedef declared in an INLINED
                         // child module survives only under its instance-
                         // scoped key (`dut.foo_t`) — the bare key is
