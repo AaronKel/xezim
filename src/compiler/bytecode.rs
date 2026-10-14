@@ -26053,9 +26053,22 @@ pub fn lower_two_state(
         .collect();
     let mut writes: Vec<u32> = Vec::new();
     let mut writes_span: Vec<(u32, u32)> = Vec::new();
+    // §10.6.2: every store kind names its destination here — a block whose
+    // write a force drops must leave the two-state executor, and a store
+    // left out (a part-select `RangeStore`) kept writing a forced net.
     for i in out.iter() {
         match i {
-            TsInsn::Store { sig, .. }
+            TsInsn::LogAndStore { sig, .. }
+            | TsInsn::AndRangeStore { sig, .. }
+            | TsInsn::LogOrStore { sig, .. }
+            | TsInsn::OrRangeStore { sig, .. }
+            | TsInsn::BitStoreDyn { sig, .. }
+            | TsInsn::ConstStoreX { sig, .. }
+            | TsInsn::ConstStoreNba { sig, .. }
+            | TsInsn::RangeStore { sig, .. }
+            | TsInsn::RangeStoreNba { sig, .. }
+            | TsInsn::RangeStoreW { sig, .. }
+            | TsInsn::Store { sig, .. }
             | TsInsn::StoreNba { sig, .. }
             | TsInsn::BitStoreNbaDyn { sig, .. }
             | TsInsn::RangeStoreDyn { sig, .. }
@@ -26068,6 +26081,7 @@ pub fn lower_two_state(
             | TsInsn::WRangeStoreNba { sig, .. }
             | TsInsn::WStore { sig, .. }
             | TsInsn::WStoreNba { sig, .. } => writes.push(*sig),
+            TsInsn::RangeStoreX(p) | TsInsn::RangeStoreXW(p) => writes.push(p.sig),
             TsInsn::NbaFromElem(op) | TsInsn::WNbaFromElem(op) => writes.push(op.dst),
             TsInsn::ElemStoreNbaFromSig(f) => {
                 let op = &f.op;

@@ -83,7 +83,6 @@ fn forced_vector_keeps_an_alias_per_bit() {
 }
 
 #[test]
-#[ignore = "force of one bit of a vector driven by a part-select continuous assign is not applied (the bit keeps following the driver)"]
 fn force_on_a_bit_of_a_part_select_driven_vector() {
     let o = run("forced_values", FORCED, "tb", &[]);
     assert_eq!(
@@ -128,4 +127,45 @@ endmodule
         ["T|gate 9 20 0000", "T|pull 1 6 1 0010"],
         "{o}"
     );
+}
+
+/// §10.6.2: `force` of one bit holds against a part-select driver of the
+/// whole vector whatever its right-hand side — a concatenation or a
+/// conditional, not only a replication.
+#[test]
+fn force_on_a_bit_holds_against_select_drivers() {
+    for (tag, drv) in [
+        ("cat", "assign fv[3:0] = {clk, clk, clk, clk};"),
+        ("cond", "assign fv[3:0] = clk ? 4'hf : 4'h0;"),
+    ] {
+        let src = format!(
+            r#"
+`timescale 1ns/1ns
+module tb;
+  logic clk = 0;
+  always #5 clk = ~clk;
+  wire [3:0] fv;
+  {drv}
+  int f [3];
+  always @(posedge fv[2]) f[0]++;
+  always @(fv[2]) f[1]++;
+  always @(fv) f[2]++;
+  initial begin
+    #12 force fv[2] = 1'b0;
+    #23 release fv[2];
+    #28;
+    $display("T|force %0d %0d %0d %b", f[0], f[1], f[2], fv);
+    $finish;
+  end
+  initial begin #20 $display("T|mid %b", fv); end
+endmodule
+"#
+        );
+        let o = run(tag, &src, "tb", &[]);
+        assert_eq!(
+            t_lines(&o),
+            ["T|mid 1011", "T|force 4 9 13 0000"],
+            "{tag}: {o}"
+        );
+    }
 }
