@@ -721,3 +721,6 @@ mod class_packed_elem_store;
 
 #[path = "classes/nonstatic_method_class_scope_fatal.rs"]
 mod nonstatic_method_class_scope_fatal;
+
+#[path = "classes/struct_class_prop_patterns.rs"]
+mod struct_class_prop_patterns;

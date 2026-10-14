@@ -79110,6 +79110,16 @@ impl Simulator {
         lvalue: &Expression,
         rvalue: &Expression,
     ) {
+        // §10.9.2: a pattern written to an unpacked-struct class property.
+        if let ExprKind::AssignmentPattern(items) = &rvalue.kind
+            && !items.is_empty()
+            && !self.no_class_objects()
+            && Self::receiver_prop_name(lvalue).is_some_and(|p| self.struct_prop_name_possible(p))
+            && self.assign_class_struct_prop_pattern(stmt, lvalue, items)
+        {
+            self.settle_after_proc_write();
+            return;
+        }
         if self.simple_blocking_assign(lvalue, rvalue) || self.member_target_assign(lvalue, rvalue)
         {
             return;
@@ -116834,15 +116844,115 @@ impl Simulator {
         self.write_leaf_by_name(target, v);
     }
 
-    /// Spread an assignment pattern across the members of the UNPACKED struct
-    /// `su` rooted at `base` (IEEE 1800-2017 §10.9.1): `name:` items bind by
-    /// member name, bare items bind positionally, `default:` fills the rest.
-    fn assign_pattern_into_struct(
+    /// §10.9.2/§7.2: an assignment pattern written to an unpacked-struct
+    /// CLASS PROPERTY (`s = '{x: 1, q: '{2, 3}}` in a method, `c.s = ...`):
+    /// each member is assigned its item through the property's member path,
+    /// whose storage is the instance's. Spread by the flat-name machinery,
+    /// the pattern landed in module-scope cells nothing reads and every
+    /// member kept its old value. A `default:` item fills a nested struct
+    /// member member-wise and leaves a dynamic member alone.
+    #[cold]
+    #[inline(never)]
+    fn assign_class_struct_prop_pattern(
         &mut self,
-        base: &str,
+        stmt: &Statement,
+        lvalue: &Expression,
+        items: &[AssignmentPatternItem],
+    ) -> bool {
+        let Some((handle, prop)) = self.class_prop_receiver(lvalue) else {
+            return false;
+        };
+        // Only a struct-typed property itself — an ARRAY or collection of
+        // structs has its own element-wise paths.
+        let mut cur = self
+            .heap
+            .get(handle)
+            .and_then(|o| o.as_ref())
+            .map(|i| i.class_name.clone());
+        while let Some(cn) = cur {
+            let Some(cd) = self.module.classes.get(&cn) else {
+                break;
+            };
+            if cd.array_properties.contains_key(&prop)
+                || cd.array_nd_properties.contains_key(&prop)
+                || cd.queue_properties.contains_key(&prop)
+                || cd.assoc_properties.contains_key(&prop)
+            {
+                return false;
+            }
+            if cd.property_types.contains_key(&prop) {
+                break;
+            }
+            cur = cd.extends.clone();
+        }
+        let Some(su) = self.class_prop_struct(handle, &prop) else {
+            return false;
+        };
+        if !Self::spreads_member_wise(&su) {
+            return false;
+        }
+        self.assign_class_struct_members(stmt, lvalue, &su, items, 0);
+        true
+    }
+
+    /// The member loop of [`assign_class_struct_prop_pattern`]: each member
+    /// of `su` below `lvalue` takes its item; a nested struct member given a
+    /// pattern (or a `default:` value) recurses.
+    fn assign_class_struct_members(
+        &mut self,
+        stmt: &Statement,
+        lvalue: &Expression,
         su: &crate::ast::types::StructUnionType,
         items: &[AssignmentPatternItem],
+        depth: usize,
     ) {
+        for (mname, mdt, dims, e, explicit) in self.bind_struct_pattern_items(su, items) {
+            let Some(e) = e else {
+                continue;
+            };
+            if !explicit && dims.len() == 1 && Self::coll_kind_of(&dims).is_some() {
+                continue;
+            }
+            let lhs = Self::append_member_expr(lvalue, &mname);
+            if dims.is_empty()
+                && depth < 8
+                && let Some(inner) = self.unpacked_struct_of(&mdt)
+            {
+                match &e.kind {
+                    ExprKind::AssignmentPattern(sub) if !sub.is_empty() => {
+                        self.assign_class_struct_members(stmt, &lhs, &inner, sub, depth + 1);
+                        continue;
+                    }
+                    _ if !explicit => {
+                        let dflt = [AssignmentPatternItem::Default(e.clone())];
+                        self.assign_class_struct_members(stmt, &lhs, &inner, &dflt, depth + 1);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            self.exec_stmt_blocking_assign_body(stmt, &lhs, e);
+        }
+    }
+
+    /// §10.9.2: bind the items of an assignment pattern to the members of
+    /// the unpacked struct `su` — `name:` items by member name, bare items
+    /// by position, `type:` items by member type, `default:` for the rest.
+    /// One entry per member: `(name, type, unpacked dimensions, item,
+    /// item-is-explicit)`; `item` is `None` for a member the pattern leaves
+    /// alone.
+    #[allow(clippy::type_complexity)]
+    fn bind_struct_pattern_items<'a>(
+        &self,
+        su: &crate::ast::types::StructUnionType,
+        items: &'a [AssignmentPatternItem],
+    ) -> Vec<(
+        String,
+        DataType,
+        Vec<crate::ast::types::UnpackedDimension>,
+        Option<&'a Expression>,
+        bool,
+    )> {
         let members: Vec<(String, DataType, Vec<crate::ast::types::UnpackedDimension>)> = su
             .members
             .iter()
@@ -116857,9 +116967,9 @@ impl Simulator {
             })
             .collect();
 
-        let mut by_name: Vec<Option<&Expression>> = vec![None; members.len()];
-        let mut ordered: Vec<&Expression> = Vec::new();
-        let mut default: Option<&Expression> = None;
+        let mut by_name: Vec<Option<&'a Expression>> = vec![None; members.len()];
+        let mut ordered: Vec<&'a Expression> = Vec::new();
+        let mut default: Option<&'a Expression> = None;
         for item in items {
             match item {
                 AssignmentPatternItem::Named(id, e) => {
@@ -116882,20 +116992,40 @@ impl Simulator {
             }
         }
 
-        for (i, (mname, mdt, dims)) in members.iter().enumerate() {
-            let Some(e) = by_name[i].or_else(|| ordered.get(i).copied()).or(default) else {
+        members
+            .into_iter()
+            .enumerate()
+            .map(|(i, (mname, mdt, dims))| {
+                let explicit = by_name[i].or_else(|| ordered.get(i).copied());
+                let e = explicit.or(default);
+                (mname, mdt, dims, e, explicit.is_some())
+            })
+            .collect()
+    }
+
+    /// Spread an assignment pattern across the members of the UNPACKED struct
+    /// `su` rooted at `base` (IEEE 1800-2017 §10.9.1): `name:` items bind by
+    /// member name, bare items bind positionally, `default:` fills the rest.
+    fn assign_pattern_into_struct(
+        &mut self,
+        base: &str,
+        su: &crate::ast::types::StructUnionType,
+        items: &[AssignmentPatternItem],
+    ) {
+        for (mname, mdt, dims, e, _) in self.bind_struct_pattern_items(su, items) {
+            let Some(e) = e else {
                 continue;
             };
             let target = format!("{}.{}", base, mname);
             if dims.is_empty() {
-                self.assign_pattern_or_leaf(&target, mdt, e);
+                self.assign_pattern_or_leaf(&target, &mdt, e);
                 continue;
             }
             // Array member: spread over every dimension.
-            let Some(lists) = self.member_dim_indices(dims) else {
+            let Some(lists) = self.member_dim_indices(&dims) else {
                 continue;
             };
-            self.assign_pattern_over_dims(&target, mdt, &lists, e);
+            self.assign_pattern_over_dims(&target, &mdt, &lists, e);
         }
     }
 
