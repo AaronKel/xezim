@@ -524,3 +524,14 @@ fn dpi_audit_binding_test() {
         "tests/dpi/dpi_audit_binding_test.sv",
     );
 }
+
+#[test]
+fn dpi_audit_types_test() {
+    // §35.5.6 / H.7 (DPI audit, family B): integer / time formals are
+    // svLogicVecVal*, unpacked structs pass as C structs.
+    assert_dpi_pass(
+        "tests/dpi/dpi_audit_types.c",
+        "dpi_audit_types",
+        "tests/dpi/dpi_audit_types_test.sv",
+    );
+}

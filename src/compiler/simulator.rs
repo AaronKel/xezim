@@ -4424,6 +4424,11 @@ enum DpiArgKind {
     /// (svBitVecVal*). ABI differs from VecLogicIn: no bval field.
     VecBitIn(u32),
     VecBitOut(u32),
+    /// §35.5.6 / H.7.6: an unpacked struct (or a fixed-size array of
+    /// them), passed as a pointer to the C struct of its members; its C
+    /// layout comes from the formal's declared type (`dpi_c_type`).
+    StructIn,
+    StructOut,
 }
 
 /// The canonical C element of a DPI open array (IEEE 1800-2017 H.7):
@@ -15874,6 +15879,21 @@ impl Simulator {
             dir,
             PortDirection::Output | PortDirection::Ref | PortDirection::Inout
         );
+        // §35.5.6: an unpacked struct is passed as `const T*` / `T*`, T the C
+        // struct of its members (H.7.6). It mapped to no kind, so the import
+        // was left unbound.
+        if let DataType::Struct(su) = dt {
+            if !su.packed {
+                // Not a layout C can take (an open array of structs, a
+                // member DPI does not carry): unsupported, not a zeroed copy.
+                self.dpi_c_type(dt, dims, false).ok()?;
+                return Some(if out_dir {
+                    DpiArgKind::StructOut
+                } else {
+                    DpiArgKind::StructIn
+                });
+            }
+        }
         if !dims.is_empty() {
             // §35.5.6.1/H.7: an open array's elements take their canonical
             // C form — a `byte` array is `char`s, not `int`s.
@@ -16232,6 +16252,7 @@ impl Simulator {
                 DpiArgKind::VecLogicOut(_) => Type::pointer(),
                 DpiArgKind::VecBitIn(_) => Type::pointer(),
                 DpiArgKind::VecBitOut(_) => Type::pointer(),
+                DpiArgKind::StructIn | DpiArgKind::StructOut => Type::pointer(),
             })
             .collect();
         let ret_type = match ret {
@@ -16758,6 +16779,11 @@ impl Simulator {
         let mut open_arrays: Vec<DpiOpenArrayArg> = Vec::with_capacity(arg_kinds.len());
         let mut cstrings: Vec<CString> = Vec::with_capacity(arg_kinds.len());
         let mut logic_aval: Vec<Vec<u32>> = Vec::with_capacity(arg_kinds.len());
+        // Unpacked-struct arguments: the C object, its type and the actual's
+        // name; strings stored in them stay alive for the call.
+        let mut struct_bufs: Vec<(Vec<u64>, Option<dpi_export::DpiCType>, Option<String>)> =
+            Vec::new();
+        let mut struct_keep: Vec<CString> = Vec::new();
         let mut writebacks: Vec<(usize, DpiArgKind, Expression)> = Vec::new();
 
         for (i, kind) in arg_kinds.iter().enumerate() {
@@ -16951,6 +16977,49 @@ impl Simulator {
                     if let Some(expr) = args.get(i) {
                         // Track which logical_aval slot to read back.
                         writebacks.push((logic_aval.len() - 1, *kind, expr.clone()));
+                    }
+                }
+                DpiArgKind::StructIn | DpiArgKind::StructOut => {
+                    let port = match &spec.proto {
+                        crate::ast::decl::DPIProto::Function(fd) => fd.ports.get(i),
+                        crate::ast::decl::DPIProto::Task(td) => td.ports.get(i),
+                    };
+                    let ty =
+                        port.and_then(|p| self.dpi_c_type(&p.data_type, &p.dimensions, false).ok());
+                    // The actual's members are its leaves (`s.a`, `s.arr[1]`).
+                    let base = args.get(i).and_then(|e| match &e.kind {
+                        ExprKind::Ident(h) => Some(self.resolve_hier_name(h).into_owned()),
+                        _ => None,
+                    });
+                    let size = ty.as_ref().map_or(8, |t| t.size_align().0);
+                    let mut buf = vec![0u64; size.div_ceil(8).max(1)];
+                    if let (Some(t), Some(b)) = (&ty, &base) {
+                        let mut get =
+                            |sfx: &str| self.get_signal_value_by_name(&format!("{b}{sfx}"));
+                        // SAFETY: `buf` holds `size` bytes, the C object of `t`.
+                        unsafe {
+                            Self::dpi_store_leaves(
+                                t,
+                                buf.as_mut_ptr().cast::<u8>(),
+                                "",
+                                &mut get,
+                                &mut struct_keep,
+                            )
+                        };
+                    }
+                    struct_bufs.push((buf, ty, base));
+                    let p = struct_bufs
+                        .last_mut()
+                        .unwrap()
+                        .0
+                        .as_mut_ptr()
+                        .cast::<c_void>();
+                    ptr_vals.push(Box::new(p));
+                    arg_refs.push(Arg::new(ptr_vals.last().unwrap().as_ref()));
+                    if matches!(kind, DpiArgKind::StructOut) {
+                        if let Some(expr) = args.get(i) {
+                            writebacks.push((struct_bufs.len() - 1, *kind, expr.clone()));
+                        }
                     }
                 }
                 DpiArgKind::Int32Out => {
@@ -17153,6 +17222,18 @@ impl Simulator {
                     if let Some(v) = i32_vals.get(idx) {
                         let w = self.infer_lhs_width(&expr);
                         self.assign_value(&expr, &Value::from_u64(**v as u32 as u64, w));
+                    }
+                }
+                DpiArgKind::StructOut => {
+                    if let Some((buf, Some(t), Some(b))) = struct_bufs.get(idx) {
+                        let mut leaves = Vec::new();
+                        // SAFETY: `buf` is the C object of `t` the call filled.
+                        unsafe {
+                            Self::dpi_load_leaves(t, buf.as_ptr().cast::<u8>(), "", &mut leaves)
+                        };
+                        for (sfx, v) in leaves {
+                            self.set_signal_value_by_name(&format!("{b}{sfx}"), v);
+                        }
                     }
                 }
                 DpiArgKind::LogicOut => {
