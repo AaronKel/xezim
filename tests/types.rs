@@ -460,3 +460,5 @@ mod package_type_name_collision;
 mod package_value_name_collision;
 #[path = "types/class_type_name_collision.rs"]
 mod class_type_name_collision;
+#[path = "types/wide_equality.rs"]
+mod wide_equality;
