@@ -215,7 +215,7 @@ fn ws_range(w: u32, s: bool) -> (i128, i128) {
 }
 
 /// `k + Σ c·x` over solver variables.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Lin {
     t: Vec<(usize, i128)>,
     k: i128,
@@ -521,6 +521,13 @@ struct Csp {
     /// and are decided first: the last open term is then fixed by the
     /// equality instead of guessed against a set of allowed sums.
     carries: Vec<(usize, usize, Vec<usize>)>,
+    /// Parallel to `carries`: the sum each pair stands for, at its `(w, s)`.
+    /// The same sum read by several relations (`lo <= a.sum()` and
+    /// `a.sum() <= hi`, the two halves of an `inside` range with rand
+    /// bounds) is ONE value: it reuses one pair. Independent pairs tied to
+    /// the same terms let the search decide them inconsistently, a conflict
+    /// that only shows at the last term.
+    carry_accs: Vec<(Lin, u32, bool)>,
     /// Variable count before translation: the carry variables live above
     /// it and are made afresh by every translation.
     carry_base: Option<usize>,
@@ -560,6 +567,9 @@ struct LinCx<'a> {
     dom0: &'a [Dom],
     base: usize,
     carries: Vec<Carry>,
+    /// The pairs earlier relations made (`Csp::carries`, `Csp::carry_accs`).
+    made: &'a [(usize, usize, Vec<usize>)],
+    made_accs: &'a [(Lin, u32, bool)],
 }
 
 impl<'a> LinCx<'a> {
@@ -568,6 +578,8 @@ impl<'a> LinCx<'a> {
             dom0: &csp.dom0,
             base: csp.vars.len(),
             carries: Vec::new(),
+            made: &csp.carries,
+            made_accs: &csp.carry_accs,
         }
     }
 
@@ -608,6 +620,21 @@ impl<'a> LinCx<'a> {
         let m = 1i128 << w.min(64);
         if w > 64 || m > COEF_MAX {
             return None;
+        }
+        // The same sum already has a pair (see `Csp::carry_accs`).
+        if let Some(i) = self
+            .made_accs
+            .iter()
+            .position(|(a, cw, cs)| a == acc && *cw == w && *cs == s)
+        {
+            return Some(self.made[i].0);
+        }
+        if let Some(i) = self
+            .carries
+            .iter()
+            .position(|c| c.acc == *acc && c.w == w && c.s == s)
+        {
+            return Some(self.base + 2 * i);
         }
         let k = (floor_div(lo - rlo, m), floor_div(hi - rlo, m));
         self.carries.push(Carry {
@@ -1305,6 +1332,7 @@ impl Simulator {
             pop: HashMap::default(),
             pop_rev: HashMap::default(),
             carries: Vec::new(),
+            carry_accs: Vec::new(),
             carry_base: None,
             sizes: HashMap::default(),
             size_phase: false,
@@ -1489,6 +1517,7 @@ impl Simulator {
             pop: HashMap::default(),
             pop_rev: HashMap::default(),
             carries: Vec::new(),
+            carry_accs: Vec::new(),
             carry_base: None,
             sizes: HashMap::default(),
             size_phase: false,
@@ -1638,6 +1667,7 @@ impl Simulator {
         csp.soft_priority.clear();
         csp.opaque = false;
         csp.carries.clear();
+        csp.carry_accs.clear();
         match csp.carry_base {
             Some(b) => {
                 csp.vars.truncate(b);
@@ -6178,6 +6208,7 @@ impl Simulator {
             deps.sort_unstable();
             let one = Self::literal_of(&Value::from_u64(1, 1), crate::ast::Span::dummy());
             csp.carries.push((sv, kv, terms));
+            csp.carry_accs.push((c.acc.clone(), c.w, c.s));
             let src = self.csp_src(csp, SrcItem::Expr(one), &Env::default(), deps);
             csp.nodes.push(Node::Lin {
                 lin,
