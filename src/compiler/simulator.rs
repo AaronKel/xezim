@@ -144930,6 +144930,81 @@ impl Simulator {
         v
     }
 
+    /// §8.23/§8.25: the `#(...)` arguments for building `nested` — a class
+    /// declared inside a parameterized class, which the elaborator gives the
+    /// enclosing class's parameters first — from inside a method of the
+    /// enclosing object: that object's binding of each such parameter.
+    /// `None` when `nested` is no such class or `this` is not an object of
+    /// the enclosing class.
+    fn enclosing_param_args(
+        &self,
+        nested: &crate::compiler::elaborate::ElaboratedClass,
+    ) -> Option<Vec<Expression>> {
+        let enc = nested.enclosing.as_deref()?;
+        let enc_cd = self.module.classes.get(enc)?;
+        if enc_cd.param_order.is_empty() {
+            return None;
+        }
+        let h = self.this_stack.last().copied().flatten()?;
+        let inst = self.heap.get(h)?.as_ref()?;
+        if inst.class_name != enc && !self.class_extends(&inst.class_name, enc) {
+            return None;
+        }
+        let span = crate::ast::Span::dummy();
+        let mut out = Vec::new();
+        for p in &nested.param_order {
+            if !enc_cd.param_order.contains(p) {
+                break;
+            }
+            let e = if enc_cd.type_param_names.contains(p) {
+                let b = self.obj_type_param(h, enc, p)?;
+                let b = b.trim();
+                if b.chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+                {
+                    Expression::new(
+                        ExprKind::Ident(crate::ast::expr::HierarchicalIdentifier {
+                            root: None,
+                            path: vec![crate::ast::expr::HierPathSegment {
+                                name: crate::ast::Identifier {
+                                    name: b.to_string(),
+                                    span,
+                                },
+                                selects: Vec::new(),
+                            }],
+                            span,
+                            cached_signal_id: std::cell::Cell::new(None),
+                            cached_resolved_name: std::cell::OnceCell::new(),
+                        }),
+                        span,
+                    )
+                } else {
+                    Expression::new(
+                        ExprKind::TypeLiteral(Box::new(self.bound_type_dt(b)?)),
+                        span,
+                    )
+                }
+            } else {
+                let v = inst.properties.get(p)?;
+                if v.has_xz() {
+                    return None;
+                }
+                Expression::new(
+                    ExprKind::Number(crate::ast::expr::NumberLiteral::Integer {
+                        size: None,
+                        signed: false,
+                        base: crate::ast::expr::NumberBase::Decimal,
+                        value: v.to_u64()?.to_string(),
+                        cached_val: std::cell::Cell::new(None),
+                    }),
+                    span,
+                )
+            };
+            out.push(e);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     fn instantiate_class_with_type_args(
         &mut self,
         class_def: &crate::compiler::elaborate::ElaboratedClass,
@@ -144949,6 +145024,19 @@ impl Simulator {
         // Triggering at first instantiation matches the LRM semantics
         // (a specialization's statics initialize before first use) and
         // runs before any `add`/query that needs the registration.
+        // §8.23/§8.25: a nested class built without its own `#(...)` takes
+        // the enclosing class's parameters from the enclosing object.
+        let nested_args;
+        let type_args = match type_args {
+            Some(t) if !t.is_empty() => Some(t),
+            _ => match self.enclosing_param_args(class_def) {
+                Some(a) => {
+                    nested_args = a;
+                    Some(nested_args.as_slice())
+                }
+                None => type_args,
+            },
+        };
         let class_name_owned = class_def.name.clone();
         let mut computed_spec = None;
         if self.class_is_parameterized(&class_name_owned) {

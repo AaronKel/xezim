@@ -552,7 +552,6 @@ endmodule
 /// §8.22/§8.25: a class nested in a parameterized class sees the outer
 /// specialization's type-parameter typedef.
 #[test]
-#[ignore = "a nested class does not carry the outer class's type-parameter bindings"]
 fn nested_class_uses_outer_type_parameter_typedef() {
     let src = r#"
 class G #(type T = int);
@@ -682,5 +681,42 @@ endmodule
             "T|st2 17 129 8 64 9",
             "T|v 44 1 300 059 18"
         ]
+    );
+}
+
+/// §8.23/§8.25: a nested class sees the enclosing specialization's type
+/// parameter directly, and a value parameter sizes its members too.
+#[test]
+fn nested_class_uses_outer_parameters() {
+    let src = r#"
+class G #(type T = int);
+  typedef T payload_t;
+  class N;
+    payload_t x;
+    T y;
+    function int wn(); return $bits(payload_t); endfunction
+  endclass
+  N n;
+  function new(); n = new; endfunction
+endclass
+class V #(int W = 4);
+  class M;
+    bit [W-1:0] z;
+  endclass
+  M m;
+  function new(); m = new; endfunction
+endclass
+module top;
+  initial begin
+    G #(byte) g = new; G #(longint) h = new; V #(12) v = new; V vd = new;
+    g.n.x = 300; h.n.x = 300; g.n.y = 300;
+    $display("T|nest %0d %0d %0d %0d %0d %0d", $bits(g.n.x), $bits(h.n.x), g.n.wn(), h.n.wn(), g.n.x, h.n.x);
+    $display("T|nest2 %0d %0d %0d %0d", $bits(g.n.y), g.n.y, $bits(v.m.z), $bits(vd.m.z));
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        ["T|nest 8 64 8 64 44 300", "T|nest2 8 44 12 4"]
     );
 }
