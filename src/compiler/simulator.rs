@@ -105462,6 +105462,11 @@ impl Simulator {
         args: &[Expression],
         constraints: &[crate::ast::decl::ConstraintItem],
     ) -> Value {
+        // §18.7: in a module instance, a name the object declares binds to
+        // the object even where the instance declares it too.
+        let unscoped = self.unscope_object_member_names(handle, constraints);
+        let constraints: &[crate::ast::decl::ConstraintItem] =
+            unscoped.as_deref().unwrap_or(constraints);
         // §18.7/§18.7.1: caller-scope operands (the caller's locals and class
         // members, `local::` names) are state variables of the solve — bind
         // them now, while `this` is still the caller.
