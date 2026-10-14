@@ -69959,6 +69959,9 @@ impl Simulator {
                     }
                     // §20.6.2: `$bits(logic [7:0])` — a TYPE operand.
                     if let ExprKind::TypeLiteral(dt) = &arg.kind {
+                        if let Some(w) = self.bound_type_param_width(dt) {
+                            return Value::from_u64(w as u64, 32);
+                        }
                         // Inside a parameterized class method the type may
                         // be sized by a CLASS value parameter
                         // (`$bits(logic [W-1:0])`), which is absent from
@@ -110916,7 +110919,30 @@ impl Simulator {
                 {
                     let h = handle?;
                     let concrete = self.class_prop_type_name(h, prop)?;
-                    return self.concrete_type_width(&concrete);
+                    let w = self.concrete_type_width(&concrete)?;
+                    // §7.4.1: `T [1:0] k;` is a packed array of the bound type.
+                    if let Some(DataType::TypeReference { dimensions, .. }) =
+                        cd.property_types.get(prop)
+                        && !dimensions.is_empty()
+                    {
+                        let params = self.instance_param_scope(h);
+                        let mut n: u64 = 1;
+                        for d in dimensions {
+                            let crate::ast::types::PackedDimension::Range { left, right, .. } = d
+                            else {
+                                return Some(w);
+                            };
+                            let (Some(l), Some(r)) = (
+                                crate::elaborate::const_eval_i64_with_params(left, Some(&params)),
+                                crate::elaborate::const_eval_i64_with_params(right, Some(&params)),
+                            ) else {
+                                return Some(w);
+                            };
+                            n = n.saturating_mul((l - r).unsigned_abs() + 1);
+                        }
+                        return u32::try_from(u64::from(w).saturating_mul(n)).ok();
+                    }
+                    return Some(w);
                 }
                 if let Some(h) = handle {
                     if let Some(w) = self.respec_packed_width(&cn, h, prop) {
@@ -113646,6 +113672,44 @@ impl Simulator {
             return Some(w).filter(|w| *w > 0);
         }
         None
+    }
+
+    /// §8.25/§7.4.1: the width of a type naming a class TYPE PARAMETER that
+    /// the active object or specialization binds (`T`, `T [1:0]`): the bound
+    /// type's width times the packed dimensions written after it. `None`
+    /// when `dt` is no such type or the binding has no clamp width.
+    fn bound_type_param_width(&self, dt: &DataType) -> Option<u32> {
+        let DataType::TypeReference {
+            name,
+            dimensions,
+            type_args,
+            ..
+        } = dt
+        else {
+            return None;
+        };
+        if name.has_scope() || !type_args.is_empty() {
+            return None;
+        }
+        let b = self.resolve_type_param_binding(&name.name.name)?;
+        let base = self.concrete_type_width(b.trim())?;
+        if dimensions.is_empty() {
+            return Some(base);
+        }
+        let params = match self.this_stack.last().copied().flatten() {
+            Some(h) => self.instance_param_scope(h),
+            None => self.module.parameters.clone(),
+        };
+        let mut w = u64::from(base);
+        for d in dimensions {
+            let crate::ast::types::PackedDimension::Range { left, right, .. } = d else {
+                return None;
+            };
+            let l = crate::elaborate::const_eval_i64_with_params(left, Some(&params))?;
+            let r = crate::elaborate::const_eval_i64_with_params(right, Some(&params))?;
+            w = w.checked_mul((l - r).unsigned_abs() + 1)?;
+        }
+        u32::try_from(w).ok()
     }
 
     /// Packed-aggregate field layout of a CALL's declared return type:
