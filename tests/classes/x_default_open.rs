@@ -15,7 +15,6 @@ fn t_lines(src: &str) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "§7.10.1: a class queue read past its end gives a 32-bit 0, not the element type's default"]
 fn class_queue_read_past_the_end() {
     let src = r#"
 typedef struct {logic [3:0] d; bit [3:0] f; integer n;} rec_t;
@@ -48,7 +47,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§7.8.6: a missing element of a class two-dimensional associative array reads a 32-bit 0"]
 fn class_two_dimensional_assoc_missing_element() {
     let src = r#"
 class holder; logic [3:0] la2[int][int]; endclass
@@ -64,7 +62,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§7.8.6/§7.10.1: a 2-state member of a missing struct element of a module associative array or queue reads x, not 0"]
 fn module_struct_collection_defaults() {
     let src = r#"
 typedef struct {logic [3:0] d; bit [3:0] f; integer n;} rec_t;
@@ -155,4 +152,118 @@ module top;
 endmodule
 "#;
     assert_eq!(t_lines(src), ["T|mod", "T|prog xxxx 0"]);
+}
+
+#[test]
+fn class_collection_reads_past_the_end_and_missing_keys() {
+    let src = r#"
+class inner; endclass
+class holder;
+  logic [3:0] dq[$]; int iq[$]; string sq[$]; inner hq[$]; real rq[$]; logic [7:0] dd[]; integer nq[$];
+  logic [3:0] la2[int][int]; int ia2[int][string]; logic [3:0] la3[int][int][int];
+  function void show(); $display("T|m %b %0d %b", dq[2], iq[1], la2[3][4]); endfunction
+endclass
+module top;
+  holder h;
+  logic [3:0] ml2[int][int];
+  initial begin
+    h = new;
+    $display("T|a %b %0d \"%s\" %0d %0d", h.dq[3], h.iq[0], h.sq[0], h.hq[0] == null, h.nq[0] === 'x);
+    $display("T|b %b %b %b", h.dd[1], h.dq[$], h.dq[-1]);
+    $display("T|c %f", h.rq[0]);
+    h.show();
+    $display("T|d %0d %b %b", h.ia2[1]["k"], h.la3[1][2][3], ml2[1][2]);
+    h.la2[1][2] = 4'h5; h.ia2[2]["z"] = 9;
+    $display("T|e %h %b %0d %0d %0d", h.la2[1][2], h.la2[1][3], h.la2.num(), h.ia2[2]["z"], h.ia2[2]["y"]);
+    h.dq.push_back(4'h3);
+    $display("T|f %b %b %b", h.dq[0], h.dq[1], h.dq[$]);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|a xxxx 0 \"\" 1 1",
+            "T|b xxxxxxxx xxxx xxxx",
+            "T|c 0.000000",
+            "T|m xxxx 0 xxxx",
+            "T|d 0 xxxx xxxx",
+            "T|e 5 xxxx 1 9 0",
+            "T|f 0011 xxxx 0011",
+        ]
+    );
+}
+
+#[test]
+fn class_struct_collection_missing_elements() {
+    let src = r#"
+typedef struct {logic [3:0] d; bit [3:0] f; integer n;} rec_t;
+class holder; logic [3:0] dq[$]; rec_t rq[$]; rec_t ra[int]; logic [3:0] la2[int][int]; bit [3:0] ba2[int][int]; rec_t rd[];
+  function void show(); $display("T|in %b %b %b %b", rq[1].d, rq[1].f, ra[3].d, ra[3].f); endfunction
+endclass
+module top;
+  holder h;
+  rec_t r;
+  initial begin
+    h = new;
+    $display("T|a %b %b", h.rq[1].d, h.rq[1].f);
+    $display("T|b %b %b", h.ra[1].d, h.ra[1].f);
+    $display("T|c %b %b", h.la2[1][2], h.ba2[1][2]);
+    $display("T|d %b %b", h.rd[0].d, h.rd[0].f);
+    h.show();
+    r.d = 5; r.f = 3; r.n = 7;
+    h.rq.push_back(r);
+    $display("T|e %b %b %0d %b %b", h.rq[0].d, h.rq[0].f, h.rq[0].n, h.rq[1].d, h.rq[1].f);
+    h.ra[2] = r;
+    $display("T|f %b %b %b %b", h.ra[2].d, h.ra[2].f, h.ra[5].d, h.ra[5].f);
+    $display("T|g %0d %0d", h.rq.size(), h.ra.num());
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|a xxxx 0000",
+            "T|b xxxx 0000",
+            "T|c xxxx 0000",
+            "T|d xxxx 0000",
+            "T|in xxxx 0000 xxxx 0000",
+            "T|e 0101 0011 7 xxxx 0000",
+            "T|f 0101 0011 xxxx 0000",
+            "T|g 1 1",
+        ]
+    );
+}
+
+#[test]
+fn module_struct_collection_reads() {
+    let src = r#"
+typedef struct {logic [3:0] d; bit [3:0] f; integer n; int i;} rec_t;
+module top;
+  rec_t mra[string]; rec_t mq[$]; rec_t md[]; rec_t mi[int];
+  int k = 0;
+  function automatic void f();
+    rec_t lq[$];
+    $display("T|fn %b %b %b %b", mq[0].d, mq[0].f, lq[1].d, lq[1].f);
+  endfunction
+  initial begin
+    $display("T|mod %b %b %0d %0d", mra["x"].d, mra["x"].f, mra["x"].n === 'x, mra["x"].i);
+    $display("T|modq %b %b %0d %0d", mq[0].d, mq[0].f, mq[k].n === 'x, mq.size());
+    $display("T|modd %b %b %b", md[0].d, md[0].f, mi[3].f);
+    f();
+    mq.push_back('{1, 2, 3, 4});
+    $display("T|after %b %b %b %b %0d", mq[0].d, mq[0].f, mq[1].d, mq[1].f, mq[$].i);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|mod xxxx 0000 1 0",
+            "T|modq xxxx 0000 1 0",
+            "T|modd xxxx 0000 0000",
+            "T|fn xxxx 0000 xxxx 0000",
+            "T|after 0001 0010 xxxx 0000 4",
+        ]
+    );
 }

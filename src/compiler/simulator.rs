@@ -62713,7 +62713,12 @@ impl Simulator {
                     }
                     _ => self.flat_member_name(expr)?,
                 };
-                let iv = self.eval_expr(index);
+                // §7.10.1: `$` names the last element of the queue indexed.
+                let iv = if Self::expr_contains_dollar(index) {
+                    self.eval_index_of_queue(&base, index)
+                } else {
+                    self.eval_expr(index)
+                };
                 // §7.8: an ASSOC element key must use the canonical store
                 // format — a STRING key rendered via to_i64 collapsed to its
                 // byte value ("sa[k]" became "sa[107]"), so writes and the
@@ -72201,6 +72206,13 @@ impl Simulator {
             // LOCAL unpacked-struct array element is only in the latter),
             // so consult both — `sa[1].a` read 0 while `%p` showed 2.
             if let Some(mut v) = hit {
+                // §7.10.1: an unknown leaf may belong to a queue element
+                // past the end.
+                if v.has_xz()
+                    && let Some(d) = self.missing_leaf_default(expr, &member.name, &base_flat)
+                {
+                    return d;
+                }
                 // §6.11.1: a collection element's member leaf carries no
                 // declared metadata — stamp the member's declared
                 // signedness so `q[0].latency <= 0` on an `integer`
@@ -72268,6 +72280,10 @@ impl Simulator {
         // layout (packed_struct_fields[base_name]). (From `nettype`:
         // covers struct values returned by calls / nettype resolver
         // functions, which have no flattened leaf signal.)
+        // A nonexistent struct element reads its member defaults.
+        if let Some(v) = self.missing_struct_elem_member(expr, &member.name) {
+            return v;
+        }
         {
             let base_val = self.eval_expr(expr);
             // §7.2.1/§8.4: an ELEMENT of a fixed rand/class array whose
@@ -76363,11 +76379,15 @@ impl Simulator {
                 // look up the flat compound key `m[K1][K2]...[Kn]`. Mirrors
                 // the write path (`multidim_assoc_elem`) so the two agree on
                 // the key for every type (handle / int / signed / string).
-                if let Some((_, key)) = self.multidim_assoc_elem(expr, index) {
+                if let Some((base, key)) = self.multidim_assoc_elem(expr, index) {
                     if let Some(v) = self.get_signal_value_by_name(&key) {
                         return v;
                     }
-                    return Value::new(ctx_width.max(1));
+                    // §7.8.6: a missing element reads the element type's
+                    // default, at the element's width.
+                    return self
+                        .assoc_missing_elem_value(&base)
+                        .unwrap_or_else(|| Value::new(ctx_width.max(1)));
                 }
                 // §7.4.2 element of a DYNAMIC ARRAY OF DYNAMIC ARRAYS reached
                 // through a class member (`m[i][j]`, `obj.m[i][j]`): the base
@@ -76445,11 +76465,10 @@ impl Simulator {
                         return ev.clone();
                     }
                     // §7.8.6: a missing key reads the element type's default
-                    // (x for `integer m[int]`, a signed 0 for `int`).
+                    // (x for `integer m[int]`, a signed 0 for `int`); §7.10.1:
+                    // so does a queue or dynamic-array read past the end.
                     return self
-                        .is_associative_array(&an)
-                        .then(|| self.assoc_missing_elem_value(&an))
-                        .flatten()
+                        .assoc_missing_elem_value(&an)
                         .unwrap_or_else(|| Value::zero(32));
                 }
                 // N-dimensional (N >= 3) unpacked array element access
@@ -107026,7 +107045,16 @@ impl Simulator {
         if depth < 2 {
             return None; // 1D — existing handlers
         }
-        let base_name = self.assoc_array_storage_name(cur)?;
+        // A bare name, or a class member reached through a handle (`h.m`).
+        let base_name = match self.assoc_array_storage_name(cur) {
+            Some(n) => n,
+            None if matches!(&cur.kind, ExprKind::MemberAccess { .. })
+                || matches!(&cur.kind, ExprKind::Ident(h) if h.path.len() >= 2) =>
+            {
+                self.handle_assoc_storage_name(cur)?
+            }
+            None => return None,
+        };
         // Distinguish a true multidim assoc from an assoc-of-queue/
         // dynamic-array (`m[k1][i]`): if the first-level element `m[K1]` is a
         // registered queue/dynamic collection, defer to the collection paths.
@@ -115681,6 +115709,123 @@ impl Simulator {
             return None;
         }
         Some((key, su))
+    }
+
+    /// The store of an associative-array class member reached through a
+    /// handle (`h.m`, `obj.m`), for a multidimensional element.
+    #[cold]
+    #[inline(never)]
+    fn handle_assoc_storage_name(&mut self, e: &Expression) -> Option<String> {
+        let n = self.expr_assoc_name(e)?;
+        self.is_associative_array(&n).then_some(n)
+    }
+
+    /// §7.10.1: evaluate an index that names `$`, the last element of the
+    /// queue or dynamic array `base`.
+    #[cold]
+    #[inline(never)]
+    fn eval_index_of_queue(&mut self, base: &str, index: &Expression) -> Value {
+        self.dollar_bound.push(self.get_queue_size(base) as i64 - 1);
+        let iv = self.eval_expr(index);
+        self.dollar_bound.pop();
+        iv
+    }
+
+    /// §7.10.1: the member default that an x/z-holding member leaf
+    /// `<base_flat>.<member>` of a queue or dynamic-array element past the
+    /// end really reads (its leaf holds no element's value).
+    #[cold]
+    #[inline(never)]
+    fn missing_leaf_default(
+        &mut self,
+        expr: &Expression,
+        member: &str,
+        base_flat: &str,
+    ) -> Option<Value> {
+        if base_flat.ends_with(']')
+            && base_flat
+                .rfind('[')
+                .is_some_and(|cut| self.module.dynamic_arrays.contains(&base_flat[..cut]))
+        {
+            return self.missing_struct_elem_member(expr, member);
+        }
+        None
+    }
+
+    /// §7.8.6 / §7.10.1: `coll[i].member` where `coll` is an associative
+    /// array, queue or dynamic array of UNPACKED structs (a module or local
+    /// variable, or a class member) and element `i` does not exist reads the
+    /// member type's default — x for a 4-state member, 0 for a 2-state one —
+    /// without creating the element. `None` when the element exists or the
+    /// shape is anything else (the regular paths read it).
+    #[inline(never)]
+    fn missing_struct_elem_member(&mut self, expr: &Expression, member: &str) -> Option<Value> {
+        let ExprKind::Index { expr: base, index } = &expr.kind else {
+            return None;
+        };
+        // Only a name some struct collection may carry gets the lookups.
+        let leaf = match &base.kind {
+            ExprKind::Ident(h) => h.path.last().map(|s| s.name.name.as_str()),
+            ExprKind::MemberAccess { member, .. } => Some(member.name.as_str()),
+            _ => None,
+        }?;
+        // (a struct-capable property or variable name; a subroutine-local
+        // collection is known by its declared type only).
+        if !self.struct_prop_name_possible(leaf)
+            && !self.struct_root_possible(leaf)
+            && !self.module.var_decl_types.get(leaf).is_some_and(|dt| {
+                matches!(self.resolve_dt_ref(dt), DataType::Struct(su) if Self::spreads_member_wise(su))
+            })
+        {
+            return None;
+        }
+        let an = match self.expr_assoc_name(base) {
+            Some(n) => n,
+            None => {
+                let ExprKind::Ident(h) = &base.kind else {
+                    return None;
+                };
+                let n = self.resolve_hier_name(h).into_owned();
+                self.instance_assoc_member(&n).unwrap_or(n)
+            }
+        };
+        let is_assoc = self.is_associative_array(&an);
+        if !is_assoc && !self.module.dynamic_arrays.contains(&an) {
+            return None;
+        }
+        let su = self.queue_elem_struct(&an)?;
+        let exists = if is_assoc {
+            let kv = self.eval_expr(index);
+            if kv.has_xz() && !kv.is_real {
+                return None;
+            }
+            let key = self.assoc_key_str(&an, &kv);
+            let elem = Self::name_with_key(&an, &key);
+            self.signals.contains_key(&elem)
+                || self.signal_name_to_id.contains_key(elem.as_str())
+                || self
+                    .signals
+                    .any_key_with_prefix(&Self::name_with_suffix(&elem, "."))
+        } else {
+            let size = self.get_queue_size(&an);
+            self.dollar_bound.push(size as i64 - 1);
+            let iv = self.eval_expr(index);
+            self.dollar_bound.pop();
+            match iv.to_i64() {
+                Some(i) if !iv.has_xz() => i >= 0 && (i as u64) < size,
+                _ => false,
+            }
+        };
+        if exists {
+            return None;
+        }
+        let mut defaults = Vec::new();
+        self.struct_leaf_plain_defaults("", &su, 0, &mut defaults);
+        let want = format!(".{member}");
+        defaults
+            .into_iter()
+            .find(|(n, _)| *n == want)
+            .map(|(_, v)| v)
     }
 
     /// Unpacked-struct TYPE of a collection property's element. Resolves the
