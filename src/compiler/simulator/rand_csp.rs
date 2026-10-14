@@ -279,6 +279,12 @@ struct Fit {
     lin: Lin,
     lo: i128,
     hi: i128,
+    /// Nonzero when leaving `[lo, hi]` only changes the operand's value by a
+    /// multiple of `2^modw` (a reinterpretation at `modw` bits, §6.24.1 /
+    /// §11.8.2, not an extension). An equality compared at `w <= modw` bits
+    /// holds modulo `2^w` either way, so it does not need the fit (see
+    /// `csp_wrap_eq`).
+    modw: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -303,8 +309,8 @@ enum Node {
         sneg: bool,
         /// An equality compared at `w` bits whose first `n` fits are the
         /// operands' own: (w, n). The remaining fits only keep each side
-        /// from wrapping, which an equality does not need (see
-        /// `csp_wrap_eq`).
+        /// from wrapping, which an equality does not need, nor an operand
+        /// fit with `modw >= w` (see `csp_wrap_eq`, `St::fits_hold_mod`).
         wrap: Option<(u32, usize)>,
     },
     /// `lin inside set` (or not, with `neg`).
@@ -718,6 +724,17 @@ impl St {
     }
     fn fits_hold(&self, fits: &[Fit]) -> bool {
         fits.iter().all(|f| {
+            let (lo, hi) = self.lin_bounds(&f.lin);
+            lo >= f.lo && hi <= f.hi
+        })
+    }
+    /// `fits_hold` for an equality compared at `w` bits: a fit that only
+    /// guards a reinterpretation at `w` bits or more is not needed.
+    fn fits_hold_mod(&self, fits: &[Fit], w: u32) -> bool {
+        fits.iter().all(|f| {
+            if f.modw >= w {
+                return true;
+            }
             let (lo, hi) = self.lin_bounds(&f.lin);
             lo >= f.lo && hi <= f.hi
         })
@@ -2557,7 +2574,7 @@ impl Simulator {
             } => {
                 if !st.fits_hold(fits) {
                     if let Some((w, n)) = *wrap
-                        && st.fits_hold(&fits[..n])
+                        && st.fits_hold_mod(&fits[..n], w)
                         && let Some(ok) = Self::csp_wrap_eq(lin, w, st)
                     {
                         return ok;
@@ -4683,6 +4700,7 @@ impl Simulator {
             lin: lin.clone(),
             lo: 0,
             hi: amax,
+            modw: 0,
         });
         let set: Dom = if lo > hi { Vec::new() } else { vec![(lo, hi)] };
         let mut deps: Vec<usize> = lin.t.iter().map(|t| t.0).collect();
@@ -4770,11 +4788,13 @@ impl Simulator {
             lin: la.clone(),
             lo: rlo,
             hi: rhi,
+            modw: 0,
         });
         fits.push(Fit {
             lin: lb.clone(),
             lo: rlo,
             hi: rhi,
+            modw: 0,
         });
         let Some(d) = la.plus(&lb, -1) else {
             return fallback(self, csp);
@@ -5017,6 +5037,7 @@ impl Simulator {
             lin: lin.clone(),
             lo: rlo,
             hi: rhi,
+            modw: 0,
         });
         let mut deps: Vec<usize> = lin.t.iter().map(|t| t.0).collect();
         for f in &fits {
@@ -5797,13 +5818,15 @@ impl Simulator {
     /// keep it exact.
     fn csp_lin(a: &Ae, w: u32, s: bool, fits: &mut Vec<Fit>, cx: &mut LinCx) -> Option<Lin> {
         match a {
-            Ae::Var(v, _, vs) => {
-                // an unsigned context zero-extends a signed operand
+            Ae::Var(v, vw, vs) => {
+                // an unsigned context zero-extends a signed operand; one that
+                // already fills the context is only reinterpreted (§11.8.2)
                 if *vs && !s {
                     fits.push(Fit {
                         lin: Lin::var(*v),
                         lo: 0,
                         hi: i128::MAX,
+                        modw: if *vw >= w { *vw } else { 0 },
                     });
                 }
                 Some(Lin::var(*v))
@@ -5838,6 +5861,7 @@ impl Simulator {
                 s: ss,
             } => {
                 let mut acc = Lin::konst(0);
+                let mark = fits.len();
                 for t in terms {
                     acc = acc.plus(&Self::csp_lin(t, *sw, *ss, fits, cx)?, 1)?;
                 }
@@ -5845,9 +5869,16 @@ impl Simulator {
                 // there (`a.sum() == 3` over 16-bit elements also holds for
                 // terms adding up to 3 + 2^16·k).
                 if let Some(v) = cx.carry(&acc, *sw, *ss) {
+                    // The carry identity holds modulo 2^sw, so a term fit
+                    // that only guards a reinterpretation at sw bits or more
+                    // (`int'(unsigned'(item))`) cannot change the sum's
+                    // value: drop it, or it would stop the relation on the
+                    // sum from propagating until every term is fixed.
+                    let kept: Vec<Fit> = fits.drain(mark..).filter(|f| f.modw < *sw).collect();
+                    fits.extend(kept);
                     return Self::csp_lin(&Ae::Var(v, *sw, *ss), w, s, fits, cx);
                 }
-                Self::csp_leaf_fit(&acc, *sw, *ss, *sw, *ss, s, fits);
+                Self::csp_leaf_fit(&acc, *sw, *ss, *sw, *ss, w, s, fits);
                 Some(acc)
             }
             Ae::Cast {
@@ -5858,7 +5889,7 @@ impl Simulator {
                 s: cs,
             } => {
                 let l = Self::csp_lin(inner, *iw, *is, fits, cx)?;
-                Self::csp_leaf_fit(&l, *iw, *is, *cw, *cs, s, fits);
+                Self::csp_leaf_fit(&l, *iw, *is, *cw, *cs, w, s, fits);
                 Some(l)
             }
         }
@@ -5868,12 +5899,19 @@ impl Simulator {
     /// extended into a context of signedness `ctx_s`, keeps its value when it
     /// lies in both ranges (and is non-negative when a signed value meets an
     /// unsigned context, which zero-extends).
+    ///
+    /// Outside that range the value differs from `l` by a multiple of
+    /// `2^cw` (§6.24.1: it is evaluated at `iw >= cw` bits and truncated to
+    /// `cw`), which an equality compared at `ctx_w <= cw` bits does not see —
+    /// unless the value is extended into a wider context first.
+    #[allow(clippy::too_many_arguments)]
     fn csp_leaf_fit(
         l: &Lin,
         iw: u32,
         is: bool,
         cw: u32,
         cs: bool,
+        ctx_w: u32,
         ctx_s: bool,
         fits: &mut Vec<Fit>,
     ) {
@@ -5888,6 +5926,7 @@ impl Simulator {
             lin: l.clone(),
             lo,
             hi: b.min(d),
+            modw: if cw >= ctx_w { cw } else { 0 },
         });
     }
 }
