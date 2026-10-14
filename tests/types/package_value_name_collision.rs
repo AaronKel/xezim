@@ -197,3 +197,54 @@ endmodule
         ]
     );
 }
+
+#[test]
+#[ignore = "§8.25: a static property read through a package-qualified specialization (`pa::P#(7)::s`) gives 0; the static method call and the unqualified form work"]
+fn static_through_qualified_specialization() {
+    let src = r#"
+package pa;
+  class P #(int W = 2);
+    static int s = W;
+    static function int get(); return s * 10; endfunction
+  endclass
+endpackage
+class Q #(int W = 3);
+  static int s = W;
+endclass
+module top;
+  initial begin
+    $display("T|a %0d %0d %0d", pa::P#()::s, pa::P#(2)::s, pa::P#(7)::s);
+    $display("T|b %0d %0d %0d", Q#()::s, Q#(3)::s, Q#(8)::s);
+    $display("T|c %0d %0d", pa::P#()::get(), Q#()::s);
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|a 2 2 7", "T|b 3 3 8", "T|c 20 3"]);
+}
+
+#[test]
+#[ignore = "§26.3: `pkg::P` (or an imported `P`) in a continuous assignment of a module instance reads the same-named parameter of the package the parent imports"]
+fn qualified_parameter_inside_an_instance() {
+    let src = r#"
+package pa; parameter int W = 4; endpackage
+package pb; parameter int W = 9; endpackage
+module sub #(parameter int P = 1) (output int o, output int o2, output int o3);
+  assign o = 1 + pa::W;
+  assign o2 = P + pa::W;
+  assign o3 = pa::W;
+endmodule
+module wsub #(parameter int P = 1) (output int o);
+  import pa::*;
+  assign o = P + W;
+  initial #1 $display("T|in %0d %0d %0d", P, W, o);
+endmodule
+module top;
+  import pb::*;
+  int so, so2, so3, wo;
+  sub #(.P(3)) u(.o(so), .o2(so2), .o3(so3));
+  wsub #(.P(W)) w(.o(wo));
+  initial #2 $display("T|sub %0d %0d %0d", so, so2, so3);
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|in 9 4 13", "T|sub 5 7 4"]);
+}
