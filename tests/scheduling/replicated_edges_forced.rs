@@ -3,7 +3,10 @@
 //! every bit follows that one driver. A procedural `force` of one bit makes
 //! it differ from the others, so a vector some `force` targets keeps one
 //! alias per bit.
-
+//!
+//! The ignored tests pin driver-resolution gaps found next to that rule
+//! (they predate the shared aliases). Expected values are the reference
+//! simulator's.
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -75,6 +78,54 @@ fn forced_vector_keeps_an_alias_per_bit() {
         t_lines(&o)
             .iter()
             .any(|l| l.starts_with("T|force ") && l.split(' ').nth(2) == Some("4")),
+        "{o}"
+    );
+}
+
+#[test]
+#[ignore = "force of one bit of a vector driven by a part-select continuous assign is not applied (the bit keeps following the driver)"]
+fn force_on_a_bit_of_a_part_select_driven_vector() {
+    let o = run("forced_values", FORCED, "tb", &[]);
+    assert_eq!(
+        t_lines(&o),
+        ["T|mid 1011 1011", "T|force 4 4 9 0000"],
+        "{o}"
+    );
+}
+
+#[test]
+#[ignore = "a gate or pull driving one bit of a part-select-driven vector does not resolve with the vector's continuous driver"]
+fn gate_and_pull_on_one_bit_of_a_driven_vector() {
+    let src = r#"
+`timescale 1ns/1ns
+module tb;
+  logic clk = 0, c2 = 0;
+  always #5 clk = ~clk;
+  always #7 c2 = ~c2;
+  wire [3:0] gv;
+  assign gv[3:0] = {clk, clk, clk, clk};
+  buf (gv[2], c2);
+  wire [3:0] wv;
+  assign (weak0, weak1) wv[3:0] = {clk, clk, clk, clk};
+  pullup (wv[1]);
+  int g [2], w [3];
+  always @(posedge gv[2]) g[0]++;
+  always @(gv) g[1]++;
+  always @(posedge wv[1]) w[0]++;
+  always @(posedge wv[0]) w[1]++;
+  always @(wv[1]) w[2]++;
+  initial begin
+    #63;
+    $display("T|gate %0d %0d %b", g[0], g[1], gv);
+    $display("T|pull %0d %0d %0d %b", w[0], w[1], w[2], wv);
+    $finish;
+  end
+endmodule
+"#;
+    let o = run("drivers", src, "tb", &[]);
+    assert_eq!(
+        t_lines(&o),
+        ["T|gate 9 20 0000", "T|pull 1 6 1 0010"],
         "{o}"
     );
 }
