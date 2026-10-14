@@ -71,6 +71,8 @@ mod member_off_handle_collection_elem;
 mod compiled_method_test_env;
 #[path = "collections/compiled_ret_coll_by_name.rs"]
 mod compiled_ret_coll_by_name;
+#[path = "collections/compiled_typedef_local_queue.rs"]
+mod compiled_typedef_local_queue;
 #[path = "collections/call_ret_store_into_local_coll.rs"]
 mod call_ret_store_into_local_coll;
 #[path = "collections/local_coll_init_fast_fn_eligible.rs"]
