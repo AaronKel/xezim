@@ -96,7 +96,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§6.8: a static unpacked-struct class property reads 1-bit x members instead of its member defaults"]
 fn static_unpacked_struct_property() {
     let src = r#"
 typedef struct {logic [3:0] d; bit [3:0] f;} rec_t;
@@ -305,6 +304,40 @@ endmodule
             "T|modd xxxx 0000 0000",
             "T|fn xxxx 0000 xxxx 0000",
             "T|after 0001 0010 xxxx 0000 4",
+        ]
+    );
+}
+
+#[test]
+fn static_unpacked_struct_is_shared() {
+    let src = r#"
+typedef struct {logic [3:0] d; bit [3:0] f; integer n; int i;} rec_t;
+class sc; static rec_t sr; static rec_t sw;
+  static function void show(); $display("T|in %b %b %0d %0d", sr.d, sr.f, sr.n === 'x, sr.i); endfunction
+  function void ishow(); $display("T|ii %b %b", sr.d, sr.f); endfunction
+endclass
+module top;
+  sc o;
+  initial begin
+    $display("T|static %b %b %0d %0d", sc::sr.d, sc::sr.f, sc::sr.n === 'x, sc::sr.i);
+    sc::show();
+    o = new; o.ishow();
+    $display("T|h %b %b", o.sr.d, o.sr.f);
+    sc::sw.d = 4'h3;
+    $display("T|w %b %b %b", sc::sw.d, sc::sw.f, o.sw.d);
+    $display("T|p %p", sc::sr);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|static xxxx 0000 1 0",
+            "T|in xxxx 0000 1 0",
+            "T|ii xxxx 0000",
+            "T|h xxxx 0000",
+            "T|w 0011 0000 0011",
+            "T|p '{d:x, f:0, n:x, i:0}",
         ]
     );
 }

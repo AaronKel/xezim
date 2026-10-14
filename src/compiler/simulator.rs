@@ -6335,6 +6335,14 @@ pub struct Simulator {
     /// (`<handle>#<member>`) that an assignment pattern gave it, read for
     /// every key the array does not hold.
     class_assoc_defaults: HashMap<String, Value>,
+    /// §8.9: the storage object of each STATIC unpacked-struct property,
+    /// keyed by its static key (`Cls::prop`): a heap object of the declaring
+    /// class that holds the member cells (`<prop>.<member>`) every access —
+    /// `Cls::prop.m`, `obj.prop.m`, `prop.m` in a method — shares.
+    static_struct_holders: HashMap<String, usize>,
+    /// Names of the static unpacked-struct properties any class declares
+    /// (gates the `static_struct_holders` lookups).
+    static_struct_names: HashSet<String>,
     pub monitor_prev: HashMap<String, Value>,
     /// Previously-printed values of the active `$monitor`'s non-`$time`
     /// arguments. `$monitor` re-prints only when one of these changes
@@ -12385,6 +12393,8 @@ impl Simulator {
             deferred_clocking_conts: Vec::new(),
             pending_reactive: Vec::new(),
             class_assoc_defaults: HashMap::default(),
+            static_struct_holders: HashMap::default(),
+            static_struct_names: HashSet::default(),
             active_union_tag: HashMap::default(),
             max_time,
             tick_s,
@@ -17449,6 +17459,7 @@ impl Simulator {
         // Answers memoized before the hierarchy was final do not hold.
         self.has_method_cache.borrow_mut().clear();
         self.init_two_state_struct_members();
+        self.init_static_struct_holders();
         // LRM §14.3 — populate clocking-block metadata: per-cb clock
         // signal + per-signal direction. `tick_clocking_blocks`
         // consumes this to maintain `clocking_snapshots`.
@@ -112846,9 +112857,36 @@ impl Simulator {
 
     fn class_prop_receiver(&mut self, base: &Expression) -> Option<(usize, String)> {
         if let Some((obj, prop)) = Self::split_trailing_member(base) {
+            // §8.9: `Cls::prop` of a static struct names its shared store.
+            if !self.static_struct_names.is_empty()
+                && self.static_struct_names.contains(prop.as_str())
+                && let ExprKind::Ident(oh) = &obj.kind
+                && oh.path.len() == 1
+                && oh.path[0].selects.is_empty()
+                && self.module.classes.contains_key(&oh.path[0].name.name)
+                && !self
+                    .signal_name_to_id
+                    .contains_key(oh.path[0].name.name.as_str())
+                && !self
+                    .local_stack
+                    .last()
+                    .is_some_and(|l| l.contains_key(&oh.path[0].name.name))
+            {
+                let cls = oh.path[0].name.name.clone();
+                return self.static_struct_holder(&cls, &prop).map(|h| (h, prop));
+            }
             let h = self.eval_expr(&obj).to_u64()? as usize;
             if h == 0 || self.heap.get(h).and_then(|o| o.as_ref()).is_none() {
                 return None;
+            }
+            // §8.9: so does `obj.prop`.
+            if !self.static_struct_names.is_empty()
+                && self.static_struct_names.contains(prop.as_str())
+            {
+                let cls = self.heap.get(h)?.as_ref()?.class_name.clone();
+                if let Some(sh) = self.static_struct_holder(&cls, &prop) {
+                    return Some((sh, prop));
+                }
             }
             return Some((h, prop));
         }
@@ -112863,11 +112901,115 @@ impl Simulator {
         if self.local_stack.last().is_some_and(|l| l.contains_key(nm)) {
             return None;
         }
-        let handle = self.this_stack.last().copied().flatten()?;
-        if handle == 0 {
-            return None;
+        let this = self
+            .this_stack
+            .last()
+            .copied()
+            .flatten()
+            .filter(|&h| h != 0);
+        // §8.9: a static struct inside a method (a static one has no `this`).
+        if !self.static_struct_names.is_empty() && self.static_struct_names.contains(nm.as_str()) {
+            let cls = match this {
+                Some(h) => self
+                    .heap
+                    .get(h)
+                    .and_then(|o| o.as_ref())
+                    .map(|i| i.class_name.clone()),
+                None => self.class_context_stack.last().cloned().flatten(),
+            };
+            if let Some(cls) = cls
+                && let Some(sh) = self.static_struct_holder(&cls, nm)
+            {
+                return Some((sh, nm.clone()));
+            }
         }
+        let handle = this?;
         Some((handle, nm.clone()))
+    }
+
+    /// §8.9: the shared store of static property `prop` reached from class
+    /// `start_class` when it is an UNPACKED struct (see
+    /// `static_struct_holders`), created and seeded with its members' §6.8
+    /// defaults on first use. `None` for any other property.
+    fn static_struct_holder(&mut self, start_class: &str, prop: &str) -> Option<usize> {
+        let key = self.static_prop_key(start_class, prop)?;
+        if let Some(&h) = self.static_struct_holders.get(&key) {
+            // `usize::MAX`: the property is no unpacked struct.
+            return (h != usize::MAX).then_some(h);
+        }
+        let su = (|| {
+            let head = key.strip_suffix(prop)?.strip_suffix("::")?;
+            let decl = head.split('#').next()?.to_string();
+            let cd = self.module.classes.get(&decl)?.clone();
+            // A static COLLECTION of structs (`static s_t q[$]`) keeps the
+            // collection storage paths.
+            if !cd.static_properties.contains(prop)
+                || cd.static_collections.iter().any(|(n, ..)| n == prop)
+                || cd.static_fixed_arrays.iter().any(|(n, ..)| n == prop)
+                || cd.queue_properties.contains_key(prop)
+                || cd.assoc_properties.contains_key(prop)
+                || cd.array_properties.contains_key(prop)
+                || cd.array_nd_properties.contains_key(prop)
+            {
+                return None;
+            }
+            let dt = self.class_prop_decl_type(&cd, prop)?.clone();
+            match self.resolve_dt(&dt) {
+                DataType::Struct(su) if Self::spreads_member_wise(&su) => Some((decl, su)),
+                _ => None,
+            }
+        })();
+        let Some((decl, su)) = su else {
+            self.static_struct_holders.insert(key, usize::MAX);
+            return None;
+        };
+        let h = self.heap.len();
+        self.heap.push(Some(ClassInstance {
+            class_name: decl,
+            properties: PropMap::default(),
+            type_bindings: HashMap::default(),
+            spec: None,
+            creation_scope: String::new(),
+        }));
+        self.seed_class_struct_cells(h, prop, &su);
+        self.static_struct_holders.insert(key, h);
+        Some(h)
+    }
+
+    /// Create the store of every static unpacked-struct property up front,
+    /// so `Cls::prop.m` resolves before any object exists.
+    fn init_static_struct_holders(&mut self) {
+        let props: Vec<(String, String)> = self
+            .module
+            .classes
+            .values()
+            .flat_map(|cd| {
+                cd.static_properties
+                    .iter()
+                    .map(|p| (cd.name.clone(), p.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (cls, prop) in props {
+            let is_struct = self.module.classes.get(&cls).cloned().is_some_and(|cd| {
+                !cd.static_collections.iter().any(|(n, ..)| *n == prop)
+                    && !cd.static_fixed_arrays.iter().any(|(n, ..)| *n == prop)
+                    && !cd.queue_properties.contains_key(&prop)
+                    && !cd.assoc_properties.contains_key(&prop)
+                    && !cd.array_properties.contains_key(&prop)
+                    && !cd.array_nd_properties.contains_key(&prop)
+                    && self.class_prop_decl_type(&cd, &prop).is_some_and(|dt| {
+                    matches!(self.resolve_dt(dt), DataType::Struct(su) if Self::spreads_member_wise(&su))
+                })
+            });
+            if !is_struct {
+                continue;
+            }
+            self.static_struct_names.insert(prop.clone());
+            if !self.class_is_parameterized(&cls) {
+                let _ = self.static_struct_holder(&cls, &prop);
+            }
+        }
     }
 
     /// §7.4.1/§11.5.1: the declared (left, right) range of the class
