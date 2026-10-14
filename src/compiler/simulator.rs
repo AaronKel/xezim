@@ -9200,6 +9200,42 @@ impl Simulator {
         }
     }
 
+    /// §6.18: the dimensioned typedefs the locals of `body` are declared
+    /// with, keyed by the type's source spelling (see
+    /// `bytecode::type_name_key`). A qualified name resolves from its
+    /// innermost class scope; an unqualified one from `cname`'s chain, then
+    /// the module/package tables.
+    fn local_typedef_coll_dims(
+        &self,
+        cname: &str,
+        body: &[Statement],
+    ) -> HashMap<String, Vec<crate::ast::types::UnpackedDimension>> {
+        let mut out = HashMap::default();
+        let mut stack: Vec<&Statement> = body.iter().collect();
+        while let Some(st) = stack.pop() {
+            if let StatementKind::VarDecl {
+                data_type: DataType::TypeReference { name: tn, .. },
+                declarators,
+                ..
+            } = &st.kind
+                && declarators.iter().any(|d| d.dimensions.is_empty())
+            {
+                let key = super::bytecode::type_name_key(tn);
+                if !out.contains_key(&key) {
+                    let start = tn.scopes.last().map_or(cname, |s| s.name.name.as_str());
+                    if let Some(d) =
+                        Self::typedef_dims_via_tables(&self.module, start, &tn.name.name)
+                            .filter(|d| !d.is_empty())
+                    {
+                        out.insert(key, d);
+                    }
+                }
+            }
+            stack.extend(Self::sub_stmts(st));
+        }
+        out
+    }
+
     /// Unpacked dims carried by the typedef `tn`, resolved the way §6.18
     /// scoping does: the class `start_class` and its ancestors first (their
     /// `typedef_unpacked_dims`, exported by core dd4e161), then the
@@ -158672,6 +158708,7 @@ impl Simulator {
                     compiler.method_admission = Some(admission);
                     // issue-301 plan fact: multi-dim packed coll elements.
                     compiler.coll_elem_packed_dims = (*pre.coll_elem_packed_dims).clone();
+                    compiler.typedef_coll_dims = self.local_typedef_coll_dims(cname, body);
                     compiler.set_dpi_import_fds(dpi_fds);
                     if method_trace_enabled() {
                         compiler.scope_hint = Some(format!("{}.{}", cname, method_name));

@@ -1730,6 +1730,11 @@ pub struct BytecodeCompiler<'a> {
     /// array — `arr[j][2]` must select the packed ELEMENT (ew-bit slice),
     /// not one bit of the loaded element.
     pub coll_elem_packed_dims: HashMap<String, Vec<(i64, i64)>>,
+    /// Unpacked dims of the typedefs this body's locals are declared with
+    /// (`typedef int q_t[$]; q_t q;`), keyed by the type's source spelling
+    /// (`p::q_t`). The declarator itself carries no dims, so without this a
+    /// typedef'd collection local lowered as a scalar register.
+    pub typedef_coll_dims: HashMap<String, Vec<crate::ast::types::UnpackedDimension>>,
     /// class-perf Step 9c: names whose `$cast` destination may take the
     /// register route — formals, the result cell, and TOP-LEVEL body
     /// locals. A nested-block local is register-backed too, but its
@@ -2024,6 +2029,7 @@ impl<'a> BytecodeCompiler<'a> {
             static_coll_member_names: HashSet::default(),
             coll_elem_member_names: HashSet::default(),
             coll_elem_packed_dims: HashMap::default(),
+            typedef_coll_dims: HashMap::default(),
             cast_reg_ok_locals: HashSet::default(),
             method_ret_jumps: Vec::new(),
             decl_local_regs: std::collections::HashSet::default(),
@@ -10588,6 +10594,39 @@ impl<'a> BytecodeCompiler<'a> {
                 declarators,
             } => {
                 for decl in declarators {
+                    // §6.18: a local declared through a typedef that carries
+                    // unpacked dims is a collection too. A queue / unsized
+                    // array without an initializer takes the local-collection
+                    // path below; any other shape stays on the AST path.
+                    if decl.dimensions.is_empty()
+                        && let crate::ast::types::DataType::TypeReference { name: tn, .. } =
+                            data_type
+                        && let Some(dims) = self.typedef_coll_dims.get(&type_name_key(tn))
+                    {
+                        use crate::ast::types::UnpackedDimension as UD;
+                        if self.method_mode
+                            && decl.init.is_none()
+                            && dims.len() == 1
+                            && matches!(dims[0], UD::Queue { .. } | UD::Unsized(_))
+                        {
+                            let synth = Statement::new(
+                                StatementKind::VarDecl {
+                                    data_type: data_type.clone(),
+                                    lifetime: lifetime.clone(),
+                                    declarators: vec![decl.clone()],
+                                },
+                                stmt.span,
+                            );
+                            self.emit(Insn::InitLocalColl(Box::new((
+                                Arc::new(synth),
+                                Arc::from("VarDecl_local_coll"),
+                            ))));
+                            self.local_coll_names.insert(decl.name.name.clone());
+                            continue;
+                        }
+                        self.bail("VarDecl_typedef_array");
+                        return false;
+                    }
                     if !decl.dimensions.is_empty() {
                         // class-perf row 3: a LOCAL queue / dynamic array
                         // (single queue / unsized unpacked dimension, no
@@ -26189,4 +26228,16 @@ pub(crate) fn system_function_result(name: &str) -> Option<(u32, bool)> {
 /// System functions whose result has the TYPE of their first argument.
 pub(crate) fn system_function_carries_arg(name: &str) -> bool {
     matches!(name, "$signed" | "$unsigned" | "$past" | "$sampled")
+}
+
+/// Source spelling of a type name, `::`-joined (`p::q_t`), the key of
+/// `BytecodeCompiler::typedef_coll_dims`.
+pub(crate) fn type_name_key(tn: &crate::ast::types::TypeName) -> String {
+    let mut k = String::new();
+    for sc in &tn.scopes {
+        k.push_str(&sc.name.name);
+        k.push_str("::");
+    }
+    k.push_str(&tn.name.name);
+    k
 }
