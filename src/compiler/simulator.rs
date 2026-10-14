@@ -42771,6 +42771,16 @@ impl Simulator {
         if let Some(&id) = self.signal_name_to_id.get(name.as_str()) {
             return Some(id);
         }
+        // §26.3: `pkg::name` of a contested package variable or parameter
+        // has its own `<pkg>::<name>` cell (see `pkg_var_storage`).
+        if hier.path.len() == 2
+            && hier.path.iter().all(|s| s.selects.is_empty())
+            && self.module.packages.contains(&hier.path[0].name.name)
+            && let Some(q) = self.pkg_var_storage(&hier.path[0].name.name, &hier.path[1].name.name)
+            && let Some(&id) = self.signal_name_to_id.get(q.as_str())
+        {
+            return Some(id);
+        }
         if let Some(scope) = scope_hint {
             let qualified = format!("{}.{}", scope, name);
             if let Some(&id) = self.signal_name_to_id.get(qualified.as_str()) {
@@ -71553,6 +71563,39 @@ impl Simulator {
                         }
                     }
                 }
+            }
+        }
+        // §8.25/§26.3: `pkg::Cls::static_prop` (what `pkg::Cls#(..)::prop`
+        // reads once its specialization is active): the class package
+        // `pkg` holds.
+        if let ExprKind::MemberAccess {
+            expr: pkg_e,
+            member: cls_m,
+        } = &expr.kind
+            && let ExprKind::Ident(ph) = &pkg_e.kind
+            && ph.path.len() == 1
+            && ph.path[0].selects.is_empty()
+            && self.module.packages.contains(&ph.path[0].name.name)
+        {
+            // The class by the name its specialization keys statics with
+            // (`P`); the qualified entry only for a class renamed because
+            // another package declares the same name.
+            let q = format!("{}::{}", ph.path[0].name.name, cls_m.name);
+            let spec_named = self
+                .current_spec
+                .as_ref()
+                .is_some_and(|(b, _)| b == &cls_m.name);
+            let cls = if (spec_named || !self.module.classes.contains_key(&q))
+                && self.module.classes.contains_key(&cls_m.name)
+            {
+                cls_m.name.clone()
+            } else {
+                q
+            };
+            if self.module.classes.contains_key(&cls)
+                && let Some(v) = self.class_static_get(&cls, &member.name)
+            {
+                return v;
             }
         }
         // §13.4.2: a member of a subroutine-local / formal unpacked

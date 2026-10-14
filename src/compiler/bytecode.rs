@@ -9012,6 +9012,18 @@ impl<'a> BytecodeCompiler<'a> {
         if let Some(v) = params.get(raw) {
             return Some(v.clone());
         }
+        // §26.3: `pkg::P` (a two-segment path) is the package's own
+        // parameter, keyed `pkg::P`; the suffix match below would take any
+        // bare `P` — another package's, imported here.
+        if hier.root.is_none()
+            && hier.path.len() == 2
+            && hier.path.iter().all(|s| s.selects.is_empty())
+        {
+            let q = format!("{}::{}", hier.path[0].name.name, hier.path[1].name.name);
+            if let Some(v) = params.get(q.as_str()) {
+                return Some(v.clone());
+            }
+        }
         if let Some(scope) = &self.scope_hint {
             if let Some(v) = with_dotted(scope, raw, |k| params.get(k).cloned()) {
                 return Some(v);

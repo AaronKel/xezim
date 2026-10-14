@@ -239,7 +239,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§8.25: a static property read through a package-qualified specialization (`pa::P#(7)::s`) gives 0; the static method call and the unqualified form work"]
 fn static_through_qualified_specialization() {
     let src = r#"
 package pa;
@@ -263,7 +262,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§26.3: `pkg::P` (or an imported `P`) in a continuous assignment of a module instance reads the same-named parameter of the package the parent imports"]
 fn qualified_parameter_inside_an_instance() {
     let src = r#"
 package pa; parameter int W = 4; endpackage
