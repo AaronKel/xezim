@@ -151,6 +151,46 @@ endmodule
     assert_eq!(t_lines(src), ["T|cls 100.00 50.00", "T|pkg 50.00 25.00"]);
 }
 
+/// Out-of-block class methods (`function C::f`) are class scope, not
+/// package values: their names and the class members their bodies read are
+/// left alone.
+#[test]
+fn out_of_block_methods_beside_colliding_values() {
+    let src = r#"package pa;
+  parameter int base = 100;
+  function automatic int g(); return 1; endfunction
+  class C;
+    int base = 5;
+    extern function new();
+    extern function int f();
+    extern function int g();
+  endclass
+  function C::new(); base = 6; endfunction
+  function int C::f(); return base + g(); endfunction
+  function int C::g(); return 10; endfunction
+endpackage
+package pb;
+  parameter int base = 200;
+  function automatic int g(); return 2; endfunction
+  class D;
+    int k = 1;
+    extern function new();
+    extern function int f();
+  endclass
+  function D::new(); k = 3; endfunction
+  function int D::f(); return base + g() + k; endfunction
+endpackage
+module top;
+  import pb::*;
+  initial begin
+    pa::C c = new; pb::D d = new;
+    $display("T|ob %0d %0d %0d %0d", c.f(), d.f(), g(), base);
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|ob 16 205 2 200"]);
+}
+
 #[test]
 fn statics_of_same_named_classes() {
     let src = r#"
