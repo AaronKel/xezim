@@ -454,3 +454,15 @@ fn vpi_timed_and_synch_callbacks() {
         log
     );
 }
+
+#[test]
+fn dpi_issue_306_svlogic_shapes_test() {
+    // §35.5.6.1 / Annex H (issue #306 neighbours): x and z through scalar
+    // logic outputs, results, inouts, implicit formals and task outputs, and
+    // through svLogicVecVal outputs, inouts and inputs.
+    assert_dpi_pass(
+        "tests/dpi/issue_306_svlogic_shapes.c",
+        "issue_306_svlogic_shapes",
+        "tests/dpi/issue_306_svlogic_shapes_test.sv",
+    );
+}

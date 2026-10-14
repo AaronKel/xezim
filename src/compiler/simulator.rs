@@ -4385,6 +4385,9 @@ struct TaskCleanup {
 enum DpiRetKind {
     Void,
     Int32,
+    /// §35.5.5 / H.7.4: a scalar `logic` result is an `svLogic` — an
+    /// `unsigned char` holding sv_0 / sv_1 / sv_z (2) / sv_x (3).
+    Logic,
     Int64,
     Real32,
     Real64,
@@ -4396,6 +4399,11 @@ enum DpiRetKind {
 enum DpiArgKind {
     Int32In,
     Int32Out,
+    /// §35.5.6.1 / H.7.4: a scalar 4-state formal (`logic`, `reg`) is an
+    /// `svLogic` (`unsigned char`, sv_z = 2, sv_x = 3) by value, or an
+    /// `svLogic*` for output and inout.
+    LogicIn,
+    LogicOut,
     Int64In,
     Int64Out,
     Real32In,
@@ -15862,10 +15870,14 @@ impl Simulator {
                 kind, dimensions, ..
             } => {
                 if dimensions.is_empty() {
-                    Some(if out_dir {
-                        DpiArgKind::Int32Out
-                    } else {
-                        DpiArgKind::Int32In
+                    // §35.5.6.1: scalar `bit` is svBit (two-state), scalar
+                    // `logic`/`reg` is svLogic and carries x and z.
+                    let is_2state = matches!(kind, crate::ast::types::IntegerVectorType::Bit);
+                    Some(match (out_dir, is_2state) {
+                        (true, true) => DpiArgKind::Int32Out,
+                        (false, true) => DpiArgKind::Int32In,
+                        (true, false) => DpiArgKind::LogicOut,
+                        (false, false) => DpiArgKind::LogicIn,
                     })
                 } else {
                     let w = super::elaborate::resolve_type_width(
@@ -15890,10 +15902,12 @@ impl Simulator {
                     })
                 }
             }
+            // An implicitly typed scalar formal is a `logic` (§23.2.2.3), so
+            // an svLogic (§35.5.6.1).
             DataType::Implicit { dimensions, .. } if dimensions.is_empty() => Some(if out_dir {
-                DpiArgKind::Int32Out
+                DpiArgKind::LogicOut
             } else {
-                DpiArgKind::Int32In
+                DpiArgKind::LogicIn
             }),
             DataType::Implicit { dimensions, .. } => {
                 // Implicitly-typed with a packed range (`[N:0] x`) is a 4-state
@@ -15994,15 +16008,19 @@ impl Simulator {
                 | IntegerAtomType::ShortInt => Some(DpiRetKind::Int32),
                 IntegerAtomType::LongInt | IntegerAtomType::Time => Some(DpiRetKind::Int64),
             },
-            DataType::IntegerVector { dimensions, .. } => {
-                if dimensions.is_empty() {
+            DataType::IntegerVector {
+                kind, dimensions, ..
+            } => {
+                if !dimensions.is_empty() {
+                    Some(DpiRetKind::Int64)
+                } else if matches!(kind, crate::ast::types::IntegerVectorType::Bit) {
                     Some(DpiRetKind::Int32)
                 } else {
-                    Some(DpiRetKind::Int64)
+                    Some(DpiRetKind::Logic)
                 }
             }
             DataType::Implicit { dimensions, .. } if dimensions.is_empty() => {
-                Some(DpiRetKind::Int32)
+                Some(DpiRetKind::Logic)
             }
             DataType::Real { kind, .. } => match kind {
                 crate::ast::types::RealType::ShortReal => Some(DpiRetKind::Real32),
@@ -16121,6 +16139,8 @@ impl Simulator {
             .map(|k| match k {
                 DpiArgKind::Int32In => Type::i32(),
                 DpiArgKind::Int32Out => Type::pointer(),
+                DpiArgKind::LogicIn => Type::u8(),
+                DpiArgKind::LogicOut => Type::pointer(),
                 DpiArgKind::Int64In => Type::i64(),
                 DpiArgKind::Int64Out => Type::pointer(),
                 DpiArgKind::Real32In => Type::f32(),
@@ -16141,6 +16161,7 @@ impl Simulator {
         let ret_type = match ret {
             DpiRetKind::Void => Type::void(),
             DpiRetKind::Int32 => Type::i32(),
+            DpiRetKind::Logic => Type::u8(),
             DpiRetKind::Int64 => Type::i64(),
             DpiRetKind::Real32 => Type::f32(),
             DpiRetKind::Real64 => Type::f64(),
@@ -16163,6 +16184,33 @@ impl Simulator {
                 return;
             }
         }
+    }
+
+    /// §35.5.6.1 / H.7.4: the svLogic code of a scalar 4-state value —
+    /// sv_0 = 0, sv_1 = 1, sv_z = 2, sv_x = 3.
+    fn dpi_svlogic_code(v: &Value) -> u8 {
+        match v.get_bit(0) {
+            LogicBit::Zero => 0,
+            LogicBit::One => 1,
+            LogicBit::Z => 2,
+            LogicBit::X => 3,
+        }
+    }
+
+    /// The 1-bit SV value of an svLogic the C side wrote or returned. Only
+    /// the two low bits are defined (H.7.4).
+    fn dpi_svlogic_value(code: u8) -> Value {
+        let mut v = Value::new(1);
+        v.set_bit(
+            0,
+            match code & 3 {
+                0 => LogicBit::Zero,
+                1 => LogicBit::One,
+                2 => LogicBit::Z,
+                _ => LogicBit::X,
+            },
+        );
+        v
     }
 
     fn dpi_value_to_logic_words(v: &Value, width: u32) -> (Vec<u32>, Vec<u32>) {
@@ -16511,6 +16559,7 @@ impl Simulator {
 
         let mut arg_refs = Vec::with_capacity(arg_kinds.len());
         let mut i32_vals: Vec<Box<i32>> = Vec::with_capacity(arg_kinds.len());
+        let mut u8_vals: Vec<Box<u8>> = Vec::with_capacity(arg_kinds.len());
         let mut i64_vals: Vec<Box<i64>> = Vec::with_capacity(arg_kinds.len());
         let mut f32_vals: Vec<Box<f32>> = Vec::with_capacity(arg_kinds.len());
         let mut f64_vals: Vec<Box<f64>> = Vec::with_capacity(arg_kinds.len());
@@ -16528,40 +16577,39 @@ impl Simulator {
         for (i, kind) in arg_kinds.iter().enumerate() {
             match kind {
                 DpiArgKind::Int32In => {
-                    // §35.5.6.1: a 1-bit 4-state formal (`logic`/`reg`) travels
-                    // as svLogic — x is 3 and z is 2, not the 0 a plain
-                    // integer conversion produced.
-                    let four_state_bit = match &spec.proto {
-                        crate::ast::decl::DPIProto::Function(fd) => fd.ports.get(i),
-                        crate::ast::decl::DPIProto::Task(td) => td.ports.get(i),
-                    }
-                    .map(|pt| {
-                        !super::elaborate::is_type_two_state_resolved(
-                            &pt.data_type,
-                            &self.module.typedef_types,
-                        ) && self
-                            .scalar_formal_integral(&pt.data_type)
-                            .is_some_and(|(w, _)| w == 1)
-                    })
-                    .unwrap_or(false);
                     let v = Box::new(
                         args.get(i)
-                            .map(|e| {
-                                let val = self.eval_expr(e);
-                                if four_state_bit && val.has_xz() {
-                                    if matches!(val.get_bit(0), LogicBit::Z) {
-                                        2
-                                    } else {
-                                        3
-                                    }
-                                } else {
-                                    val.to_i64().unwrap_or(0) as i32
-                                }
-                            })
+                            .map(|e| self.eval_expr(e).to_i64().unwrap_or(0) as i32)
                             .unwrap_or(0),
                     );
                     i32_vals.push(v);
                     arg_refs.push(Arg::new(i32_vals.last().unwrap().as_ref()));
+                }
+                DpiArgKind::LogicIn => {
+                    let v = Box::new(
+                        args.get(i)
+                            .map(|e| Self::dpi_svlogic_code(&self.eval_expr(e)))
+                            .unwrap_or(0),
+                    );
+                    u8_vals.push(v);
+                    arg_refs.push(Arg::new(u8_vals.last().unwrap().as_ref()));
+                }
+                DpiArgKind::LogicOut => {
+                    // An inout passes the actual's current x / z in; C writes
+                    // one byte. The slot is an i32 so a C side that wrongly
+                    // writes an int stays inside it; byte 0 is the svLogic.
+                    let code = args
+                        .get(i)
+                        .map(|e| Self::dpi_svlogic_code(&self.eval_expr(e)))
+                        .unwrap_or(0);
+                    let b = Box::new(i32::from_ne_bytes([code, 0, 0, 0]));
+                    let p = Box::new((&*b as *const i32 as *mut i32).cast::<c_void>());
+                    i32_vals.push(b);
+                    ptr_vals.push(p);
+                    arg_refs.push(Arg::new(ptr_vals.last().unwrap().as_ref()));
+                    if let Some(expr) = args.get(i) {
+                        writebacks.push((i32_vals.len() - 1, *kind, expr.clone()));
+                    }
                 }
                 DpiArgKind::Int64In => {
                     let v = Box::new(
@@ -16848,6 +16896,12 @@ impl Simulator {
                 v.is_signed = true;
                 v
             }
+            DpiRetKind::Logic => {
+                // libffi widens a return narrower than ffi_arg to a full
+                // ffi_arg and stores all of it, so the buffer is a u64.
+                let rv: u64 = unsafe { cif.call(fn_ptr, &arg_refs) };
+                Self::dpi_svlogic_value(rv as u8)
+            }
             DpiRetKind::Int64 => {
                 let rv: i64 = unsafe { cif.call(fn_ptr, &arg_refs) };
                 let mut v = Value::from_u64(rv as u64, 64);
@@ -16912,6 +16966,13 @@ impl Simulator {
                     if let Some(v) = i32_vals.get(idx) {
                         let w = self.infer_lhs_width(&expr);
                         self.assign_value(&expr, &Value::from_u64(**v as u32 as u64, w));
+                    }
+                }
+                DpiArgKind::LogicOut => {
+                    if let Some(v) = i32_vals.get(idx) {
+                        let w = self.infer_lhs_width(&expr);
+                        let out = Self::dpi_svlogic_value(v.to_ne_bytes()[0]);
+                        self.assign_value(&expr, &out.resize(w));
                     }
                 }
                 DpiArgKind::Int64Out => {
