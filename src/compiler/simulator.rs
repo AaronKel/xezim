@@ -54834,49 +54834,6 @@ impl Simulator {
         }
     }
 
-    /// Static structural heat probe: does this statement tree contain any
-    /// looping statement (`for`/`while`/`do`/`foreach`/`repeat`/`forever`)?
-    ///
-    /// The adaptive tier counter measures heat by *number of calls* (a method
-    /// compiles after HOT_CALLS = 1000 calls). That is blind to heat that
-    /// lives in the *iterations of one call*: a UVM `run_phase` holding a
-    /// 5M-iteration `for` loop is invoked exactly once, so it never graduates
-    /// and runs forever on the AST interpreter. This probe predicates that a
-    /// loop-carrying body is plausibly hot and lets the tier gate compile it
-    /// on first call, without a global tier=0 (which would force-compile every method, breaking early-phase
-    /// collection calls). Correctness is unaffected because the loop-hot boost
-    /// only changes WHETHER the optimizer attempts a compile; if the
-    /// BytecodeCompiler cannot produce a plan it bails and the interpreted
-    /// AST path runs exactly as before.
-    fn body_has_loop(&self, stmts: &[Statement]) -> bool {
-        stmts.iter().any(|s| self.stmt_has_loop(s))
-    }
-    fn stmt_has_loop(&self, stmt: &Statement) -> bool {
-        match &stmt.kind {
-            StatementKind::For { body, .. }
-            | StatementKind::While { body, .. }
-            | StatementKind::DoWhile { body, .. }
-            | StatementKind::Foreach { body, .. }
-            | StatementKind::Repeat { body, .. }
-            | StatementKind::Forever { body } => true,
-            StatementKind::SeqBlock { stmts, .. } => stmts.iter().any(|s| self.stmt_has_loop(s)),
-            StatementKind::If {
-                then_stmt,
-                else_stmt,
-                ..
-            } => {
-                self.stmt_has_loop(then_stmt)
-                    || else_stmt.as_ref().is_some_and(|e| self.stmt_has_loop(e))
-            }
-            StatementKind::Case { items, .. } => {
-                items.iter().any(|it| self.stmt_has_loop(&it.stmt))
-            }
-            StatementKind::RandCase { items } => items.iter().any(|(_, s)| self.stmt_has_loop(s)),
-            StatementKind::ParBlock { stmts, .. } => stmts.iter().any(|s| self.stmt_has_loop(s)),
-            _ => false,
-        }
-    }
-
     /// Does this statement need a real *process* context (the ability to
     /// suspend and resume) — as opposed to merely containing a `#delay`?
     ///
@@ -157876,29 +157833,8 @@ impl Simulator {
         // misses HM catch below is zero-cost); one that never crosses pays
         // the counter only while below the threshold, and the count is
         // keyed by u32 ids (the same key the block cache uses).
-        //
-        // HOT-LOOP BOOST: heat measured by call count is blind to
-        // once-called loop-heavy tasks (a 5M-iteration `run_phase` is invoked
-        // once), so a body that statically contains a loop is treated as hot
-        // on first call and skips the counter. Only a WAIT-FREE body may take
-        // this path: a loop that can block/handshake (`forever { ...  @(e)
-        // ... }`, TLM transport tasks) must keep the suspend-aware, possibly
-        // non-compilable path, or the eager compile would spin the compiled
-        // body. `run_phase`'s 5M for-loop is wait-free, so it qualifies.
-        // For a TASK the wait-freedom test is the precise suspension analysis
-        // (`method_body_can_suspend`) — the structural `stmts_have_blocking`
-        // over-approximates method calls by NAME across every class, so a
-        // report-macro call (`uvm_fatal` → the report machinery) marks any
-        // loop body blocking and the boost is lost. The precise analysis is
-        // the same one that gates the compile below, so a body that passes
-        // here reaches the real gate; one that would fail it keeps the
-        // suspend-aware path exactly as before.
-        let boost_wait_free = match kind {
-            CompiledBodyKind::Task(t) => !self.method_body_can_suspend(cname, &t.ports, &t.items),
-            _ => !self.stmts_have_blocking(body),
-        };
         let tier = method_tier_threshold();
-        if tier > 0 && !(self.body_has_loop(body) && boost_wait_free) {
+        if tier > 0 {
             let calls = self
                 .compiled_method_call_counts
                 .entry((cid, mid, spec_id))
