@@ -70254,6 +70254,22 @@ impl Simulator {
                             }
                         }
                     }
+                    // §20.6.2: `$bits(o.arr)` on an unpacked-array member of
+                    // an object is the whole array (element_bits × element
+                    // count, the current count for a queue or dynamic array),
+                    // as for `$bits(arr)` inside the class above. The member
+                    // lives in the instance-scoped `<handle>#arr` storage.
+                    if !matches!(arg.kind, ExprKind::Index { .. })
+                        && let Some(nm) = self.expr_assoc_name(arg).filter(|n| n.contains('#'))
+                        && let Some(&(lo, hi, ew)) = self.module.arrays.get(&nm)
+                    {
+                        let n = if self.module.dynamic_arrays.contains(&nm) {
+                            self.get_queue_size(&nm)
+                        } else {
+                            (hi - lo).unsigned_abs() + 1
+                        };
+                        return Value::from_u64(n * ew as u64, 32);
+                    }
                     Value::from_u64(self.eval_expr(arg).width as u64, 32)
                 } else {
                     Value::zero(32)
