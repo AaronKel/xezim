@@ -64932,8 +64932,13 @@ impl Simulator {
                 .filter(|_| !fitted.is_real && self.is_associative_array(&an))
             {
                 fitted.is_signed = sg;
-            } else if !fitted.is_real && !fitted.is_signed && self.signed_class_coll(&an) {
-                fitted = self.fit_signed_class_coll_elem(&an, fitted);
+            } else if !self.is_associative_array(&an) {
+                // §7.10/§10.7: a queue or dynamic-array element takes the
+                // element type (an `int unsigned` element of -1 is 2**32-1).
+                fitted = self.fit_queue_push_elem(&an, fitted);
+                if !fitted.is_real && !fitted.is_signed && self.signed_class_coll(&an) {
+                    fitted = self.fit_signed_class_coll_elem(&an, fitted);
+                }
             }
             let changed = self.signals.get(&elem_name) != Some(&fitted);
             self.signals.insert(elem_name, fitted);
@@ -105126,6 +105131,19 @@ impl Simulator {
                     && self.signed_class_colls.contains(base)
                 {
                     self.fit_signed_class_coll_elem(base, val)
+                } else if !base
+                    .split_once('#')
+                    .is_some_and(|(h, _)| h.bytes().all(|b| b.is_ascii_digit()))
+                    && name.len() > base.len() + 1
+                    && name.as_bytes()[base.len() + 1..]
+                        .iter()
+                        .all(|&b| b.is_ascii_digit() || b == b']')
+                {
+                    // §7.10/§10.7: an element of a module-scope, static or
+                    // block-local queue or dynamic array (no table slot of
+                    // its own) takes the element type, as one with a slot
+                    // does.
+                    self.fit_queue_push_elem(base, val)
                 } else {
                     val
                 };
@@ -119380,7 +119398,203 @@ impl Simulator {
                 }
             }
         }
+        let val = self.fit_queue_push_elem(obj_name, val);
         self.set_signal_value_by_name(elem, val);
+    }
+
+    /// §7.10.2.2/§10.7: `push_back`, `push_front` and `insert` store their
+    /// argument converted to the queue's element type, as an indexed store
+    /// does: an INTEGRAL element (an integer vector or atom, an enum, a
+    /// packed struct or union, or a type parameter bound to one) takes the
+    /// element's width, signedness and 2-state value set. Any other element
+    /// (string, real, class handle, unpacked struct, chandle, virtual
+    /// interface) keeps the value as evaluated.
+    #[inline(never)]
+    fn fit_queue_push_elem(&self, coll: &str, val: Value) -> Value {
+        let Some((w, signed, two_state)) = self.integral_queue_elem(coll) else {
+            return val;
+        };
+        // §6.12.2: a real argument rounds to the integral element type.
+        let val = if val.is_real {
+            Self::real_to_int(val.to_f64(), 64)
+        } else {
+            val
+        };
+        let mut v = if w != val.width || val.is_fill {
+            val.resize_for_assign(w)
+        } else {
+            val
+        };
+        if two_state && v.has_xz() {
+            v = v.to_two_state();
+        }
+        v.is_signed = signed;
+        v
+    }
+
+    /// `integral_queue_elem` for a STATIC queue property stored as `coll`:
+    /// the bare member name, `Class::member` when two classes declare that
+    /// name (§8.9), or `Class#spec::member` for a parameterized class, whose
+    /// type-parameter element follows that specialization (§8.25).
+    fn static_integral_queue_elem(&self, coll: &str) -> Option<(u32, bool, bool)> {
+        // A specialization's store (`Class#spec::member`) is created on
+        // first use; any other static store is registered up front.
+        let w = match self.module.arrays.get(coll) {
+            Some(&(_, _, w)) => w,
+            None if coll.contains('#') => 0,
+            None => return None,
+        };
+        let (owner, member) = match coll.rsplit_once("::") {
+            Some((o, m)) => (Some(o), m),
+            None => (None, coll),
+        };
+        let (owner, sig) = match owner.and_then(|o| o.split_once('#')) {
+            Some((b, s)) => (Some(b), Some(s)),
+            None => (owner, None),
+        };
+        let declares = |cd: &super::elaborate::ElaboratedClass| {
+            cd.static_collections.iter().any(|(n, ..)| n == member)
+        };
+        let mut decl = None;
+        let mut cur = owner.or_else(|| self.class_context_stack.last()?.as_deref());
+        for _ in 0..64 {
+            let Some(cn) = cur else { break };
+            let cd = self.module.classes.get(cn)?;
+            if declares(cd) {
+                decl = Some(cd.as_ref());
+                break;
+            }
+            cur = cd.extends.as_deref();
+        }
+        // Reached from outside any class (`A::sq.push_back(v)`): an
+        // unshadowed static collection name has one declaring class.
+        let cd = match decl {
+            Some(cd) => cd,
+            None if owner.is_none() => self.module.classes.values().find(|cd| declares(cd))?,
+            None => return None,
+        };
+        let dt = self.class_prop_decl_type(cd, member)?;
+        if let DataType::TypeReference {
+            name, dimensions, ..
+        } = dt
+            && !name.has_scope()
+            && cd.type_param_names.contains(&name.name.name)
+        {
+            let i = cd.param_order.iter().position(|p| *p == name.name.name)?;
+            let b = Self::split_spec_args(sig?).get(i)?.trim().to_string();
+            if !dimensions.is_empty() || self.module.classes.contains_key(&b) {
+                return None;
+            }
+            if let Some(t) = self.module.typedef_types.get(b.as_str())
+                && !Self::integral_dt(self.resolve_dt_ref(t))
+            {
+                return None;
+            }
+            let w = self.concrete_type_width(&b)?;
+            return Some((
+                w,
+                self.concrete_type_signed(&b).unwrap_or(false),
+                self.concrete_type_two_state(&b),
+            ));
+        }
+        if !Self::integral_dt(self.resolve_dt_ref(dt)) || w == 0 {
+            return None;
+        }
+        Some((
+            w,
+            self.type_is_signed_concrete(dt),
+            super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types),
+        ))
+    }
+
+    /// An integral type (§6.11.1): an integer vector or atom, an enum, or a
+    /// packed struct or union.
+    fn integral_dt(dt: &DataType) -> bool {
+        match dt {
+            DataType::IntegerVector { .. } | DataType::IntegerAtom { .. } | DataType::Enum(_) => {
+                true
+            }
+            DataType::Struct(su) => su.packed,
+            _ => false,
+        }
+    }
+
+    /// `(width, signed, two_state)` of the element type of the queue stored
+    /// as `coll` (a `<handle>#member` class property, or a module, static or
+    /// subroutine-local name) when that type is integral; `None` otherwise.
+    fn integral_queue_elem(&self, coll: &str) -> Option<(u32, bool, bool)> {
+        let integral = Self::integral_dt;
+        if let Some((h, member)) = coll.split_once('#')
+            && let Ok(h) = h.parse::<usize>()
+        {
+            let member = member.split('[').next().unwrap_or(member);
+            let inst = self.heap.get(h)?.as_ref()?;
+            let mut cd = self.module.classes.get(inst.class_name.as_str())?.as_ref();
+            for _ in 0..64 {
+                if cd.properties.contains_key(member) {
+                    break;
+                }
+                cd = self.module.classes.get(cd.extends.as_deref()?)?.as_ref();
+            }
+            let dt = self.class_prop_decl_type(cd, member)?;
+            if let DataType::TypeReference { name, .. } = dt
+                && !name.has_scope()
+                && cd.type_param_names.contains(&name.name.name)
+            {
+                // A type parameter: integral when its binding on this
+                // object is (`concrete_type_width` refuses strings, reals,
+                // class handles and unsized `bit`/`logic`).
+                let b = self.class_prop_type_name(h, member)?;
+                let bt = self.module.typedef_types.get(b.as_str());
+                if bt.is_some_and(|t| !integral(self.resolve_dt_ref(t))) {
+                    return None;
+                }
+                self.concrete_type_width(&b)?;
+                let w = self.class_prop_width_of(h, member)?;
+                return Some((
+                    w,
+                    self.class_prop_signed_of(h, member),
+                    self.concrete_type_two_state(&b),
+                ));
+            }
+            if !integral(self.resolve_dt_ref(dt)) {
+                return None;
+            }
+            let w = self.class_prop_width_of(h, member).filter(|w| *w > 0)?;
+            return Some((
+                w,
+                self.class_prop_signed_of(h, member),
+                self.class_prop_two_state(h, member),
+            ));
+        }
+        let leaf = coll.rsplit('.').next().unwrap_or(coll);
+        let Some(dt) = self
+            .module
+            .var_decl_types
+            .get(coll)
+            .or_else(|| self.module.var_decl_types.get(leaf))
+            .or_else(|| {
+                // A collection formal's or local's per-call key `@name#N`.
+                let bare = coll.strip_prefix('@')?.rsplit_once('#')?.0;
+                self.module.var_decl_types.get(bare)
+            })
+        else {
+            return self.static_integral_queue_elem(coll);
+        };
+        if !integral(self.resolve_dt_ref(dt)) {
+            return None;
+        }
+        let w = self
+            .module
+            .arrays
+            .get(coll)
+            .map(|t| t.2)
+            .filter(|w| *w > 0)?;
+        Some((
+            w,
+            self.type_is_signed_concrete(dt),
+            super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types),
+        ))
     }
 
     /// Whether a struct member's declared type matches a `type:value` key of an

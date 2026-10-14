@@ -414,7 +414,6 @@ endmodule
 /// §7.10.2.2: `push_back` onto a queue member stores the value converted to
 /// the element type, as an indexed store does.
 #[test]
-#[ignore = "push_back/push_front onto a class queue member does not truncate to the element width"]
 fn queue_member_push_truncates_to_element_type() {
     let src = r#"
 class A;
