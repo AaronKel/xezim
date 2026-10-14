@@ -1,4 +1,4 @@
-// Wide-member randomize shapes still open: a constraint reaching a
+// Wide-member randomize shapes: a constraint reaching a
 // sub-object of a sub-object, `rand` unpacked struct members, a dynamic
 // array element relation through `^`, and `std::randomize` of wide locals.
 // The reference simulator prints `r=8 ok=8` on every line.

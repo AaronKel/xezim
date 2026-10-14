@@ -462,6 +462,8 @@ struct Csp {
     opaque: bool,
     /// Rand sub-object scalars are variables too (`csp_add_sub`).
     has_subs: bool,
+    /// Some scalar is a member of an unpacked struct member (`s.x`).
+    dotted: bool,
     /// `std::randomize(…) with {…}` (§18.12): the variables are the
     /// caller's own — written through these lvalues (scalars) and by
     /// element name (arrays) — and the solve runs in the caller's scope.
@@ -1315,6 +1317,7 @@ impl Simulator {
             order: Vec::new(),
             opaque: false,
             has_subs: false,
+            dotted: false,
             scope: Some(HashMap::default()),
             segs: HashMap::default(),
             slice_vars: HashMap::default(),
@@ -1396,8 +1399,18 @@ impl Simulator {
             );
         }
         for (name, lv, w, s, members) in scalars {
-            if *w == 0 || *w > 64 || csp.arrays.contains_key(name) {
+            if *w == 0 || csp.arrays.contains_key(name) {
                 return Err(CspOutcome::NotApplicable);
+            }
+            // §18.5: a local wider than 64 bits is solved through segments
+            // of at most 64 bits, as a class member is (`csp_wide_split`).
+            let wide = *w > 64;
+            if wide && (*s || members.is_some() || !sized.is_empty()) {
+                // Not modelled: left out of the solve, as before.
+                continue;
+            }
+            if wide {
+                csp.wide.insert(csp.vars.len());
             }
             csp.scalars.insert(name.clone(), csp.vars.len());
             csp.vars.push(CspVar {
@@ -1405,7 +1418,11 @@ impl Simulator {
                 width: *w,
                 signed: *s,
             });
-            csp.dom0.push(dom_of(*w, *s, members));
+            csp.dom0.push(if wide {
+                vec![(0, 0)]
+            } else {
+                dom_of(*w, *s, members)
+            });
             if let Some(l) = csp.scope.as_mut() {
                 l.insert(name.clone(), lv.clone());
             }
@@ -1437,7 +1454,7 @@ impl Simulator {
         let prev = CSP_SCOPE.with(|c| c.replace(true));
         let prev_receiver = self.rand_receiver.take();
         self.csp_split_slices(&mut csp, &constraints);
-        let out = if self.csp_translate(&mut csp, &constraints, &[]).is_none() {
+        let out = if csp.wide_fail || self.csp_translate(&mut csp, &constraints, &[]).is_none() {
             Err(CspOutcome::NotApplicable)
         } else if sized.is_empty() {
             match self.csp_run(&csp, &constraints, &[]) {
@@ -1500,6 +1517,7 @@ impl Simulator {
             order: Vec::new(),
             opaque: false,
             has_subs: false,
+            dotted: false,
             scope: None,
             segs: HashMap::default(),
             slice_vars: HashMap::default(),
@@ -1651,6 +1669,7 @@ impl Simulator {
         {
             return None;
         }
+        csp.dotted = csp.scalars.keys().any(|k| k.contains('.'));
         Some(csp)
     }
 
@@ -3310,6 +3329,16 @@ impl Simulator {
                     .type_name
                     .as_ref()
                     .is_some_and(|tn| self.module.classes.contains_key(tn));
+                // §18.5.9: a rand object member joins the solve as a
+                // sub-object of its own (`rand_csp_nested_subs`).
+                if is_obj
+                    && !cd.array_properties.contains_key(&name)
+                    && !cd.array_nd_properties.contains_key(&name)
+                    && !cd.queue_properties.contains_key(&name)
+                    && !cd.assoc_properties.contains_key(&name)
+                {
+                    continue;
+                }
                 if is_obj
                     || sig.is_real
                     || sig.width == 0
@@ -3539,18 +3568,32 @@ impl Simulator {
                     span,
                 );
             }
+            // `a.b` (a sub-object of a sub-object) is a member chain.
+            let mut base = Expression::new(
+                ExprKind::Ident(HierarchicalIdentifier {
+                    root: None,
+                    path: vec![seg(prop.split('.').next().unwrap_or(prop), span)],
+                    span,
+                    cached_signal_id: Cell::new(None),
+                    cached_resolved_name: std::cell::OnceCell::new(),
+                }),
+                span,
+            );
+            for part in prop.split('.').skip(1) {
+                base = Expression::new(
+                    ExprKind::MemberAccess {
+                        expr: Box::new(base),
+                        member: crate::ast::Identifier {
+                            name: part.to_string(),
+                            span,
+                        },
+                    },
+                    span,
+                );
+            }
             Expression::new(
                 ExprKind::MemberAccess {
-                    expr: Box::new(Expression::new(
-                        ExprKind::Ident(HierarchicalIdentifier {
-                            root: None,
-                            path: vec![seg(prop, span)],
-                            span,
-                            cached_signal_id: Cell::new(None),
-                            cached_resolved_name: std::cell::OnceCell::new(),
-                        }),
-                        span,
-                    )),
+                    expr: Box::new(base),
                     member: crate::ast::Identifier {
                         name: name.to_string(),
                         span,
@@ -3587,7 +3630,13 @@ impl Simulator {
                     return false;
                 }
                 let span = h.span;
-                h.path.insert(0, seg(prop, span));
+                if elem {
+                    h.path.insert(0, seg(prop, span));
+                } else {
+                    for (k, part) in prop.split('.').enumerate() {
+                        h.path.insert(k, seg(part, span));
+                    }
+                }
                 h.cached_signal_id.set(None);
                 h.cached_resolved_name = std::cell::OnceCell::new();
                 e.cached_width.set(None);
@@ -3792,6 +3841,11 @@ impl Simulator {
                 } else {
                     range.clone()
                 };
+                if unweighted
+                    && let Some(n) = self.csp_wide_dist(csp, expr, range, dist_weights, env)
+                {
+                    return Some(n);
+                }
                 let n =
                     self.csp_inside(csp, expr, &set, env, false, SrcItem::Item(item.clone()))?;
                 if *is_dist && !unweighted {
@@ -4253,6 +4307,100 @@ impl Simulator {
                 guards: env.guards.clone(),
             });
         }
+    }
+
+    /// §18.5.4: `x dist {…}` over a wide `x`. Its items are not values of
+    /// one solver variable, so an auxiliary variable picks the item: it
+    /// carries the dist (decided first, in proportion to each item's weight
+    /// among the items still feasible), and `x` is constrained to the item
+    /// it picks. None when an item or weight is not constant.
+    fn csp_wide_dist(
+        &mut self,
+        csp: &mut Csp,
+        expr: &Expression,
+        ranges: &[ConstraintRange],
+        weights: &[Option<DistWeight>],
+        env: &Env,
+    ) -> Option<Node> {
+        // The number of values of `[lo:hi]`, as a float (wide bounds).
+        fn span_count(lo: &Value, hi: &Value) -> f64 {
+            let f = |v: &Value| {
+                let mut x = 0.0f64;
+                for i in (0..v.width as usize).rev() {
+                    x = x * 2.0
+                        + if v.get_bit(i) == LogicBit::One {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                }
+                x
+            };
+            (f(hi) - f(lo) + 1.0).max(1.0)
+        }
+        let mut items: Vec<(ConstraintRange, f64)> = Vec::new();
+        for (k, r) in ranges.iter().enumerate() {
+            let (wt, per_value) = match weights.get(k).and_then(|w| w.as_ref()) {
+                Some(DistWeight::Each(e)) => (self.csp_const(e, env)?.to_u64()?, true),
+                Some(DistWeight::Total(e)) => (self.csp_const(e, env)?.to_u64()?, false),
+                None => (1, true),
+            };
+            if wt == 0 {
+                continue;
+            }
+            let mass = match r {
+                ConstraintRange::Value(_) => wt as f64,
+                ConstraintRange::Range { lo, hi } => {
+                    if matches!(lo.kind, ExprKind::Dollar) || matches!(hi.kind, ExprKind::Dollar) {
+                        return None;
+                    }
+                    if per_value {
+                        let (l, h) = (self.csp_const_any(lo, env), self.csp_const_any(hi, env));
+                        if l.has_xz() || h.has_xz() {
+                            return None;
+                        }
+                        wt as f64 * span_count(&l, &h)
+                    } else {
+                        wt as f64
+                    }
+                }
+            };
+            items.push((r.clone(), mass));
+        }
+        if items.is_empty() || items.len() > 4096 {
+            return None;
+        }
+        let mut alts = Vec::with_capacity(items.len());
+        let c = csp.vars.len();
+        csp.vars.push(CspVar {
+            key: VarKey::Aux,
+            width: 32,
+            signed: false,
+        });
+        csp.dom0.push(vec![(0, items.len() as i128 - 1)]);
+        let one = Self::literal_of(&Value::from_u64(1, 1), expr.span);
+        for (i, (r, _)) in items.iter().enumerate() {
+            let node = self.csp_wide_inside(csp, expr, std::slice::from_ref(r), env, false)?;
+            let src = self.csp_src(csp, SrcItem::Expr(one.clone()), &Env::default(), vec![c]);
+            let pick = Node::In {
+                lin: Lin::var(c),
+                set: vec![(i as i128, i as i128)],
+                neg: false,
+                fits: Vec::new(),
+                src,
+            };
+            alts.push(Self::csp_wide_and(vec![pick, node]));
+        }
+        csp.dists.push(Dist {
+            var: c,
+            items: items
+                .iter()
+                .enumerate()
+                .map(|(i, (_, m))| (i as i128, i as i128, *m))
+                .collect(),
+            guards: env.guards.clone(),
+        });
+        Some(Self::csp_wide_or(alts))
     }
 
     fn csp_and(mut v: Vec<Node>) -> Node {
@@ -4770,6 +4918,15 @@ impl Simulator {
         if wide && let Some(n) = self.csp_wide_rel(csp, op, left, right, env, neg) {
             return Some(n);
         }
+        if wide
+            && matches!(op, BinaryOp::Eq | BinaryOp::CaseEq)
+            && !neg
+            && let Some(n) = self
+                .csp_wide_fun(csp, whole, left, right, env)
+                .or_else(|| self.csp_wide_fun(csp, whole, right, left, env))
+        {
+            return Some(n);
+        }
         let fallback = |me: &mut Self, csp: &mut Csp| match me
             .csp_rel_fun(csp, whole, op, left, right, env, neg)
         {
@@ -5092,13 +5249,15 @@ impl Simulator {
         let recv_ok = |me: &Self, r: &str| r == "this" || me.rand_receiver.as_deref() == Some(r);
         // A rand sub-object's member (`a.x`, `this.a.x`, `t.a.x`): a
         // `prop.name` variable when the sub-object joined the solve.
-        if csp.has_subs {
+        // (Also `s.x`, a member of an unpacked struct member.)
+        if csp.has_subs || csp.dotted {
             if let Some(mut path) = Self::csp_member_path(e) {
                 if path.len() >= 3 && (path[0] == "this" || recv_ok(self, &path[0])) {
                     path.remove(0);
                 }
-                if path.len() == 2 {
-                    let n = format!("{}.{}", path[0], path[1]);
+                // `a.x`, or `a.b.x` for a sub-object of a sub-object.
+                if path.len() >= 2 {
+                    let n = path.join(".");
                     if csp.scalars.contains_key(&n) {
                         return Some(n);
                     }
@@ -7462,9 +7621,12 @@ impl Simulator {
         if opaque {
             return HashSet::default();
         }
+        // A member of an unpacked struct (`s.x`) is read through its leaf.
         names
             .iter()
-            .filter(|n| !read.contains(**n))
+            .filter(|n| {
+                !read.contains(**n) && !n.rsplit_once('.').is_some_and(|p| read.contains(p.1))
+            })
             .map(|n| n.to_string())
             .collect()
     }
@@ -8547,6 +8709,126 @@ impl Simulator {
             rest = Self::csp_wide_and(vec![le, or]);
         }
         rest
+    }
+
+    /// `x == other` with `x` a whole wide variable and `other` an expression
+    /// over other variables the segment model cannot express (`a ^ b`): once
+    /// every variable `other` reads is fixed it is evaluated, and each
+    /// segment of `x` is fixed to its bits of the value (one `Fun` per
+    /// segment), instead of the segments being guessed.
+    fn csp_wide_fun(
+        &mut self,
+        csp: &mut Csp,
+        whole: &Expression,
+        x: &Expression,
+        other: &Expression,
+        env: &Env,
+    ) -> Option<Node> {
+        let (v, lo, bw, is_whole) = self.csp_wide_bits(csp, x, env)?;
+        if !is_whole || lo != 0 || bw != csp.vars[v].width {
+            return None;
+        }
+        let segs = csp.segs.get(&v)?.clone();
+        let mut deps = Vec::new();
+        if !self.csp_wide_fun_deps(csp, other, env, &mut deps) {
+            return None;
+        }
+        if deps.is_empty() || segs.iter().any(|s| deps.contains(&s.2) || s.2 == v) {
+            return None;
+        }
+        deps.sort_unstable();
+        deps.dedup();
+        let span = whole.span;
+        let mut all = deps.clone();
+        all.extend(segs.iter().map(|s| s.2));
+        all.sort_unstable();
+        all.dedup();
+        let whole_src = self.csp_src(csp, SrcItem::Expr(whole.clone()), env, all);
+        let mut nodes = Vec::with_capacity(segs.len());
+        for &(slo, sw, sv) in &segs {
+            let mask = if sw >= 64 { u64::MAX } else { (1u64 << sw) - 1 };
+            let shifted = Expression::new(
+                ExprKind::Binary {
+                    op: BinaryOp::ShiftRight,
+                    left: Box::new(Expression::new(
+                        ExprKind::Paren(Box::new(other.clone())),
+                        span,
+                    )),
+                    right: Box::new(Self::literal_of(&Value::from_u64(slo as u64, 32), span)),
+                },
+                span,
+            );
+            let seg_e = Expression::new(
+                ExprKind::Binary {
+                    op: BinaryOp::BitAnd,
+                    left: Box::new(shifted),
+                    right: Box::new(Self::literal_of(&Value::from_u64(mask, sw.max(1)), span)),
+                },
+                span,
+            );
+            let other_src = self.csp_src(csp, SrcItem::Expr(seg_e), env, deps.clone());
+            nodes.push(Node::Fun {
+                var: sv,
+                op: BinaryOp::Eq,
+                other: other_src,
+                whole: whole_src,
+                neg: false,
+            });
+        }
+        Some(Self::csp_and(nodes))
+    }
+
+    /// The variables `e` reads for `csp_wide_fun`: the segments under a
+    /// wide variable, a select or field of one, else what `csp_refs` finds.
+    fn csp_wide_fun_deps(
+        &mut self,
+        csp: &Csp,
+        e: &Expression,
+        env: &Env,
+        out: &mut Vec<usize>,
+    ) -> bool {
+        if matches!(
+            e.kind,
+            ExprKind::RangeSelect { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::MemberAccess { .. }
+                | ExprKind::Ident(_)
+        ) && let Some((v, lo, w, _)) = self.csp_wide_bits(csp, e, env)
+        {
+            let Some(segs) = csp.segs.get(&v) else {
+                return false;
+            };
+            out.extend(
+                segs.iter()
+                    .filter(|s| s.0 < lo + w && s.0 + s.1 > lo)
+                    .map(|s| s.2),
+            );
+            return true;
+        }
+        match &e.kind {
+            ExprKind::Unary { operand, .. } | ExprKind::Paren(operand) => {
+                self.csp_wide_fun_deps(csp, operand, env, out)
+            }
+            ExprKind::Binary { left, right, .. } => {
+                self.csp_wide_fun_deps(csp, left, env, out)
+                    && self.csp_wide_fun_deps(csp, right, env, out)
+            }
+            ExprKind::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.csp_wide_fun_deps(csp, condition, env, out)
+                    && self.csp_wide_fun_deps(csp, then_expr, env, out)
+                    && self.csp_wide_fun_deps(csp, else_expr, env, out)
+            }
+            ExprKind::Concatenation(xs) => {
+                xs.iter().all(|x| self.csp_wide_fun_deps(csp, x, env, out))
+            }
+            _ if self.csp_free(csp, e, env) => true,
+            _ if !self.csp_wide_touch(csp, e, env) => self.csp_refs(csp, e, env, out),
+            _ => false,
+        }
     }
 
     /// §11.4.13: `expr inside {…}` with a wide operand, as the disjunction

@@ -69203,9 +69203,7 @@ impl Simulator {
             if cur.is_real {
                 return Err(rand_csp::CspOutcome::NotApplicable);
             }
-            if cur.width > 64 {
-                continue;
-            }
+            // A local wider than 64 bits joins as segments (`csp_scope`).
             let ev = enum_vals(self, name);
             scalars.push((
                 name.clone(),
@@ -145483,6 +145481,35 @@ impl Simulator {
         if !constraints.iter().any(|c| c.items.iter().any(has_any)) {
             return false;
         }
+        // §18.5.4: a `dist` over values wider than 64 bits is weighed by the
+        // joint solver; the trial loop compares only 64 bits of each item.
+        fn wide_dist(it: &ConstraintItem) -> bool {
+            let wide = |e: &Expression| matches!(&e.kind, ExprKind::Number(NumberLiteral::Integer { size: Some(n), .. }) if *n > 64);
+            match it {
+                ConstraintItem::Inside {
+                    is_dist: true,
+                    range,
+                    ..
+                } => range.iter().any(|r| match r {
+                    ConstraintRange::Value(v) => wide(v),
+                    ConstraintRange::Range { lo, hi } => wide(lo) || wide(hi),
+                }),
+                ConstraintItem::Implication { constraint, .. } => wide_dist(constraint),
+                ConstraintItem::IfElse {
+                    then_item,
+                    else_item,
+                    ..
+                } => wide_dist(then_item) || else_item.as_ref().is_some_and(|e| wide_dist(e)),
+                ConstraintItem::Foreach { item, .. } | ConstraintItem::Soft(item) => {
+                    wide_dist(item)
+                }
+                ConstraintItem::Block(items) => items.iter().any(wide_dist),
+                _ => false,
+            }
+        }
+        if constraints.iter().any(|c| c.items.iter().any(wide_dist)) {
+            return true;
+        }
         // (dist targets, names read elsewhere); true when decided early.
         fn walk(
             me: &Simulator,
@@ -146782,6 +146809,8 @@ impl Simulator {
         // prop -> [(member, width, is_randc, enum_type)] for the rand members.
         let mut unpacked_agg_props: Vec<(String, Vec<(String, u32, bool, Option<String>)>)> =
             Vec::new();
+        // `<prop>.<member>` of the signed rand members of those.
+        let mut unpacked_agg_signed: HashSet<String> = HashSet::default();
         // Sorted so the member-draw order (and hence the RNG stream) does not
         // depend on hash iteration order.
         let mut typed_props: Vec<(&String, &String)> = prop_type_names.iter().collect();
@@ -146813,7 +146842,14 @@ impl Simulator {
                     } else {
                         None
                     };
+                    let signed = super::elaborate::is_type_signed_resolved(
+                        &m.data_type,
+                        &self.module.typedef_types,
+                    );
                     for d in &m.declarators {
+                        if signed {
+                            unpacked_agg_signed.insert(format!("{}.{}", prop, d.name.name));
+                        }
                         members.push((d.name.name.clone(), w, is_randc, et.clone()));
                     }
                 }
@@ -146999,8 +147035,36 @@ impl Simulator {
         let mut csp_ok = randc_set.is_empty()
             && real_rand_props.is_empty()
             && (rand_obj_props.is_empty() || sub_objs.is_some())
-            && unpacked_agg_props.is_empty()
+            && unpacked_agg_props
+                .iter()
+                .all(|(_, ms)| ms.iter().all(|m| !m.2))
             && rand_nd_arrays.is_empty();
+        // §18.4: the rand members of an unpacked struct member are solver
+        // scalars of their own, stored (and named) `<prop>.<member>`.
+        let (csp_rand_props, csp_signed, csp_enums) = if unpacked_agg_props.is_empty() {
+            (
+                rand_props.clone(),
+                signed_rand_props.clone(),
+                enum_prop_types.clone(),
+            )
+        } else {
+            let mut rp = rand_props.clone();
+            let mut sg = signed_rand_props.clone();
+            let mut en = enum_prop_types.clone();
+            for (p, members) in &unpacked_agg_props {
+                for (m, w, _, et) in members {
+                    let key = format!("{}.{}", p, m);
+                    if unpacked_agg_signed.contains(&key) {
+                        sg.insert(key.clone());
+                    }
+                    if let Some(t) = et {
+                        en.insert(key.clone(), t.clone());
+                    }
+                    rp.push((key, *w));
+                }
+            }
+            (rp, sg, en)
+        };
         let sub_objs = sub_objs.unwrap_or_default();
         let mut csp_runs = 0u32;
         let mut rand_diag = rand_diag::rand_diag_enabled().then(rand_diag::RandDiag::default);
@@ -147030,9 +147094,9 @@ impl Simulator {
                 handle,
                 &constraints,
                 &constraint_depth,
-                &rand_props,
-                &signed_rand_props,
-                &enum_prop_types,
+                &csp_rand_props,
+                &csp_signed,
+                &csp_enums,
                 &rand_colls,
                 &array_enums,
                 true,
@@ -148357,9 +148421,9 @@ impl Simulator {
                     handle,
                     &constraints,
                     &constraint_depth,
-                    &rand_props,
-                    &signed_rand_props,
-                    &enum_prop_types,
+                    &csp_rand_props,
+                    &csp_signed,
+                    &csp_enums,
                     &rand_colls,
                     &array_enums,
                     false,

@@ -1,4 +1,7 @@
-//! Open `randomize()` gaps found next to #301 (all ignored). Each probe of
+//! `randomize()` shapes next to #301: a constraint through a sub-object of a
+//! sub-object (§18.5.9), `rand` unpacked struct members with wide fields
+//! (§18.4), `z == x ^ y` over wide dynamic-array elements and
+//! `std::randomize` of locals wider than 64 bits (§18.12). Each probe of
 //! `randomize_wide_open.sv` prints whether its constraints hold; the
 //! reference simulator prints `r=8 ok=8` on every line.
 
@@ -26,25 +29,21 @@ fn check(prefix: &str) {
 }
 
 #[test]
-#[ignore = "the joint solver keeps out a class whose rand sub-object holds a rand sub-object (`a.m -> a.b.c.x == K`); the trial loop then fails"]
 fn constraint_through_two_levels_of_sub_objects() {
     check("nest3_");
 }
 
 #[test]
-#[ignore = "a `rand` unpacked struct member keeps the class out of the joint solver; the trial loop cannot meet constraints on its wide fields"]
 fn rand_unpacked_struct_with_wide_fields() {
     check("ustruct_");
 }
 
 #[test]
-#[ignore = "`z == (x ^ y)` over wide elements of a rand dynamic array is not modelled"]
 fn wide_dynamic_array_elements_through_xor() {
     check("darr_");
 }
 
 #[test]
-#[ignore = "std::randomize() of locals wider than 64 bits is not modelled by the scope solver"]
 fn std_randomize_of_wide_locals() {
     check("std_");
 }
