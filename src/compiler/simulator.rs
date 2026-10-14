@@ -16571,6 +16571,31 @@ impl Simulator {
         }
     }
 
+    /// The actuals of an import call in formal order, named ones bound to
+    /// their formals and omitted ones taken from the defaults; None when the
+    /// call is already positional and complete.
+    fn dpi_bind_call_args(
+        proto: &crate::ast::decl::DPIProto,
+        args: &[Expression],
+    ) -> Option<Vec<Expression>> {
+        let ports = match proto {
+            crate::ast::decl::DPIProto::Function(fd) => &fd.ports,
+            crate::ast::decl::DPIProto::Task(td) => &td.ports,
+        };
+        let mut out = Self::normalize_call_args(ports, args);
+        let have = out.as_ref().map_or(args.len(), |v| v.len());
+        if have < ports.len() && ports[have].default.is_some() {
+            let v = out.get_or_insert_with(|| args.to_vec());
+            for p in &ports[have..] {
+                match &p.default {
+                    Some(d) => v.push(d.clone()),
+                    None => break,
+                }
+            }
+        }
+        out
+    }
+
     fn exec_dpi_import_call(&mut self, sv_name: &str, args: &[Expression]) -> Option<Value> {
         self.exec_dpi_import_call_in(sv_name, args, None)
     }
@@ -16583,6 +16608,23 @@ impl Simulator {
         args: &[Expression],
         via: Option<&str>,
     ) -> Option<Value> {
+        // §13.5.3 / §13.5.4: an import call binds its actuals like any
+        // subroutine call — `.name(expr)` to the named formal, an omitted
+        // one from its default. They were taken by position only, so a
+        // named actual bound nothing and an omitted one passed 0.
+        let bound_args;
+        let args: &[Expression] = match self
+            .module
+            .dpi_imports
+            .get(sv_name)
+            .and_then(|spec| Self::dpi_bind_call_args(&spec.proto, args))
+        {
+            Some(v) => {
+                bound_args = v;
+                &bound_args
+            }
+            None => args,
+        };
         let prev_active = ACTIVE_SIMULATOR.with(|cell| cell.get());
         if !self.dpi_bindings.contains_key(sv_name) {
             let c_name = self.module.dpi_imports.get(sv_name)?.c_name.clone();
