@@ -5515,6 +5515,9 @@ enum ClassAggRef {
         off: u32,
         w: u32,
         total: u32,
+        /// §7.2.1: a 2-state member of a 4-state struct — its reads and
+        /// writes convert x/z to 0.
+        two_state: bool,
     },
     /// Member of an UNPACKED struct — its own cell, keyed `<prop>.<member>`.
     Unpacked { handle: usize, key: String, w: u32 },
@@ -6335,6 +6338,12 @@ pub struct Simulator {
     /// (`<handle>#<member>`) that an assignment pattern gave it, read for
     /// every key the array does not hold.
     class_assoc_defaults: HashMap<String, Value>,
+    /// §7.2.1: variables of a 4-state packed struct type with 2-state
+    /// members (`struct packed {bit [3:0] b; logic [3:0] l;}`). Such a
+    /// member converts x/z to 0 on every read and write, which the compiled
+    /// member slices do not do, so their field layouts are withheld from the
+    /// bytecode compiler (`bc_packed_fields`) and the interpreter serves them.
+    mixed_packed_vars: HashSet<String>,
     /// §8.9: the storage object of each STATIC unpacked-struct property,
     /// keyed by its static key (`Cls::prop`): a heap object of the declaring
     /// class that holds the member cells (`<prop>.<member>`) every access —
@@ -6343,6 +6352,9 @@ pub struct Simulator {
     /// Names of the static unpacked-struct properties any class declares
     /// (gates the `static_struct_holders` lookups).
     static_struct_names: HashSet<String>,
+    /// `module.packed_struct_fields` without the `mixed_packed_vars` entries;
+    /// `None` when there are none.
+    bc_packed_fields: Option<HashMap<String, Vec<(String, u32, u32)>>>,
     pub monitor_prev: HashMap<String, Value>,
     /// Previously-printed values of the active `$monitor`'s non-`$time`
     /// arguments. `$monitor` re-prints only when one of these changes
@@ -12393,8 +12405,10 @@ impl Simulator {
             deferred_clocking_conts: Vec::new(),
             pending_reactive: Vec::new(),
             class_assoc_defaults: HashMap::default(),
+            mixed_packed_vars: HashSet::default(),
             static_struct_holders: HashMap::default(),
             static_struct_names: HashSet::default(),
+            bc_packed_fields: None,
             active_union_tag: HashMap::default(),
             max_time,
             tick_s,
@@ -21933,7 +21947,11 @@ impl Simulator {
         compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
         compiler.set_assoc_arrays(&self.module.associative_arrays);
         compiler.set_packed_full_dims(&self.module.packed_full_dims);
-        compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+        compiler.set_packed_struct_fields(
+            self.bc_packed_fields
+                .as_ref()
+                .unwrap_or(&self.module.packed_struct_fields),
+        );
         compiler.set_multi_dim_arrays(&self.multi_dim_array_names);
         compiler.set_arrays_2d(&self.module.arrays_2d);
         compiler.set_collection_denies(&self.module.dynamic_arrays, &self.module.queue_vars);
@@ -29777,13 +29795,21 @@ impl Simulator {
             compiler.set_params(&self.module.parameters);
             compiler.set_param_leaf_idx(self.param_leaf_index());
             compiler.set_cast_widths(&self.cast_widths);
-            compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+            compiler.set_packed_struct_fields(
+                self.bc_packed_fields
+                    .as_ref()
+                    .unwrap_or(&self.module.packed_struct_fields),
+            );
             compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
             compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
             compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
             compiler.set_assoc_arrays(&self.module.associative_arrays);
             compiler.set_packed_full_dims(&self.module.packed_full_dims);
-            compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+            compiler.set_packed_struct_fields(
+                self.bc_packed_fields
+                    .as_ref()
+                    .unwrap_or(&self.module.packed_struct_fields),
+            );
             compiler.set_multi_dim_arrays(&self.multi_dim_array_names);
             compiler.set_arrays_2d(&self.module.arrays_2d);
             compiler.set_collection_denies(&self.module.dynamic_arrays, &self.module.queue_vars);
@@ -30170,7 +30196,11 @@ impl Simulator {
                 compiler.set_params(&self.module.parameters);
                 compiler.set_param_leaf_idx(self.param_leaf_index());
                 compiler.set_cast_widths(&self.cast_widths);
-                compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+                compiler.set_packed_struct_fields(
+                    self.bc_packed_fields
+                        .as_ref()
+                        .unwrap_or(&self.module.packed_struct_fields),
+                );
                 compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
                 compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
@@ -30204,7 +30234,11 @@ impl Simulator {
                 delay_compiler.set_params(&self.module.parameters);
                 delay_compiler.set_param_leaf_idx(self.param_leaf_index());
                 delay_compiler.set_cast_widths(&self.cast_widths);
-                delay_compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+                delay_compiler.set_packed_struct_fields(
+                    self.bc_packed_fields
+                        .as_ref()
+                        .unwrap_or(&self.module.packed_struct_fields),
+                );
                 delay_compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 delay_compiler
                     .set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
@@ -36539,7 +36573,11 @@ impl Simulator {
                 compiler.set_params(&self.module.parameters);
                 compiler.set_param_leaf_idx(self.param_leaf_index());
                 compiler.set_cast_widths(&self.cast_widths);
-                compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+                compiler.set_packed_struct_fields(
+                    self.bc_packed_fields
+                        .as_ref()
+                        .unwrap_or(&self.module.packed_struct_fields),
+                );
                 compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
                 compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
@@ -36617,7 +36655,11 @@ impl Simulator {
                 compiler.set_params(&self.module.parameters);
                 compiler.set_param_leaf_idx(self.param_leaf_index());
                 compiler.set_cast_widths(&self.cast_widths);
-                compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+                compiler.set_packed_struct_fields(
+                    self.bc_packed_fields
+                        .as_ref()
+                        .unwrap_or(&self.module.packed_struct_fields),
+                );
                 compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
                 compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
@@ -36627,7 +36669,11 @@ impl Simulator {
                 compiler.set_arrays_2d(&self.module.arrays_2d);
                 compiler
                     .set_collection_denies(&self.module.dynamic_arrays, &self.module.queue_vars);
-                compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+                compiler.set_packed_struct_fields(
+                    self.bc_packed_fields
+                        .as_ref()
+                        .unwrap_or(&self.module.packed_struct_fields),
+                );
                 compiler.set_array_first_id(&self.array_first_id);
                 // Same omission as the single-dest site above: without the
                 // function table a concat-LHS decode assign
@@ -37366,7 +37412,11 @@ impl Simulator {
                     compiler.set_params(&self.module.parameters);
                     compiler.set_param_leaf_idx(self.param_leaf_index());
                     compiler.set_cast_widths(&self.cast_widths);
-                    compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+                    compiler.set_packed_struct_fields(
+                        self.bc_packed_fields
+                            .as_ref()
+                            .unwrap_or(&self.module.packed_struct_fields),
+                    );
                     compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                     compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
                     compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
@@ -51368,13 +51418,21 @@ impl Simulator {
             compiler.set_params(&self.module.parameters);
             compiler.set_param_leaf_idx(self.param_leaf_index());
             compiler.set_cast_widths(&self.cast_widths);
-            compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+            compiler.set_packed_struct_fields(
+                self.bc_packed_fields
+                    .as_ref()
+                    .unwrap_or(&self.module.packed_struct_fields),
+            );
             compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
             compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
             compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
             compiler.set_assoc_arrays(&self.module.associative_arrays);
             compiler.set_packed_full_dims(&self.module.packed_full_dims);
-            compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+            compiler.set_packed_struct_fields(
+                self.bc_packed_fields
+                    .as_ref()
+                    .unwrap_or(&self.module.packed_struct_fields),
+            );
             compiler.set_multi_dim_arrays(&self.multi_dim_array_names);
             compiler.set_arrays_2d(&self.module.arrays_2d);
             compiler.set_collection_denies(&self.module.dynamic_arrays, &self.module.queue_vars);
@@ -51592,7 +51650,11 @@ impl Simulator {
             compiler.set_params(&self.module.parameters);
             compiler.set_param_leaf_idx(self.param_leaf_index());
             compiler.set_cast_widths(&self.cast_widths);
-            compiler.set_packed_struct_fields(&self.module.packed_struct_fields);
+            compiler.set_packed_struct_fields(
+                self.bc_packed_fields
+                    .as_ref()
+                    .unwrap_or(&self.module.packed_struct_fields),
+            );
             compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
             compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
             compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
@@ -63919,6 +63981,12 @@ impl Simulator {
     #[cold]
     #[inline(never)]
     fn assign_value_xz(&mut self, lhs: &Expression, val: &Value) -> bool {
+        // §7.2.1: a 2-state member of a 4-state packed struct.
+        if !self.mixed_packed_vars.is_empty()
+            && let Some(v) = self.mixed_packed_member_write(lhs, val)
+        {
+            return self.assign_value_inner(lhs, &v);
+        }
         if self.lvalue_is_two_state_local(lhs) {
             let v = val.to_two_state();
             self.assign_value_inner(lhs, &v)
@@ -66917,7 +66985,10 @@ impl Simulator {
                 if let Some((base, off, w)) = self.packed_leaf_of_hier(&name) {
                     if let Some(cur) = self.get_signal_value_by_name(&base) {
                         let mut next = cur.clone();
-                        let piece = val.resize(w);
+                        let mut piece = val.resize(w);
+                        if !self.mixed_packed_vars.is_empty() {
+                            piece = self.packed_member_piece(&base, &name, piece);
+                        }
                         for i in 0..w {
                             next.set_bit((off + i) as usize, piece.get_bit(i as usize));
                         }
@@ -72229,6 +72300,13 @@ impl Simulator {
                 {
                     return d;
                 }
+                // §7.2.1: a 2-state member of a 4-state packed struct.
+                if v.has_xz()
+                    && !self.mixed_packed_vars.is_empty()
+                    && self.packed_member_two_state(&base_flat, &member.name)
+                {
+                    v = v.to_two_state();
+                }
                 // §6.11.1: a collection element's member leaf carries no
                 // declared metadata — stamp the member's declared
                 // signedness so `q[0].latency <= 0` on an `integer`
@@ -72260,6 +72338,13 @@ impl Simulator {
                         let mut out = Value::zero(w.max(1));
                         for i in 0..w {
                             out.set_bit(i as usize, cur.get_bit((off + i) as usize));
+                        }
+                        // §7.2.1: a 2-state member of a 4-state struct.
+                        if out.has_xz()
+                            && !self.mixed_packed_vars.is_empty()
+                            && self.packed_member_two_state(&base_flat, &member.name)
+                        {
+                            out = out.to_two_state();
                         }
                         return out;
                     }
@@ -104680,6 +104765,16 @@ impl Simulator {
                     if self.struct_member_signed(&base, field) {
                         v.is_signed = true;
                     }
+                    // §7.2.1: a 2-state member of a 4-state struct reads
+                    // its x/z bits as 0.
+                    if v.has_xz()
+                        && !self.mixed_packed_vars.is_empty()
+                        && self.packed_member_two_state(&base, field)
+                    {
+                        let signed = v.is_signed;
+                        v = v.to_two_state();
+                        v.is_signed = signed;
+                    }
                 }
                 return Some(v);
             }
@@ -104832,7 +104927,10 @@ impl Simulator {
             // Frame first, mirroring the read path above.
             if let Some(cur) = self.get_local_or_signal(&base) {
                 let mut next = cur.clone();
-                let piece = val.resize(w);
+                let mut piece = val.resize(w);
+                if !self.mixed_packed_vars.is_empty() {
+                    piece = self.packed_member_piece(&base, name, piece);
+                }
                 for i in 0..w {
                     next.set_bit((off + i) as usize, piece.get_bit(i as usize));
                 }
@@ -114711,12 +114809,14 @@ impl Simulator {
                     // Leaf: the remaining selects address packed slots / a
                     // bit range of the member's slice.
                     let (o, sw) = self.packed_array_slice(&dt, &inst_params, w, &rest[i + 1..])?;
+                    let two_state = self.mixed_member_two_state(su, &dt);
                     return Some(ClassAggRef::Packed {
                         handle,
                         prop: prop.to_string(),
                         off: off + o,
                         w: sw,
                         total,
+                        two_state,
                     });
                 }
             }
@@ -114727,6 +114827,7 @@ impl Simulator {
             off,
             w,
             total,
+            two_state: false,
         })
     }
 
@@ -115105,6 +115206,7 @@ impl Simulator {
             off,
             w: elem_w,
             total,
+            two_state: false,
         })
     }
 
@@ -115701,12 +115803,18 @@ impl Simulator {
         let inst_params = self.instance_param_scope(handle);
         let (fields, total) = self.packed_agg_layout_with(&su, &inst_params);
         let (_, off, w) = fields.iter().find(|(n, _, _)| *n == field).cloned()?;
+        let two_state = su
+            .members
+            .iter()
+            .find(|m| m.declarators.iter().any(|d| d.name.name == field))
+            .is_some_and(|m| self.mixed_member_two_state(&su, &m.data_type));
         Some(ClassAggRef::Packed {
             handle,
             prop,
             off,
             w,
             total,
+            two_state,
         })
     }
 
@@ -115719,6 +115827,7 @@ impl Simulator {
                 off,
                 w,
                 total,
+                two_state,
             } => {
                 let whole = self
                     .heap
@@ -115730,6 +115839,9 @@ impl Simulator {
                 let mut out = Value::zero((*w).max(1));
                 for i in 0..*w {
                     out.set_bit(i as usize, whole.get_bit((off + i) as usize));
+                }
+                if *two_state && out.has_xz() {
+                    out = out.to_two_state();
                 }
                 out
             }
@@ -115776,7 +115888,13 @@ impl Simulator {
                 off,
                 w,
                 total,
+                two_state,
             } => {
+                let val = &if *two_state && val.has_xz() {
+                    val.to_two_state()
+                } else {
+                    val.clone()
+                };
                 let mut whole = self
                     .heap
                     .get(*handle)
@@ -116543,6 +116661,9 @@ impl Simulator {
             // A FIXED array of unpacked structs: every element's 2-state
             // members default to 0 as well (§7.2.1, §7.4) — seeded per
             // element leaf (`arr[1].a`), never on the container name.
+            if self.packed_type_is_mixed(&dt) {
+                self.mixed_packed_vars.insert(vname.clone());
+            }
             let fixed_1d = self.module.arrays.get(&vname).copied();
             let fixed_2d = self.module.arrays_2d.get(&vname).copied();
             if fixed_1d.is_some() || fixed_2d.is_some() {
@@ -116570,6 +116691,17 @@ impl Simulator {
                 continue;
             }
             if let DataType::Struct(su) = self.resolve_dt(&dt) {
+                // §7.2.1: a packed struct with any 4-state member is 4-state
+                // as a whole and starts all x; its 2-state members convert
+                // on read.
+                if su.packed
+                    && !super::elaborate::is_type_two_state_resolved(
+                        &dt,
+                        &self.module.typedef_types,
+                    )
+                {
+                    continue;
+                }
                 // Packed-style storage: the var is ONE signal and members
                 // are field slices — zero the 2-state members' X bits in
                 // place (4-state members stay x).
@@ -116603,6 +116735,133 @@ impl Simulator {
                 }
             }
         }
+        if !self.mixed_packed_vars.is_empty() {
+            let mixed = &self.mixed_packed_vars;
+            self.bc_packed_fields = Some(
+                self.module
+                    .packed_struct_fields
+                    .iter()
+                    .filter(|(k, _)| !mixed.contains(k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            );
+        }
+    }
+
+    /// §7.2.1: a packed struct type that is 4-state (some member is) and
+    /// also has a 2-state member, whose reads and writes convert.
+    fn packed_type_is_mixed(&self, dt: &DataType) -> bool {
+        let DataType::Struct(su) = self.resolve_dt_ref(dt) else {
+            return false;
+        };
+        if !su.packed
+            || super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types)
+        {
+            return false;
+        }
+        let mut ts: HashSet<String> = HashSet::default();
+        self.collect_two_state_leaves(su, "", &mut ts);
+        !ts.is_empty()
+    }
+
+    /// §7.2.1: whether `field` (a dotted member path) of the packed-struct
+    /// variable `root` is a 2-state member of a 4-state struct, so a value
+    /// read from or written to it converts x/z to 0.
+    #[inline(never)]
+    fn packed_member_two_state(&self, root: &str, field: &str) -> bool {
+        // An element of an array of such structs (`arr[1]`).
+        let root = root.split('[').next().unwrap_or(root);
+        if !self.mixed_packed_vars.contains(root) {
+            return false;
+        }
+        let Some(dt) = self.module.var_decl_types.get(root) else {
+            return false;
+        };
+        let DataType::Struct(su) = self.resolve_dt_ref(dt) else {
+            return false;
+        };
+        let mut ts: HashSet<String> = HashSet::default();
+        self.collect_two_state_leaves(su, "", &mut ts);
+        ts.contains(field)
+    }
+
+    /// §7.2.1: the value written to member `name` (`<base>.<field>`) of a
+    /// packed struct — x/z bits become 0 for a 2-state member of a 4-state
+    /// struct.
+    #[inline(never)]
+    fn packed_member_piece(&self, base: &str, name: &str, piece: Value) -> Value {
+        if !piece.has_xz() || self.mixed_packed_vars.is_empty() {
+            return piece;
+        }
+        match name.strip_prefix(base).and_then(|f| f.strip_prefix('.')) {
+            Some(field) if self.packed_member_two_state(base, field) => {
+                let signed = piece.is_signed;
+                let mut v = piece.to_two_state();
+                v.is_signed = signed;
+                v
+            }
+            _ => piece,
+        }
+    }
+
+    /// §7.2.1: whether member type `dt` of packed struct `su` is 2-state
+    /// while `su` as a whole is 4-state.
+    fn mixed_member_two_state(
+        &self,
+        su: &crate::ast::types::StructUnionType,
+        dt: &DataType,
+    ) -> bool {
+        let tt = &self.module.typedef_types;
+        su.packed
+            && super::elaborate::is_type_two_state_resolved(dt, tt)
+            && !su
+                .members
+                .iter()
+                .all(|m| super::elaborate::is_type_two_state_resolved(&m.data_type, tt))
+    }
+
+    /// §7.2.1: the 2-state form of `val` when `lhs` names a 2-state member
+    /// of a 4-state packed-struct variable (`s.b`, `s.inner.b`, `s.b[1]`);
+    /// `None` otherwise.
+    #[inline(never)]
+    fn mixed_packed_member_write(&mut self, lhs: &Expression, val: &Value) -> Option<Value> {
+        let mut cur = lhs;
+        while let ExprKind::Index { expr, .. } | ExprKind::RangeSelect { expr, .. } = &cur.kind {
+            cur = expr;
+        }
+        let (root, field) = match &cur.kind {
+            ExprKind::Ident(h) if h.path.len() >= 2 => {
+                let names: Vec<&str> = h.path.iter().map(|s| s.name.name.as_str()).collect();
+                (1..names.len())
+                    .rev()
+                    .map(|k| (names[..k].join("."), names[k..].join(".")))
+                    .find(|(r, _)| self.resolve_mixed_root(r).is_some())?
+            }
+            ExprKind::MemberAccess { .. } => {
+                let flat = self.flat_member_name(cur)?;
+                let (r, f) = flat.split_once('.')?;
+                (r.to_string(), f.to_string())
+            }
+            _ => return None,
+        };
+        let root = self.resolve_mixed_root(&root)?;
+        if !self.packed_member_two_state(&root, &field) {
+            return None;
+        }
+        let mut v = val.to_two_state();
+        v.is_signed = val.is_signed;
+        Some(v)
+    }
+
+    /// The `mixed_packed_vars` entry `root` names, directly or under the
+    /// current scope hint.
+    fn resolve_mixed_root(&self, root: &str) -> Option<String> {
+        if self.mixed_packed_vars.contains(root) {
+            return Some(root.to_string());
+        }
+        let hint = self.name_resolve_hint.borrow();
+        let q = format!("{}.{}", hint.as_deref()?, root);
+        self.mixed_packed_vars.contains(q.as_str()).then_some(q)
     }
 
     /// Relative paths of 2-STATE leaf members of `su` (recursing into

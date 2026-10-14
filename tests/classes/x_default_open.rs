@@ -108,7 +108,6 @@ endmodule
 }
 
 #[test]
-#[ignore = "§7.2.1: a packed struct with a 4-state member starts all x and converts its 2-state members on read; its bit fields start 0"]
 fn mixed_packed_struct_starts_unknown() {
     let src = r#"
 typedef struct packed {bit [3:0] b; logic [3:0] l;} mix_t;
@@ -338,6 +337,44 @@ endmodule
             "T|h xxxx 0000",
             "T|w 0011 0000 0011",
             "T|p '{d:x, f:0, n:x, i:0}",
+        ]
+    );
+}
+
+#[test]
+fn mixed_packed_struct_member_reads_and_writes() {
+    let src = r#"
+typedef struct packed {bit [3:0] b; logic [3:0] l;} mix_t;
+typedef struct packed {bit [3:0] b; int i;} two_t;
+interface ifc; mix_t m; endinterface
+class C; mix_t cm; endclass
+module top;
+  ifc u();
+  mix_t mx, my, arr[2];
+  two_t tw;
+  C c;
+  int r;
+  initial begin
+    $display("T|a %b %b %b %b", mx, mx.b, mx.l, u.m);
+    my.b = 4'bx1z0; my.l = 4'bx1z0;
+    $display("T|c %b %b %b", my, my.b, my.l);
+    my = 8'bxxxx_1010;
+    $display("T|d %b %b %b %0d", my, my.b, my.l, my.b == 0);
+    r = mx.b + 1;
+    $display("T|e %0d %b", r, u.m.b);
+    c = new;
+    $display("T|f %b %b", c.cm, c.cm.b);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|a xxxxxxxx 0000 xxxx xxxxxxxx",
+            "T|c 0100x1z0 0100 x1z0",
+            "T|d xxxx1010 0000 1010 1",
+            "T|e 1 0000",
+            "T|f xxxxxxxx 0000",
         ]
     );
 }
