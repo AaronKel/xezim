@@ -964,7 +964,6 @@ endmodule
 /// A variable driven by a module output port and by a local continuous
 /// assign is two continuous drivers (§6.5); the reference rejects it.
 #[test]
-#[ignore = "driver conflicts are checked per module before instances are inlined, so an output-port connection is not seen as a continuous driver of the parent's variable"]
 fn output_port_plus_local_assign_on_a_variable_is_an_error() {
     let (lines, code, _) = run(
         "w12",
@@ -981,6 +980,59 @@ endmodule
     );
     assert_eq!(code, 1);
     assert!(lines.is_empty());
+}
+
+/// §6.5 / §23.3.3: an output port drives its actual like a continuous
+/// assignment, whatever the connection form, per written bit. A port beside
+/// another port or a continuous assign is an error; beside a procedural
+/// write the reference simulator only warns, so that runs.
+#[test]
+fn output_port_connections_are_continuous_drivers() {
+    let sub = "module sub(output logic o); assign o = 1; endmodule\n";
+    let errors = [
+        ("p2", "logic v; sub u(.o(v)); sub u2(.o(v));"),
+        ("pbit", "logic [1:0] v; sub u(.o(v[0])); assign v[0] = 0;"),
+        ("ppos", "logic v; sub u(v); assign v = 0;"),
+        ("pcat", "logic a, b; sub u(.o({a, b})); assign b = 0;"),
+        ("pimp", "logic o; sub u(.o); assign o = 0;"),
+    ];
+    for (tag, body) in errors {
+        let src = format!("{sub}module {tag}; {body} endmodule\n");
+        let (lines, code, stderr) = run(tag, &src, tag);
+        assert_eq!(code, 1, "{tag}: {stderr}");
+        assert!(lines.is_empty(), "{tag}");
+        assert!(
+            stderr.contains("multiple continuous drivers"),
+            "{tag}: {stderr}"
+        );
+        let (_, code, stderr) = run_with(tag, &src, tag, &["--relax-driver-conflicts"]);
+        assert_eq!(code, 0, "{tag} relaxed: {stderr}");
+        assert!(
+            stderr.contains("--relax-driver-conflicts"),
+            "{tag}: {stderr}"
+        );
+    }
+    let accepted = [
+        (
+            "pinit",
+            "logic v; sub u(.o(v)); initial v = 0; initial #1 $display(\"T|v=%b\", v);",
+            "T|v=0",
+        ),
+        (
+            "pcomb",
+            "logic v; sub u(.o(v)); always_comb v = 0; initial #1 $display(\"T|v=%b\", v);",
+            "T|v=0",
+        ),
+        (
+            "pdisj",
+            "logic [1:0] v; sub u(.o(v[0])); assign v[1] = 0; initial #1 $display(\"T|v=%b\", v);",
+            "T|v=01",
+        ),
+    ];
+    for (tag, body, want) in accepted {
+        let src = format!("{sub}module {tag}; {body} endmodule\n");
+        assert_eq!(lines(tag, &src, tag), [want], "{tag}");
+    }
 }
 
 /// `XEZIM_RELAX_DRIVER_CONFLICTS=1` is the same switch as the flag: the
