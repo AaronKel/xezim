@@ -6327,6 +6327,12 @@ pub struct Simulator {
     /// `tick_clocking_blocks` — instead of running in the Active region with the
     /// raw edge. See `EventWaiter::is_clocking`.
     deferred_clocking_conts: Vec<(usize, ProcCont)>,
+    /// §9.4.2.3/§14.13: clocking-event waiters (`@(cb iff g)`) whose edge
+    /// fired this slot but whose `iff` guard is judged only once the block
+    /// has sampled — the clocking event, and so its guard, occurs after the
+    /// clockvars update. Each entry holds the waiter and the guard of the
+    /// term that fired; see `resolve_deferred_clocking_guards`.
+    deferred_clocking_guarded: Vec<(EventWaiter, Box<Expression>)>,
     /// LRM §4.4 "reactive region" — drained AFTER the observed region
     /// has fired and BEFORE the postponed region runs. In a strict LRM
     /// implementation this hosts `program`-block procedural code so a
@@ -12419,6 +12425,7 @@ impl Simulator {
             clocking_inouts: HashMap::default(),
             clocking_vis: HashMap::default(),
             deferred_clocking_conts: Vec::new(),
+            deferred_clocking_guarded: Vec::new(),
             pending_reactive: Vec::new(),
             class_assoc_defaults: HashMap::default(),
             mixed_packed_vars: HashSet::default(),
@@ -50887,7 +50894,7 @@ impl Simulator {
                         let terms = self.fsm_wait_terms(&mut f, ix);
                         let clk = f.wait_is_clocking.get(ix).copied().unwrap_or(false);
                         if clk && self.clocking_event_due_now(&f.waits[ix].0) {
-                            self.deferred_clocking_conts.push((pid, ProcCont::empty()));
+                            self.defer_due_clocking_wait(pid, terms, ProcCont::empty());
                         } else {
                             let w =
                                 self.make_event_waiter_resolved(pid, terms, ProcCont::empty(), clk);
@@ -50977,7 +50984,7 @@ impl Simulator {
                             .copied()
                             .unwrap_or(false);
                         if clk && self.clocking_event_due_now(&f.waits[ix as usize].0) {
-                            self.deferred_clocking_conts.push((pid, ProcCont::empty()));
+                            self.defer_due_clocking_wait(pid, terms, ProcCont::empty());
                         } else {
                             let w =
                                 self.make_event_waiter_resolved(pid, terms, ProcCont::empty(), clk);
@@ -53249,7 +53256,13 @@ impl Simulator {
                             }
                             let has_real = sens.iter().any(|s| self.sens_term_resolves(s));
                             if has_real && is_clk_ev && self.clocking_event_due_now(event) {
-                                self.deferred_clocking_conts.push((pid, cont));
+                                if sens.iter().any(|s| s.iff.is_some()) {
+                                    // §14.13: judge the `iff` after sampling.
+                                    let w = self.make_event_waiter_kind(pid, sens, cont, true);
+                                    self.park_clocking_guard(w);
+                                } else {
+                                    self.deferred_clocking_conts.push((pid, cont));
+                                }
                             } else if has_real {
                                 let w = self.make_event_waiter_kind(pid, sens, cont, is_clk_ev);
                                 self.event_waiters.push(w);
@@ -57568,6 +57581,7 @@ impl Simulator {
             let mut triggered = false;
             let mut rank = 0u8;
             let mut moved = false;
+            let mut deferred_ix = usize::MAX;
             let saved_hint = waiter
                 .value_ctx
                 .as_ref()
@@ -57591,6 +57605,12 @@ impl Simulator {
                 // module-scope eval cannot resolve either name and reads X,
                 // so the waiter would never fire (ubus arbitration).
                 let guard_ok = match sid.iff.as_deref() {
+                    // §14.13: a CLOCKING event (`@(cb iff g)`) occurs after
+                    // the block samples, so its guard must read this edge's
+                    // clockvars — judged in the Reactive region instead
+                    // (`resolve_deferred_clocking_guards`). Evaluated here it
+                    // read the previous edge's sample.
+                    Some(_) if waiter.is_clocking => true,
                     // Fast path: a waiter with no parked context, drained
                     // from the top level, sees the module scope directly.
                     Some(g)
@@ -57618,8 +57638,18 @@ impl Simulator {
                 if guard_ok && value_ok {
                     triggered = true;
                     rank = sid.wake_rank;
+                    if waiter.is_clocking && sid.iff.is_some() {
+                        deferred_ix = i;
+                    }
                     break;
                 }
+            }
+            if deferred_ix != usize::MAX {
+                self.hold_clocking_guard(waiter, deferred_ix);
+                if let Some(h) = saved_hint {
+                    *self.name_resolve_hint.borrow_mut() = h;
+                }
+                return false;
             }
             if triggered && waiter.remaining_events > 1 {
                 waiter.remaining_events -= 1;
@@ -93898,12 +93928,100 @@ impl Simulator {
         self.clocking_tick_cache = cache;
     }
 
+    /// §9.4.2.3/§14.13: judge the `iff` guards of the clocking-event waiters
+    /// whose edge fired this slot (held by `drain_triggered_event_waiters`).
+    /// The clocking event occurs after the block samples, so the guard reads
+    /// this edge's clockvars (and post-NBA design state). A true guard
+    /// resumes the waiter with the other clocking continuations; a false one
+    /// re-arms it for the block's next clocking event.
+    #[cold]
+    #[inline(never)]
+    fn resolve_deferred_clocking_guards(&mut self) {
+        let pending = std::mem::take(&mut self.deferred_clocking_guarded);
+        for (mut waiter, g) in pending {
+            let saved_hint = waiter
+                .value_ctx
+                .as_ref()
+                .map(|c| self.name_resolve_hint.replace(c.scope.clone()));
+            let ok = if !self.process_contexts.contains_key(&waiter.pid)
+                && self.process_context_is_default()
+            {
+                self.eval_expr(&g).is_true()
+            } else {
+                self.eval_waiter_condition(waiter.pid, &g)
+            };
+            if ok && waiter.remaining_events <= 1 {
+                let cont = std::mem::replace(&mut waiter.continuation, ProcCont::empty());
+                self.deferred_clocking_conts.push((waiter.pid, cont));
+            } else {
+                if ok {
+                    waiter.remaining_events -= 1;
+                }
+                // Re-arm from the current levels: the edge just consumed
+                // must not fire again.
+                for (i, sid) in waiter.resolved_sensitivities.iter().enumerate() {
+                    waiter.captured_prev[i] = self.term_raw_bits(sid.signal_id);
+                    if let Some(v) = self.term_wide_value(sid.signal_id) {
+                        waiter.captured_prev_wide[i] = Some(v);
+                    }
+                }
+                if waiter.value_ctx.is_some() {
+                    self.rebase_value_terms(&mut waiter);
+                }
+                self.event_waiters.push(waiter);
+            }
+            if let Some(h) = saved_hint {
+                *self.name_resolve_hint.borrow_mut() = h;
+            }
+        }
+    }
+
+    /// The guard of term `ix` decides whether this clocking edge counts: the
+    /// waiter (with its continuation and event count) moves aside until
+    /// `resolve_deferred_clocking_guards` judges it.
+    #[cold]
+    #[inline(never)]
+    fn hold_clocking_guard(&mut self, waiter: &mut EventWaiter, ix: usize) {
+        let Some(g) = waiter.resolved_sensitivities[ix].iff.clone() else {
+            return;
+        };
+        let cont = std::mem::replace(&mut waiter.continuation, ProcCont::empty());
+        let mut held = waiter.clone();
+        held.continuation = cont;
+        self.deferred_clocking_guarded.push((held, g));
+    }
+
+    /// A clocking-event wait reached after its block's edge in the same
+    /// slot (`clocking_event_due_now`): resume with this slot's clocking
+    /// waiters, judging an `iff` guard after the block samples.
+    fn defer_due_clocking_wait(&mut self, pid: usize, terms: Vec<SensitivityId>, cont: ProcCont) {
+        if terms.iter().any(|t| t.iff.is_some()) {
+            let w = self.make_event_waiter_resolved(pid, terms, cont, true);
+            self.park_clocking_guard(w);
+        } else {
+            self.deferred_clocking_conts.push((pid, cont));
+        }
+    }
+
+    /// Hold `w` for `resolve_deferred_clocking_guards` under its first
+    /// term's `iff` guard.
+    #[cold]
+    fn park_clocking_guard(&mut self, w: EventWaiter) {
+        match w.resolved_sensitivities.iter().find_map(|t| t.iff.clone()) {
+            Some(g) => self.deferred_clocking_guarded.push((w, g)),
+            None => self.event_waiters.push(w),
+        }
+    }
+
     /// Resume the clocking-event waiters (`@(cb)` / `##N`) that fired this slot,
     /// held aside by `drain_triggered_event_waiters` and run here in the
     /// Reactive region — after `apply_nba` + `tick_clocking_blocks` — so their
     /// continuations read post-edge design state and this cycle's `cb.<in>`
     /// samples (§14.13). Mirrors the Active-region waiter run loop.
     fn drain_deferred_clocking_conts(&mut self) {
+        if !self.deferred_clocking_guarded.is_empty() {
+            self.resolve_deferred_clocking_guards();
+        }
         let mut guard = 0u32;
         let mut ran_any = false;
         while !self.deferred_clocking_conts.is_empty() {

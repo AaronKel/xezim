@@ -64,6 +64,8 @@ mod clock_t0_variable_delay_phase;
 mod clockgen_x_clock_stays_x;
 #[path = "scheduling/clocking_event_cycle_delay.rs"]
 mod clocking_event_cycle_delay;
+#[path = "scheduling/clocking_iff_samples_this_edge.rs"]
+mod clocking_iff_samples_this_edge;
 #[path = "scheduling/comb_collection_element_sensitivity.rs"]
 mod comb_collection_element_sensitivity;
 #[path = "scheduling/comb_result_clobbered_by_process.rs"]
