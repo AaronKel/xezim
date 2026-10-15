@@ -8912,8 +8912,32 @@ impl<'a> BytecodeCompiler<'a> {
                 ),
                 n => system_function_is_real(n),
             },
+            ExprKind::Call { func, .. } => self.call_returns_real(func),
             _ => false,
         }
+    }
+
+    /// §13.4.1: `func` names a function (or DPI import) declared to return
+    /// a real type, so a call of it is real-typed: `fr(x) / 2` divides as
+    /// reals instead of truncating the result to an integer first.
+    fn call_returns_real(&self, func: &Expression) -> bool {
+        let ExprKind::Ident(h) = &func.kind else {
+            return false;
+        };
+        if h.path.len() != 1 || !h.path[0].selects.is_empty() {
+            return false;
+        }
+        let Some(name) = self.scoped_callee_name(h.path[0].name.name.clone()) else {
+            return false;
+        };
+        let real =
+            |fd: &FunctionDeclaration| crate::compiler::elaborate::is_type_real(&fd.return_type);
+        self.functions.and_then(|f| f.get(&name)).is_some_and(real)
+            || self
+                .dpi_import_fds
+                .as_deref()
+                .and_then(|m| m.get(&name))
+                .is_some_and(real)
     }
 
     /// §10.7/§11.8.2: the context width an assignment gives its right-hand
@@ -9151,6 +9175,7 @@ impl<'a> BytecodeCompiler<'a> {
                 else_expr,
                 ..
             } => self.expr_may_be_real(then_expr) || self.expr_may_be_real(else_expr),
+            ExprKind::Call { func, .. } => self.call_returns_real(func),
             _ => false,
         }
     }
