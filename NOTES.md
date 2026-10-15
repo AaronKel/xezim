@@ -366,6 +366,19 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   sees this edge's clockvars rather than the previous edge's, and a
   clocking wait reached in the same slot as its edge honours its `iff`
   (§14.13). (#317, reported by urbanij)
+* A module subroutine called by its full hierarchical path from a class
+  method (`tb.sub.u_h.get_path()`, also through `$root.`, generate blocks and
+  instance arrays) runs in that instance, and `%m` in it names the callee; it
+  used to return 0 or an empty string (§23.6, §23.8). (#320, reported by
+  Ganesh-TNL)
+* A parameterized class specialized with a virtual interface type
+  (`cfg_db#(virtual my_if#(T))`) shares its statics with every other spelling
+  of that type: through the enclosing class's parameters, a typedef, the
+  `interface` keyword, named or defaulted interface parameters, or an
+  `extends` clause (§25.9, §8.25). (#320, reported by Ganesh-TNL)
+* Methods of a class declared inside a module resolve bare function, task and
+  variable names in the instance they run for, not a same-named top-level
+  declaration or the first instance's copy (§23.8). (found while fixing #320)
 
 **Performance**
 
