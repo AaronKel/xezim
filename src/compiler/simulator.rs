@@ -72871,6 +72871,18 @@ impl Simulator {
                     return v;
                 }
             }
+        }
+        // §8.23: `outer_c::inner_c::I` in a subroutine body — a constant of a
+        // NESTED class, registered under its scoped name.
+        if let ExprKind::MemberAccess { .. } = &expr.kind
+            && Self::member_chain_root(expr).is_some_and(|r| self.module.classes.contains_key(r))
+            && let Some(cls) = Self::expr_scoped_chain_key(expr)
+            && self.module.classes.contains_key(&cls)
+            && let Some(v) = self.class_scoped_const(&cls, &member.name)
+        {
+            return v;
+        }
+        if let ExprKind::Ident(h) = &expr.kind {
             // §26.3: the same shape with a PACKAGE base — `pkg::MEMBER`.
             // The elaborator only collapses `MemberAccess` into a
             // two-segment `Ident` for always/initial/continuous-assign
@@ -75445,6 +75457,25 @@ impl Simulator {
                             _ => None,
                         } {
                             return Value::from_u64(v, 32);
+                        }
+                    }
+                    // §8.23: a constant of a NESTED class (`outer_c::inner_c::I`):
+                    // the class is registered under its scoped name.
+                    if hier.path.len() >= 3
+                        && hier.path.iter().all(|s| s.selects.is_empty())
+                        && self.module.classes.contains_key(&hier.path[0].name.name)
+                    {
+                        let n = hier.path.len();
+                        let cls = hier.path[..n - 1]
+                            .iter()
+                            .map(|s| s.name.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        if self.module.classes.contains_key(&cls)
+                            && let Some(v) =
+                                self.class_scoped_const(&cls, &hier.path[n - 1].name.name)
+                        {
+                            return v;
                         }
                     }
                     if hier.path.len() == 2 {
@@ -128991,16 +129022,22 @@ impl Simulator {
                 };
                 // §8.25: a parameter or localparam of the ACTIVE
                 // specialization (`vp#(5)::W` with `W = N * 2`, read by a
-                // compiled static method) takes that specialization's
-                // value; its per-spec cell must not be seeded from the
-                // elaborated default.
+                // compiled static method, or `prm#(4)::N` read from a module)
+                // takes that specialization's value; its per-spec cell must
+                // not be seeded from the elaborated default. A body
+                // localparam's initializer is evaluated in its class's scope.
                 let spec_param = if pd_expr.is_some()
                     && self
                         .current_spec
                         .as_ref()
                         .is_some_and(|(b, _)| self.class_origin(b) == decl_class)
                 {
-                    self.resolve_value_param_in_current(prop)
+                    self.class_context_stack.push(Some(decl_class.to_string()));
+                    self.this_stack.push(None);
+                    let v = self.resolve_value_param_in_current(prop);
+                    self.this_stack.pop();
+                    self.class_context_stack.pop();
+                    v
                 } else {
                     None
                 };
@@ -139533,6 +139570,17 @@ impl Simulator {
     /// expression is not a pure name chain. Unlike
     /// [`Self::named_cast_key`] there is NO suffix fallback — used where a
     /// partial match would capture a same-named local.
+    /// The root name of a `a.b.c` / `a::b::c` member chain.
+    fn member_chain_root(mut e: &Expression) -> Option<&str> {
+        loop {
+            match &e.kind {
+                ExprKind::MemberAccess { expr, .. } => e = expr,
+                ExprKind::Ident(h) if h.path.len() == 1 => return Some(&h.path[0].name.name),
+                _ => return None,
+            }
+        }
+    }
+
     fn expr_scoped_chain_key(e: &Expression) -> Option<String> {
         let mut links: Vec<String> = Vec::new();
         let mut cur = e;

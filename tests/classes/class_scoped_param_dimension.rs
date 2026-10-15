@@ -382,7 +382,6 @@ fn class_scoped_constant_sibling_shapes_2() {
 
 /// Run-time reads of a specialization's or a nested class's constant.
 #[test]
-#[ignore = "a nested class constant (outer_c::inner_c::I) reads X: nested classes are not elaborated as class scopes"]
 fn class_scoped_constant_runtime_reads() {
     assert_eq!(t_lines(SRC_RUNTIME), EXPECT_RUNTIME);
 }
@@ -587,3 +586,59 @@ endmodule
 "#;
 
 const EXPECT_BITS: [&str; 1] = ["T| bits 96 24"];
+
+/// §8.25/§8.23 siblings of the run-time reads: a header parameter, the
+/// default specialization, an argument expression, a typedef of a
+/// specialization, reads inside a module function and a class method, a
+/// default naming an earlier parameter, a nested class constant built from
+/// another, and a static initialized from a parameter.
+#[test]
+fn class_scoped_constant_runtime_siblings() {
+    assert_eq!(
+        t_lines(SRC_RUNTIME_SIBLINGS),
+        [
+            "T| rt 8 10 6",
+            "T| hdr 3 4",
+            "T| expr 6 12",
+            "T| fn 10 14",
+            "T| two 7 10 10",
+            "T| nest 12 3",
+            "T| sv 104 102",
+        ]
+    );
+}
+
+const SRC_RUNTIME_SIBLINGS: &str = r#"
+class prm #(int W = 2);
+  localparam int N = W * 2;
+  static int sv = W + 100;
+endclass
+class prm2 #(int A = 1, int B = A + 1);
+  localparam int S = A + B;
+endclass
+class outer_c;
+  localparam int O = 3;
+  class inner_c;
+    localparam int I = 6;
+    localparam int J = I * 2;
+  endclass
+endclass
+typedef prm#(6) p6_t;
+class user_c;
+  function int f(); return prm#(4)::N + outer_c::inner_c::I; endfunction
+endclass
+module top;
+  function automatic int mf(); return prm#(5)::N; endfunction
+  initial begin
+    automatic user_c u = new();
+    $display("T| rt %0d %0d %0d", prm#(4)::N, prm#(.W(5))::N, outer_c::inner_c::I);
+    $display("T| hdr %0d %0d", prm#(3)::W, prm#()::N);
+    $display("T| expr %0d %0d", prm#(2+1)::N, p6_t::N);
+    $display("T| fn %0d %0d", mf(), u.f());
+    $display("T| two %0d %0d %0d", prm2#(3)::S, prm2#(3,7)::S, prm2#(.B(9))::S);
+    $display("T| nest %0d %0d", outer_c::inner_c::J, outer_c::O);
+    $display("T| sv %0d %0d", prm#(4)::sv, prm#()::sv);
+  end
+endmodule
+"#;
+
