@@ -17144,6 +17144,18 @@ impl Simulator {
         self.exec_dpi_import_call_in(sv_name, args, None)
     }
 
+    /// §35.5.6 / §13.5: an actual bound to an integral DPI formal converts as
+    /// an assignment to the formal would, so a real rounds (§6.12.2) instead
+    /// of passing its f64 bit pattern (`c_add(2.6, 3.4)` handed C 0s).
+    fn dpi_int_actual(&mut self, e: &Expression) -> Value {
+        let v = self.eval_expr(e);
+        if v.is_real {
+            Self::real_to_int(v.to_f64(), 64)
+        } else {
+            v
+        }
+    }
+
     /// `exec_dpi_import_call` for a call reached through a hierarchical
     /// prefix (`u_a.c_fn()`): `via` is that instance path (`u_a`).
     fn exec_dpi_import_call_in(
@@ -17246,7 +17258,7 @@ impl Simulator {
                 DpiArgKind::Int32In => {
                     let v = Box::new(
                         args.get(i)
-                            .map(|e| self.eval_expr(e).to_i64().unwrap_or(0) as i32)
+                            .map(|e| self.dpi_int_actual(e).to_i64().unwrap_or(0) as i32)
                             .unwrap_or(0),
                     );
                     i32_vals.push(v);
@@ -17255,7 +17267,7 @@ impl Simulator {
                 DpiArgKind::LogicIn => {
                     let v = Box::new(
                         args.get(i)
-                            .map(|e| Self::dpi_svlogic_code(&self.eval_expr(e)))
+                            .map(|e| Self::dpi_svlogic_code(&self.dpi_int_actual(e)))
                             .unwrap_or(0),
                     );
                     u8_vals.push(v);
@@ -17281,7 +17293,7 @@ impl Simulator {
                 DpiArgKind::Int64In => {
                     let v = Box::new(
                         args.get(i)
-                            .map(|e| self.eval_expr(e).to_i64().unwrap_or(0))
+                            .map(|e| self.dpi_int_actual(e).to_i64().unwrap_or(0))
                             .unwrap_or(0),
                     );
                     i64_vals.push(v);
@@ -17395,7 +17407,7 @@ impl Simulator {
                     // of {aval, bval} u32 pairs (see dpi_value_to_logic_interleaved).
                     let vv = args
                         .get(i)
-                        .map(|e| self.eval_expr(e))
+                        .map(|e| self.dpi_int_actual(e))
                         .unwrap_or_else(|| Value::zero(*width));
                     let buf = Self::dpi_value_to_logic_interleaved(&vv, *width);
                     logic_aval.push(buf);
@@ -17406,7 +17418,7 @@ impl Simulator {
                 DpiArgKind::VecLogicOut(width) => {
                     let init = args
                         .get(i)
-                        .map(|e| self.eval_expr(e))
+                        .map(|e| self.dpi_int_actual(e))
                         .unwrap_or_else(|| Value::zero(*width));
                     let buf = Self::dpi_value_to_logic_interleaved(&init, *width);
                     logic_aval.push(buf);
@@ -17422,7 +17434,7 @@ impl Simulator {
                     // ABI differs from VecLogicIn: no bval field.
                     let vv = args
                         .get(i)
-                        .map(|e| self.eval_expr(e))
+                        .map(|e| self.dpi_int_actual(e))
                         .unwrap_or_else(|| Value::zero(*width));
                     let (aval, _bval) = Self::dpi_value_to_logic_words(&vv, *width);
                     // Store in a dedicated Vec<Vec<u32>> to keep storage stable.
@@ -17435,7 +17447,7 @@ impl Simulator {
                 DpiArgKind::VecBitOut(width) => {
                     let init = args
                         .get(i)
-                        .map(|e| self.eval_expr(e))
+                        .map(|e| self.dpi_int_actual(e))
                         .unwrap_or_else(|| Value::zero(*width));
                     let (aval, _bval) = Self::dpi_value_to_logic_words(&init, *width);
                     logic_aval.push(aval);
@@ -17493,7 +17505,7 @@ impl Simulator {
                 DpiArgKind::Int32Out => {
                     let init = args
                         .get(i)
-                        .map(|e| self.eval_expr(e).to_i64().unwrap_or(0) as i32)
+                        .map(|e| self.dpi_int_actual(e).to_i64().unwrap_or(0) as i32)
                         .unwrap_or(0);
                     let b = Box::new(init);
                     let p = Box::new((&*b as *const i32 as *mut i32).cast::<c_void>());
@@ -17507,7 +17519,7 @@ impl Simulator {
                 DpiArgKind::Int64Out => {
                     let init = args
                         .get(i)
-                        .map(|e| self.eval_expr(e).to_i64().unwrap_or(0))
+                        .map(|e| self.dpi_int_actual(e).to_i64().unwrap_or(0))
                         .unwrap_or(0);
                     let b = Box::new(init);
                     let p = Box::new((&*b as *const i64 as *mut i64).cast::<c_void>());

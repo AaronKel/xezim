@@ -111,6 +111,16 @@ impl DpiCScalar {
     /// A value as this scalar's 64-bit slot. A string is kept in `keep`,
     /// which the caller holds until the next call of the export.
     fn value_to_slot(self, v: &Value, keep: &mut Vec<CString>) -> i64 {
+        // §35.5.6 / §6.12.2: a real value bound for an integral C type
+        // converts by value (rounding), never as its f64 bit pattern.
+        let rounded;
+        let v = if v.is_real && !matches!(self, DpiCScalar::F32 | DpiCScalar::F64 | DpiCScalar::Str)
+        {
+            rounded = Simulator::real_to_int(v.to_f64(), 64);
+            &rounded
+        } else {
+            v
+        };
         match self {
             DpiCScalar::F32 | DpiCScalar::F64 => v.to_f64().to_bits() as i64,
             DpiCScalar::Str => {

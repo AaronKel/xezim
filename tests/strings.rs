@@ -31,6 +31,8 @@ mod dpi_export_types;
 mod dpi_integration_tests;
 #[path = "strings/dpi_library_loading.rs"]
 mod dpi_library_loading;
+#[path = "strings/dpi_real_int_conversion.rs"]
+mod dpi_real_int_conversion;
 #[path = "strings/dpi_semantics.rs"]
 mod dpi_semantics;
 #[path = "strings/dpi_unit_scope.rs"]
