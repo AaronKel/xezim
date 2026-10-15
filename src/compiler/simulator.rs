@@ -3261,6 +3261,10 @@ struct ClassMemberNames {
     static_methods: HashSet<String>,
     /// Every function/task key and each of its suffixes after a `.`.
     subroutine_suffixes: HashSet<String>,
+    /// Typedef names (module or class scope) whose target a specialization
+    /// key spells by type (`typedef_alias_frag`): a virtual interface, a
+    /// one-keyword built-in, or a plain alias of another name.
+    alias_typedefs: HashSet<String>,
     /// Every class type/value parameter name.
     params: HashSet<String>,
     /// Every associative-array property name.
@@ -126304,6 +126308,29 @@ impl Simulator {
                     }
                     v
                 };
+            // §25.9: a virtual-interface argument (`extends B#(virtual
+            // I#(T))`) names this class's parameters inside its own `#(...)`.
+            let parent_args: Vec<String> = parent_args
+                .into_iter()
+                .map(|a| match self.parse_vif_frag(&a) {
+                    Some((iname, args, modport)) => {
+                        let args = args
+                            .iter()
+                            .map(|x| {
+                                let x = x.trim();
+                                let is_name = x
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                                    && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                                if is_name { name_arg(x) } else { x.to_string() }
+                            })
+                            .collect();
+                        self.canonical_vif_frag(&iname, args, modport)
+                    }
+                    None => a,
+                })
+                .collect();
             if parent == ancestor_class || self.class_origin(&parent) == ancestor_class {
                 return Some(parent_args.join(","));
             }
@@ -126426,6 +126453,17 @@ impl Simulator {
             } else {
                 inner_base.to_string()
             }
+        } else if let Some(t) = self.typedef_alias_frag(frag_norm) {
+            // §6.18: a typedef stands for its target type.
+            self.canonicalize_spec_frag(&t)
+        } else if let Some((name, args, modport)) = self.parse_vif_frag(frag_norm) {
+            // §25.9/§6.22.1: one key per virtual-interface type however it is
+            // spelled (`interface` keyword, defaults written out).
+            let args = args
+                .iter()
+                .map(|a| self.canonicalize_spec_frag(a))
+                .collect();
+            self.canonical_vif_frag(&name, args, modport)
         } else {
             let short = frag_norm.to_string();
             if let Some(cd) = self.get_class_def(&short) {
@@ -126853,7 +126891,6 @@ impl Simulator {
                         }
                         _ => Self::spec_member_key(&cname, None, prop),
                     };
-
                     return Some(key);
                 }
                 // §8.23: a NESTED class sees its lexically enclosing class's
@@ -131621,7 +131658,15 @@ impl Simulator {
                         (!v.is_real && v.to_u64().is_some())
                             .then(|| v.to_u64().unwrap().to_string())
                     }
-                    None => Some(f),
+                    // §25.9: a virtual-interface argument names the parameters
+                    // inside its own `#(...)` (`db#(virtual my_if#(T)) h;`).
+                    None => match self.parse_vif_frag(t) {
+                        Some((iname, args, modport)) => {
+                            let args = self.concrete_spec_frags_of(owner, args)?;
+                            Some(self.canonical_vif_frag(&iname, args, modport))
+                        }
+                        None => Some(f),
+                    },
                 }
             })
             .collect()
@@ -144858,7 +144903,200 @@ impl Simulator {
             let r_sig = self.canonicalize_spec_sig(&cb, &r_sig);
             return format!("{}#({})", cb, r_sig);
         }
+        // §25.9: a virtual-interface type argument (`virtual I#(T)`), written
+        // out or named through a typedef (`vif_t`): its own arguments may
+        // name the enclosing class's parameters, so `cfg_db#(virtual
+        // my_if#(T))` inside `mon#(int)` is `cfg_db#(virtual my_if#(int))`
+        // (issue #320). Left symbolic, every specialization of the enclosing
+        // class shared one `#(T)` table and none met the module's.
+        let aliased = self.typedef_alias_frag(p);
+        let p = aliased.as_deref().unwrap_or(p);
+        if let Some((name, args, modport)) = self.parse_vif_frag(p) {
+            let args = args
+                .iter()
+                .map(|a| self.resolve_spec_arg(a, enclosing))
+                .collect();
+            return self.canonical_vif_frag(&name, args, modport);
+        }
         Self::normalize_spec_ws(p)
+    }
+
+    /// Split a virtual-interface type fragment — `virtual [interface]
+    /// I[#(args)][.modport]` in any spacing, including the whitespace-free
+    /// canonical form — into the interface name, its raw `#(...)` arguments
+    /// and the modport. None for anything else.
+    fn parse_vif_frag(&self, frag: &str) -> Option<(String, Vec<String>, Option<String>)> {
+        if self.module.interfaces.is_empty() {
+            return None;
+        }
+        let rest = frag.trim().strip_prefix("virtual")?;
+        let head_end = rest.find(['#', '.']).unwrap_or(rest.len());
+        let head: String = rest[..head_end]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let name = if self.module.interfaces.contains(&head) {
+            head
+        } else {
+            let h = head.strip_prefix("interface")?;
+            if !self.module.interfaces.contains(h) {
+                return None;
+            }
+            h.to_string()
+        };
+        let mut tail = rest[head_end..].trim_start();
+        let mut args = Vec::new();
+        if let Some(t) = tail.strip_prefix('#') {
+            let t = t.trim_start().strip_prefix('(')?;
+            let mut depth = 1i32;
+            let mut close = None;
+            for (i, ch) in t.char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let close = close?;
+            args = Self::split_spec_args(&t[..close])
+                .into_iter()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect();
+            tail = t[close + 1..].trim_start();
+        }
+        let modport = match tail.strip_prefix('.') {
+            Some(m) => Some(m.chars().filter(|c| !c.is_whitespace()).collect::<String>()),
+            None if tail.is_empty() => None,
+            None => return None,
+        };
+        Some((name, args, modport))
+    }
+
+    /// The canonical (whitespace-free) key of `virtual name#(args).modport`
+    /// (§6.22.1): named arguments moved to their slots and omitted trailing
+    /// parameters filled with the interface's defaults, so `virtual I`,
+    /// `virtual interface I#(int)` and `virtual I#(.T(int), .N(4))` key one
+    /// specialization.
+    fn canonical_vif_frag(
+        &self,
+        name: &str,
+        mut args: Vec<String>,
+        modport: Option<String>,
+    ) -> String {
+        if let Some(defs) = self.module.interface_param_defaults.get(name) {
+            if args.iter().any(|a| Self::named_spec_arg(a).is_some()) {
+                let mut slots: Vec<Option<String>> = vec![None; defs.len().max(args.len())];
+                for (k, a) in args.iter().enumerate() {
+                    match Self::named_spec_arg(a) {
+                        Some((n, v)) => {
+                            if let Some(i) = defs.iter().position(|(p, _)| p == n) {
+                                slots[i] = (!v.is_empty()).then(|| v.to_string());
+                            }
+                        }
+                        None => slots[k] = Some(a.clone()),
+                    }
+                }
+                args.clear();
+                for (i, s) in slots.into_iter().enumerate() {
+                    match s.or_else(|| defs.get(i).and_then(|(_, d)| d.clone())) {
+                        Some(v) => args.push(v),
+                        None => break,
+                    }
+                }
+            }
+            while let Some(Some(d)) = defs.get(args.len()).map(|(_, d)| d.clone()) {
+                args.push(d);
+            }
+        }
+        let mut out = format!("virtual{}", name);
+        if !args.is_empty() {
+            out.push_str("#(");
+            out.push_str(&args.join(","));
+            out.push(')');
+        }
+        if let Some(mp) = modport {
+            out.push('.');
+            out.push_str(&mp);
+        }
+        Self::normalize_spec_ws(&out)
+    }
+
+    /// §6.18: a typedef name used as a specialization argument stands for
+    /// its target type. Rendered for the target shapes a specialization key
+    /// can spell the same way when written out — a virtual interface (raw
+    /// arguments, resolved by the caller) and a one-keyword built-in — so
+    /// `cfg_db#(vif_t)` and `cfg_db#(virtual my_if#(int))` share statics.
+    /// None for classes and every other target (their keys are unchanged).
+    fn typedef_alias_frag(&self, name: &str) -> Option<String> {
+        use crate::ast::types::DataType;
+        let name = name.trim();
+        if !self.class_member_names().alias_typedefs.contains(name) {
+            return None;
+        }
+        let mut cur = name.to_string();
+        for _ in 0..8 {
+            if self.module.classes.contains_key(&cur)
+                || self.module.typedef_unpacked_dims.contains_key(&cur)
+            {
+                return None;
+            }
+            let dt = self.lookup_typedef_target(&cur)?;
+            match &dt {
+                DataType::Interface {
+                    name: iname,
+                    modport,
+                    type_args,
+                    ..
+                } => {
+                    let mut out = format!("virtual {}", iname.name);
+                    if !type_args.is_empty() {
+                        let frags: Vec<String> = type_args
+                            .iter()
+                            .map(|e| match &e.kind {
+                                ExprKind::Ident(h) if h.path.len() == 1 => {
+                                    Some(h.path[0].name.name.clone())
+                                }
+                                _ => self.expr_to_spec_fragment(e),
+                            })
+                            .collect::<Option<_>>()?;
+                        out.push_str(&format!("#({})", frags.join(",")));
+                    }
+                    if let Some(mp) = modport {
+                        out.push('.');
+                        out.push_str(&mp.name);
+                    }
+                    return Some(out);
+                }
+                // One-keyword built-ins only: a vector's key text
+                // (`logicsigned[15:0]`) is read back as a type downstream
+                // (`$typename(T)`), where the typedef name renders better.
+                DataType::IntegerAtom { signing: None, .. }
+                | DataType::Real { .. }
+                | DataType::Simple { .. } => {
+                    return crate::elaborate::data_type_to_spec_fragment(&dt);
+                }
+                DataType::TypeReference {
+                    name: tn,
+                    dimensions,
+                    type_args,
+                    ..
+                } if dimensions.is_empty() && type_args.is_empty() && !tn.has_scope() => {
+                    if tn.name.name == cur {
+                        return None;
+                    }
+                    cur = tn.name.name.clone();
+                }
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Remove whitespace outside of double-quoted string literals so that
@@ -145935,6 +146173,21 @@ impl Simulator {
                         self.expr_to_spec_fragment(ta).unwrap_or(concrete)
                     } else {
                         concrete
+                    };
+                    // §25.9: `virtual my_if#(T)` binds the enclosing context's
+                    // `T` inside its own `#(...)`.
+                    let concrete = match self.parse_vif_frag(&concrete) {
+                        Some((iname, args, modport)) => {
+                            let args = args
+                                .iter()
+                                .map(|a| {
+                                    self.resolve_type_param_binding(a)
+                                        .unwrap_or_else(|| a.clone())
+                                })
+                                .collect();
+                            self.canonical_vif_frag(&iname, args, modport)
+                        }
+                        None => concrete,
                     };
                     bound = Some(
                         self.resolve_type_param_binding(&concrete)
@@ -157914,6 +158167,33 @@ impl Simulator {
                     }
                 }
             }
+            let alias_target = |dt: &DataType| match dt {
+                DataType::Interface { .. }
+                | DataType::IntegerAtom { signing: None, .. }
+                | DataType::Real { .. }
+                | DataType::Simple { .. } => true,
+                DataType::TypeReference {
+                    dimensions,
+                    type_args,
+                    ..
+                } => dimensions.is_empty() && type_args.is_empty(),
+                _ => false,
+            };
+            let mut alias_typedefs: HashSet<String> = self
+                .module
+                .typedef_types
+                .iter()
+                .filter(|(_, dt)| alias_target(dt))
+                .map(|(n, _)| n.clone())
+                .collect();
+            for cd in self.module.classes.values() {
+                alias_typedefs.extend(
+                    cd.typedef_targets
+                        .iter()
+                        .filter(|(_, dt)| alias_target(dt))
+                        .map(|(n, _)| n.clone()),
+                );
+            }
             let mut ident_slow: HashSet<String> = HashSet::default();
             ident_slow.extend(statics.iter().cloned());
             ident_slow.extend(vif_props.iter().cloned());
@@ -157937,6 +158217,7 @@ impl Simulator {
                 string_methods,
                 static_methods,
                 subroutine_suffixes,
+                alias_typedefs,
                 params,
                 assoc_props,
                 string_props,
