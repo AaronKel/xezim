@@ -70753,6 +70753,9 @@ impl Simulator {
                                             let n = (hi - lo).unsigned_abs() + 1;
                                             return Value::from_u64(n * ew as u64, 32);
                                         }
+                                        if let Some(bits) = self.unpacked_nd_bits(&scoped) {
+                                            return Value::from_u64(bits, 32);
+                                        }
                                     }
                                     return Value::from_u64(self.eval_expr(arg).width as u64, 32);
                                 }
@@ -70950,14 +70953,32 @@ impl Simulator {
                     // lives in the instance-scoped `<handle>#arr` storage.
                     if !matches!(arg.kind, ExprKind::Index { .. })
                         && let Some(nm) = self.expr_assoc_name(arg).filter(|n| n.contains('#'))
-                        && let Some(&(lo, hi, ew)) = self.module.arrays.get(&nm)
                     {
-                        let n = if self.module.dynamic_arrays.contains(&nm) {
-                            self.get_queue_size(&nm)
-                        } else {
-                            (hi - lo).unsigned_abs() + 1
-                        };
-                        return Value::from_u64(n * ew as u64, 32);
+                        if let Some(&(lo, hi, ew)) = self.module.arrays.get(&nm) {
+                            let n = if self.module.dynamic_arrays.contains(&nm) {
+                                self.get_queue_size(&nm)
+                            } else {
+                                (hi - lo).unsigned_abs() + 1
+                            };
+                            return Value::from_u64(n * ew as u64, 32);
+                        }
+                        // A multi-dimensional member (`logic [7:0] md[3][4]`)
+                        // counts every element of every dimension.
+                        if let Some(bits) = self.unpacked_nd_bits(&nm) {
+                            return Value::from_u64(bits, 32);
+                        }
+                    }
+                    // §20.6.2: `$bits(o.md)` / `$bits(this.md)` on a fixed
+                    // multi-dimensional array member counts every element.
+                    if matches!(arg.kind, ExprKind::MemberAccess { .. })
+                        || matches!(&arg.kind, ExprKind::Ident(h) if h.path.len() == 2)
+                    {
+                        if let Some((h, prop)) = self.class_prop_receiver(arg)
+                            && let Some(bits) =
+                                self.unpacked_nd_bits(&Self::handle_member_key(h, &prop))
+                        {
+                            return Value::from_u64(bits, 32);
+                        }
                     }
                     Value::from_u64(self.eval_expr(arg).width as u64, 32)
                 } else {
@@ -128882,6 +128903,21 @@ impl Simulator {
             cur = cd.extends.as_deref();
         }
         None
+    }
+
+    /// §20.6.2: the bits of a multi-dimensional unpacked array `name`
+    /// (element bits × every dimension's size), from the 2-D / N-D tables.
+    fn unpacked_nd_bits(&self, name: &str) -> Option<u64> {
+        if let Some(&((a0, a1), (b0, b1), ew)) = self.module.arrays_2d.get(name) {
+            let n = ((a1 - a0).unsigned_abs() + 1) * ((b1 - b0).unsigned_abs() + 1);
+            return Some(n * ew as u64);
+        }
+        let (shape, ew) = self.module.arrays_nd.get(name)?;
+        let n: u64 = shape
+            .iter()
+            .map(|(l, h)| (h - l).unsigned_abs() + 1)
+            .product();
+        Some(n * *ew as u64)
     }
 
     /// Value of `pkg::MEMBER` for an enum member declared by package `pkg`

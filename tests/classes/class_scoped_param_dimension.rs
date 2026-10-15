@@ -389,7 +389,6 @@ fn class_scoped_constant_runtime_reads() {
 /// `$bits` of a 2-D class property and of an unpacked struct whose member
 /// is sized by a bare module parameter.
 #[test]
-#[ignore = "$bits of a multi-dimensional class property / param-sized unpacked struct member counts one element"]
 fn bits_of_unpacked_aggregates() {
     assert_eq!(t_lines(SRC_BITS), EXPECT_BITS);
 }
@@ -608,6 +607,24 @@ fn class_scoped_constant_runtime_siblings() {
     );
 }
 
+/// §20.6.2 siblings: 2-D and 3-D class properties read from outside, bare
+/// and through `this` inside a method, unpacked structs whose members are
+/// sized by module parameters (2-D, nested, `[SQ:0]`), the types
+/// themselves, and a module 2-D array.
+#[test]
+fn bits_of_unpacked_aggregates_siblings() {
+    assert_eq!(
+        t_lines(SRC_BITS_SIBLINGS),
+        [
+            "T| bits 96 768 20",
+            "T| in 96 768",
+            "T| st 24 80 25 24 24",
+            "T| ty 24 80 25",
+            "T| mod 48 24",
+        ]
+    );
+}
+
 const SRC_RUNTIME_SIBLINGS: &str = r#"
 class prm #(int W = 2);
   localparam int N = W * 2;
@@ -642,3 +659,31 @@ module top;
 endmodule
 "#;
 
+const SRC_BITS_SIBLINGS: &str = r#"
+class c2d;
+  logic [7:0] md[3][4];
+  int m3[2][3][4];
+  bit [3:0] one[5];
+  function int inside_bits(); return $bits(md); endfunction
+  function int inside_this(); return $bits(this.m3); endfunction
+endclass
+module top;
+  localparam int SP = 3;
+  localparam int SQ = 2;
+  typedef struct { logic [7:0] m[SP]; } s1_t;
+  typedef struct { logic [7:0] m[SP][SQ]; int k; } s2_t;
+  typedef struct { s1_t in; bit b; } s3_t;
+  typedef struct { logic [7:0] m[3]; } s4_t;
+  typedef struct { logic [7:0] m[SQ:0]; } s5_t;
+  s1_t a; s2_t b; s3_t c; s4_t d4; s5_t e5;
+  logic [7:0] mod2[SP][SQ];
+  initial begin
+    automatic c2d d = new();
+    $display("T| bits %0d %0d %0d", $bits(d.md), $bits(d.m3), $bits(d.one));
+    $display("T| in %0d %0d", d.inside_bits(), d.inside_this());
+    $display("T| st %0d %0d %0d %0d %0d", $bits(a), $bits(b), $bits(c), $bits(d4), $bits(e5));
+    $display("T| ty %0d %0d %0d", $bits(s1_t), $bits(s2_t), $bits(s3_t));
+    $display("T| mod %0d %0d", $bits(mod2), $bits(a.m));
+  end
+endmodule
+"#;
