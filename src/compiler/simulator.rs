@@ -10836,6 +10836,111 @@ impl Simulator {
                 }
                 out
             }
+            // §6.21/§9.3.4: a collection local of a NESTED block (or of a
+            // module task / function body) that shadows a module item or a
+            // local of an enclosing block is alpha-renamed too, innermost
+            // first, so the top-level pass below no longer sees it
+            // redeclared. Collections have no frame of their own outside
+            // class methods and automatic tasks: under its bare name a local
+            // `int fa [3]` was the module's `fa`.
+            {
+                let mut n = 0usize;
+                let claims = |nm: &str| module_claims(nm) || module.queue_vars.contains(nm);
+                let mut bodies: Vec<&mut Statement> = Vec::new();
+                bodies.extend(module.initial_blocks.iter_mut().map(|b| &mut b.stmt));
+                bodies.extend(module.always_blocks.iter_mut().map(|b| &mut b.stmt));
+                bodies.extend(deferred_always.iter_mut().filter_map(|d| match d {
+                    DeferredAlways::Eager(ab) => Some(&mut ab.stmt),
+                    DeferredAlways::Lazy { .. } => None,
+                }));
+                bodies.extend(module.final_blocks.iter_mut().map(|b| &mut b.stmt));
+                let mut renamed: Vec<(usize, Statement)> = Vec::new();
+                for (k, b) in bodies.iter().enumerate() {
+                    if !Self::shadow_rename_possible(b, &claims) {
+                        continue;
+                    }
+                    let mut st = (**b).clone();
+                    if Self::rename_nested_shadowed(
+                        &mut st,
+                        &claims,
+                        &mut Vec::new(),
+                        &mut n,
+                        "b",
+                        0,
+                    ) {
+                        renamed.push((k, st));
+                    }
+                }
+                for (k, st) in renamed {
+                    *bodies[k] = st;
+                }
+                drop(bodies);
+                let wrap = |items: &[Statement], span| Statement {
+                    kind: StatementKind::SeqBlock {
+                        name: None,
+                        stmts: items.to_vec(),
+                    },
+                    span,
+                };
+                let mut tdone = Vec::new();
+                for (key, td) in module.tasks.iter() {
+                    if !td
+                        .items
+                        .iter()
+                        .any(|s| Self::shadow_rename_possible(s, &claims))
+                    {
+                        continue;
+                    }
+                    let mut st = wrap(&td.items, td.span);
+                    if Self::rename_nested_shadowed(
+                        &mut st,
+                        &claims,
+                        &mut Vec::new(),
+                        &mut n,
+                        "b",
+                        1,
+                    ) {
+                        tdone.push((key.clone(), st));
+                    }
+                }
+                let mut fdone = Vec::new();
+                for (key, fd) in module.functions.iter() {
+                    if !fd
+                        .items
+                        .iter()
+                        .any(|s| Self::shadow_rename_possible(s, &claims))
+                    {
+                        continue;
+                    }
+                    let mut st = wrap(&fd.items, fd.span);
+                    if Self::rename_nested_shadowed(
+                        &mut st,
+                        &claims,
+                        &mut Vec::new(),
+                        &mut n,
+                        "b",
+                        1,
+                    ) {
+                        fdone.push((key.clone(), st));
+                    }
+                }
+                for (key, st) in tdone {
+                    if let (Some(td), StatementKind::SeqBlock { stmts, .. }) =
+                        (module.tasks.get_mut(&key), st.kind)
+                    {
+                        td.items = stmts;
+                    }
+                }
+                for (key, st) in fdone {
+                    if let (Some(fd), StatementKind::SeqBlock { stmts, .. }) =
+                        (module.functions.get(&key), st.kind)
+                    {
+                        let mut fd = fd.clone();
+                        fd.items = stmts;
+                        module.functions.insert(key, fd);
+                    }
+                }
+            }
             let mut per_proc_counts: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
             let mut all_proc = Vec::new();
@@ -19018,9 +19123,55 @@ impl Simulator {
         }
         // Streaming chain: pending materializes one at a time, dropped after
         // the loop body consumes its `stmt`. No intermediate Vec staging.
+        // §6.21/§9.3.4: an instance's process (the lazy-prefix ones) keeps
+        // its locals' bare names while its module items carry the instance
+        // path, so a local there was the same variable in every instance of
+        // the module (or any process declaring that name), and one named
+        // like a TOP item was that item: rename those, its top-level block
+        // included.
+        let mut shadow_n = 0usize;
+        let claim_set: HashSet<String> = if pending_initial.is_empty() {
+            HashSet::default()
+        } else {
+            // A local claimed elsewhere: by a top item, or by another
+            // process (another instance of the module included).
+            let mut counts: HashMap<&str, usize> = HashMap::default();
+            for st in pending_initial
+                .iter()
+                .map(|p| &*p.source)
+                .chain(initial_blocks.iter().map(|b| &b.stmt))
+            {
+                Self::for_each_decl_name(st, &mut |n, _| *counts.entry(n).or_insert(0) += 1);
+            }
+            let m = &self.module;
+            counts
+                .into_iter()
+                .filter(|&(n, c)| {
+                    c >= 2
+                        || self.signal_name_to_id.contains_key(n)
+                        || m.arrays.contains_key(n)
+                        || m.associative_arrays.contains_key(n)
+                        || m.dynamic_arrays.contains(n)
+                        || m.queue_vars.contains(n)
+                })
+                .map(|(n, _)| n.to_string())
+                .collect()
+        };
+        let claims = |nm: &str| claim_set.contains(nm);
         for ib in pending_initial
             .into_iter()
-            .map(|p| p.materialize())
+            .map(|p| {
+                let mut ib = p.materialize();
+                Self::rename_nested_shadowed(
+                    &mut ib.stmt,
+                    &claims,
+                    &mut Vec::new(),
+                    &mut shadow_n,
+                    "p",
+                    1,
+                );
+                ib
+            })
             .chain(initial_blocks)
         {
             let ib = self.cov_initial(ib);
@@ -54847,6 +54998,161 @@ impl Simulator {
             }
         }
         false
+    }
+
+    /// Every name a block of `stmt` declares (any depth), once per
+    /// declarator, and whether it has unpacked dimensions.
+    fn for_each_decl_name<'a>(stmt: &'a Statement, f: &mut dyn FnMut(&'a str, bool)) {
+        let mut walk = |s: &'a Statement| Self::for_each_decl_name(s, f);
+        match &stmt.kind {
+            StatementKind::VarDecl { declarators, .. } => {
+                for d in declarators {
+                    f(&d.name.name, !d.dimensions.is_empty());
+                }
+            }
+            StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                stmts.iter().for_each(walk)
+            }
+            StatementKind::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                walk(then_stmt);
+                if let Some(e) = else_stmt {
+                    walk(e);
+                }
+            }
+            StatementKind::Case { items, .. } => items.iter().for_each(|it| walk(&it.stmt)),
+            StatementKind::For { body, .. }
+            | StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Repeat { body, .. }
+            | StatementKind::Forever { body }
+            | StatementKind::Foreach { body, .. }
+            | StatementKind::TimingControl { stmt: body, .. }
+            | StatementKind::Wait { stmt: body, .. } => walk(body),
+            _ => {}
+        }
+    }
+
+    /// Whether `rename_nested_shadowed` may rename anything in `stmt`: some
+    /// collection local named like a claimed name or like an earlier local
+    /// of the body (a read-only scan, so a body without one is not cloned).
+    fn shadow_rename_possible(stmt: &Statement, claims: &dyn Fn(&str) -> bool) -> bool {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut hit = false;
+        Self::for_each_decl_name(stmt, &mut |n, dims| {
+            if dims && !hit && (seen.contains(&n) || claims(n)) {
+                hit = true;
+            }
+            seen.push(n);
+        });
+        hit
+    }
+
+    /// §6.21/§9.3.4: alpha-rename, innermost first, the collection locals
+    /// (declarators with unpacked dimensions) of every block below `depth`
+    /// 0 of `stmt` that shadow a name `claims` (a module item) or a local of
+    /// an enclosing block (`enclosing`). `n` numbers the renamed blocks,
+    /// `tag` prefixes that number in the fresh names. In an instance's
+    /// process (tag `p`) locals of every kind are renamed, and a labeled
+    /// block's too.
+    /// True when something was renamed.
+    fn rename_nested_shadowed(
+        stmt: &mut Statement,
+        claims: &dyn Fn(&str) -> bool,
+        enclosing: &mut Vec<String>,
+        n: &mut usize,
+        tag: &str,
+        depth: usize,
+    ) -> bool {
+        let unlabeled = tag == "p";
+        let mut any = false;
+        let mut walk = |s: &mut Statement, enc: &mut Vec<String>, any: &mut bool| {
+            *any |= Self::rename_nested_shadowed(s, claims, enc, n, tag, depth + 1);
+        };
+        match &mut stmt.kind {
+            StatementKind::SeqBlock { stmts, .. } => {
+                let mark = enclosing.len();
+                let mut mine: Vec<String> = Vec::new();
+                for c in stmts.iter() {
+                    if let StatementKind::VarDecl { declarators, .. } = &c.kind {
+                        for d in declarators {
+                            if (unlabeled || !d.dimensions.is_empty())
+                                && (claims(&d.name.name)
+                                    || enclosing[..mark].contains(&d.name.name))
+                            {
+                                mine.push(d.name.name.clone());
+                            }
+                            enclosing.push(d.name.name.clone());
+                        }
+                    }
+                }
+                for c in stmts.iter_mut() {
+                    walk(c, enclosing, &mut any);
+                }
+                enclosing.truncate(mark);
+                if depth > 0 && !mine.is_empty() {
+                    *n += 1;
+                    let taken: std::collections::HashSet<String> = mine.into_iter().collect();
+                    // A labeled block's locals take `label.name`, which two
+                    // instances of a module would share: in an instance's
+                    // process (`unlabeled`) they are salted instead.
+                    let label = if unlabeled {
+                        match &mut stmt.kind {
+                            StatementKind::SeqBlock { name, .. } => name.take(),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(new) = super::elaborate::rename_process_shadowed_locals(
+                        stmt,
+                        &taken,
+                        &format!("{}{}", tag, n),
+                    ) {
+                        *stmt = new;
+                        any = true;
+                    }
+                    if let (Some(l), StatementKind::SeqBlock { name, .. }) = (label, &mut stmt.kind)
+                    {
+                        *name = Some(l);
+                    }
+                }
+            }
+            StatementKind::ParBlock { stmts, .. } => {
+                for c in stmts.iter_mut() {
+                    walk(c, enclosing, &mut any);
+                }
+            }
+            StatementKind::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                walk(then_stmt, enclosing, &mut any);
+                if let Some(e) = else_stmt {
+                    walk(e, enclosing, &mut any);
+                }
+            }
+            StatementKind::Case { items, .. } => {
+                for it in items.iter_mut() {
+                    walk(&mut it.stmt, enclosing, &mut any);
+                }
+            }
+            StatementKind::For { body, .. }
+            | StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Repeat { body, .. }
+            | StatementKind::Forever { body }
+            | StatementKind::Foreach { body, .. } => walk(body, enclosing, &mut any),
+            StatementKind::TimingControl { stmt: s, .. } | StatementKind::Wait { stmt: s, .. } => {
+                walk(s, enclosing, &mut any)
+            }
+            _ => {}
+        }
+        any
     }
 
     /// Does a block declare variables directly (§6.21: it then opens a scope)?

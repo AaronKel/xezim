@@ -153,3 +153,5 @@ mod assoc_locator_methods;
 mod struct_dynamic_members;
 #[path = "collections/typedef_and_fixed_collections.rs"]
 mod typedef_and_fixed_collections;
+#[path = "collections/block_local_shadow_module.rs"]
+mod block_local_shadow_module;

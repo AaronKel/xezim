@@ -43,7 +43,6 @@ fn module_class_bare_names_resolve_per_instance() {
 /// §6.21/§9.3.1: a variable declared in an `initial` block of a child
 /// instance is that block's own, not a same-named block local of the top.
 #[test]
-#[ignore = "block locals of a child instance's initial share storage with the top's namesakes"]
 fn child_initial_block_locals_are_distinct() {
     const SRC: &str = r#"
 module mid;
@@ -83,7 +82,6 @@ endmodule
 /// The same collision through class handles: the child's `h` read the
 /// top's object.
 #[test]
-#[ignore = "block locals of a child instance's initial share storage with the top's namesakes"]
 fn child_initial_block_class_handles_are_distinct() {
     const SRC: &str = r#"
 class A; int v = 1; endclass
