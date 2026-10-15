@@ -4383,6 +4383,10 @@ struct TaskCleanup {
     pushed_method_this: bool,
     saved_spec: Option<(String, String)>,
     formal_metadata: Vec<FormalMetadataSnapshot>,
+    /// The method task of a class declared inside a module runs in its
+    /// object's instance (see `Simulator::modclass_depth`): the process's
+    /// activation scope while this frame is on top.
+    modclass: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8915,6 +8919,20 @@ pub struct Simulator {
     /// the block's own scope; a `rhs_parent_scoped` port connect
     /// installs the parent's).
     activation_scope: RefCell<Option<String>>,
+    /// Depth of running methods of objects of a class declared inside a
+    /// (non-top) module (§8, §23.9: each instance holds its own class, whose
+    /// methods name that instance's items): such a method runs with the
+    /// object's instance (`modclass_instance`) as its activation scope and
+    /// resolve hint, and that instance's collections in its rename frame.
+    modclass_depth: std::cell::Cell<u32>,
+    /// The unpacked arrays, queues, dynamic and associative arrays,
+    /// unpacked structs and sub-instances an instance declares (instance
+    /// path -> bare names), for the rename frame a module-class method gets
+    /// (see `modclass_depth`).
+    modclass_colls: RefCell<HashMap<String, std::rc::Rc<Vec<String>>>>,
+    /// Whether any class is declared inside a module other than the top
+    /// (computed on first use): without one, `modclass_instance` is None.
+    has_modclass: std::cell::Cell<Option<bool>>,
     /// Memoized `signal_name_to_id` keys under an assoc-array prefix.
     /// That map is populated only while the signal table is built and
     /// during `collapse_identity_port_nets` — both elaboration-time —
@@ -13431,6 +13449,9 @@ impl Simulator {
             current_auto_task: None,
             name_resolve_hint: RefCell::new(None),
             activation_scope: RefCell::new(None),
+            modclass_depth: std::cell::Cell::new(0),
+            modclass_colls: RefCell::new(HashMap::default()),
+            has_modclass: std::cell::Cell::new(None),
             assoc_static_keys_cache: RefCell::new(HashMap::default()),
             sampled_watches: Vec::new(),
             sampled_watch_site: HashMap::default(),
@@ -51992,10 +52013,19 @@ impl Simulator {
         if same_scope {
             return self.run_process_stmts_inner(pid, pc);
         }
+        // A method task of a class declared inside a module runs in its
+        // object's instance (`TaskCleanup::modclass`).
+        let modclass = if self.modclass_depth.get() > 0 {
+            self.task_cleanup
+                .iter()
+                .rev()
+                .find_map(|t| t.modclass.clone())
+        } else {
+            None
+        };
         let saved_activation_scope = self.activation_scope.replace(Some(
-            self.process_scope_hint
-                .get(&pid)
-                .cloned()
+            modclass
+                .or_else(|| self.process_scope_hint.get(&pid).cloned())
                 .unwrap_or_default(),
         ));
         self.run_process_stmts_inner(pid, pc);
@@ -87657,6 +87687,11 @@ impl Simulator {
         if raw.contains('.') {
             return raw.to_string();
         }
+        if let Some(q) = self.modclass_scoped(raw)
+            && self.signal_name_to_id.contains_key(q.as_str())
+        {
+            return q;
+        }
         let hint = self.name_resolve_hint.borrow().clone();
         if let Some(hint) = hint.filter(|h| !h.is_empty()) {
             for q in [
@@ -87807,6 +87842,13 @@ impl Simulator {
                         .rfind('[')
                         .is_some_and(|i| self.module.events.contains(&key[..i])))
         };
+        // §8/§23.9: in a method of a class declared inside a module, the
+        // object's instance declares the event.
+        if let Some(scoped) = self.modclass_scoped(&name)
+            && declared(&scoped)
+        {
+            return Some(scoped);
+        }
         if declared(&name) {
             return Some(name);
         }
@@ -94740,6 +94782,95 @@ impl Simulator {
         v
     }
 
+    /// §8/§23.9: the instance whose class an object of a class declared
+    /// inside a module (not the top) belongs to — the instance holding the
+    /// object's creation scope, or the module's only instance. None
+    /// otherwise. Callers check `any_modclass` first.
+    #[cold]
+    #[inline(never)]
+    fn modclass_instance(&self, handle: usize) -> Option<String> {
+        let enc = self.class_enclosing_module(handle)?;
+        if enc == self.module.name {
+            return None;
+        }
+        let paths: Vec<&str> = self
+            .module
+            .instances
+            .iter()
+            .filter(|i| i.def_name == enc)
+            .map(|i| i.path.as_str())
+            .collect();
+        if let [only] = paths[..] {
+            return Some(only.to_string());
+        }
+        let birth = self.heap.get(handle)?.as_ref()?.creation_scope.as_str();
+        let birth = self.instance_relative_scope(birth);
+        paths
+            .into_iter()
+            .filter(|p| birth == *p || birth.strip_prefix(*p).is_some_and(|r| r.starts_with('.')))
+            .max_by_key(|p| p.len())
+            .map(str::to_string)
+    }
+
+    /// `inst.name` while a method of a class declared inside a module runs
+    /// in instance `inst` (see `modclass_depth`); None otherwise.
+    fn modclass_scoped(&self, name: &str) -> Option<String> {
+        if self.modclass_depth.get() == 0 {
+            return None;
+        }
+        let inst = self.activation_scope.borrow();
+        let inst = inst.as_deref().filter(|i| !i.is_empty())?;
+        Some(format!("{}.{}", inst, name))
+    }
+
+    /// Enter the collections instance `inst` declares into the innermost
+    /// rename frame as `name -> inst.name`, ahead of the frame's formals and
+    /// locals (they shadow them), except names the object's class declares.
+    fn modclass_rename_frame(&mut self, handle: usize, cname: &str, inst: &str) {
+        let cached = self.modclass_colls.borrow().get(inst).cloned();
+        let names = match cached {
+            Some(n) => n,
+            None => {
+                let pre = format!("{}.", inst);
+                let m = &self.module;
+                let mut v: Vec<String> = m
+                    .arrays
+                    .keys()
+                    .chain(m.arrays_2d.keys())
+                    .chain(m.arrays_nd.keys())
+                    .chain(m.associative_arrays.keys())
+                    .chain(m.dynamic_arrays.iter())
+                    .chain(m.queue_vars.iter())
+                    .chain(m.struct_members.keys())
+                    .chain(m.instances.iter().map(|i| &i.path))
+                    .filter_map(|k| k.strip_prefix(pre.as_str()))
+                    .filter(|r| !r.contains('.') && !r.contains('['))
+                    .map(str::to_string)
+                    .collect();
+                v.sort_unstable();
+                v.dedup();
+                let n = std::rc::Rc::new(v);
+                self.modclass_colls
+                    .borrow_mut()
+                    .insert(inst.to_string(), n.clone());
+                n
+            }
+        };
+        if names.is_empty() {
+            return;
+        }
+        let props = self.class_coll_member_names(cname);
+        let own = self.heap.get(handle).and_then(|o| o.as_ref());
+        let entries: Vec<(String, String)> = names
+            .iter()
+            .filter(|n| !props.contains(*n) && !own.is_some_and(|i| i.properties.contains_key(*n)))
+            .map(|n| (n.clone(), format!("{}.{}", inst, n)))
+            .collect();
+        if let Some(frame) = self.local_dyn.last_mut() {
+            frame.splice(0..0, entries);
+        }
+    }
+
     fn class_enclosing_module_walk(&self, class_name: &str) -> Option<String> {
         let mut cur: Option<String> = Some(class_name.to_string());
         let mut hops = 0;
@@ -95335,11 +95466,16 @@ impl Simulator {
                 }
             }
         }
-        // §23.8: a bare name in a method of a class declared inside a
-        // (non-top) module resolves in the instance the method runs for (the
-        // resolve hint). Every instance shares the class body's AST nodes, so
-        // the per-node cache below would pin the first instance's variable.
-        if hier.path.len() == 1 && self.module_class_method_active() {
+        // §23.8: a name in a method of a class declared inside a (non-top)
+        // module resolves in the instance the method runs for (the resolve
+        // hint). Every instance shares the class body's AST nodes, so the
+        // per-node cache below would pin the first instance's variable.
+        if self.any_modclass()
+            && hier.root.is_none()
+            && hier.path[0].name.name != "$root"
+            && !hier.path[0].name.name.contains("::")
+            && self.module_class_method_active()
+        {
             return self.resolve_hier_name_uncached(hier);
         }
         // Per-hier cache: first call resolves and memoizes the result on the
@@ -95517,6 +95653,26 @@ impl Simulator {
             .map(|s| s.name.name.as_str())
             .collect::<Vec<_>>()
             .join(".");
+        // §8/§23.9: in a method of a class declared inside a module, a
+        // dotted name headed by an item of the object's instance (an
+        // unpacked struct, an interface or module instance) is that
+        // instance's.
+        if hier.path.len() >= 2 && self.modclass_depth.get() > 0 {
+            let inst = self.activation_scope.borrow().clone();
+            if let Some(inst) = inst.filter(|i| !i.is_empty()) {
+                let head = format!("{}.{}", inst, hier.path[0].name.name);
+                let full = format!("{}.{}", inst, raw);
+                if self.signal_name_to_id.contains_key(full.as_str())
+                    || self.signals.contains_key(&full)
+                    || self.module.struct_members.contains_key(&head)
+                    || self.instance_by_path(&head).is_some()
+                    || self.signal_name_to_id.contains_key(head.as_str())
+                    || self.module.var_decl_types.contains_key(&head)
+                {
+                    return full;
+                }
+            }
+        }
         // `a.b.c` where `a.b` carries a bit layout (a nested packed struct, or
         // an untagged union whose members share one storage): the dotted name
         // IS the leaf. Without this the suffix-scan fallback below collapses it
@@ -95659,6 +95815,12 @@ impl Simulator {
                 Some(scope) => {
                     let scoped = format!("{}.{}", scope, raw);
                     if self.signal_name_to_id.contains_key(scoped.as_str()) {
+                        return scoped;
+                    }
+                    // §23.9: the scope's own unpacked array / queue / assoc
+                    // array (kept out of the signal table) shadows a
+                    // same-named one of the top module.
+                    if self.modclass_depth.get() > 0 && self.unit_scope_decl_exists(&scoped) {
                         return scoped;
                     }
                     // An input-port net of this instance, left out as
@@ -129006,9 +129168,31 @@ impl Simulator {
         }
     }
 
+    /// Is any class declared inside a module other than the top (computed
+    /// once)?
+    #[inline]
+    fn any_modclass(&self) -> bool {
+        match self.has_modclass.get() {
+            Some(b) => b,
+            None => {
+                let top = self.module.name.as_str();
+                let b = self
+                    .module
+                    .classes
+                    .values()
+                    .any(|c| c.declaring_module.as_deref().is_some_and(|m| m != top));
+                self.has_modclass.set(Some(b));
+                b
+            }
+        }
+    }
+
     /// Is a method of a class declared inside a non-top module running? Its
     /// bare names resolve per instance (§23.8).
     fn module_class_method_active(&self) -> bool {
+        if !self.any_modclass() {
+            return false;
+        }
         let Some(Some(ctx)) = self.class_context_stack.last() else {
             return false;
         };
@@ -141276,6 +141460,17 @@ impl Simulator {
             self.method_local_base.pop();
             self.current_spec = c.saved_spec;
         }
+        if c.modclass.take().is_some() {
+            self.modclass_depth.set(self.modclass_depth.get() - 1);
+            *self.activation_scope.borrow_mut() = Some(
+                self.task_cleanup
+                    .iter()
+                    .rev()
+                    .find_map(|t| t.modclass.clone())
+                    .or_else(|| self.process_scope_hint.get(&self.current_pid).cloned())
+                    .unwrap_or_default(),
+            );
+        }
         self.ref_binding_stack.pop();
         self.ref_alias_stack.pop();
         self.ref_identity_stack.pop();
@@ -142436,6 +142631,7 @@ impl Simulator {
             pushed_method_this: false,
             saved_spec: None,
             formal_metadata,
+            modclass: None,
         }
     }
 
@@ -142482,6 +142678,22 @@ impl Simulator {
             .push(self.local_stack.len().saturating_sub(1));
         if let Some(spec) = self.task_method_spec(handle_opt, &mclass) {
             self.current_spec = Some(spec);
+        }
+        // §8/§23.9: see `modclass_depth`.
+        if let Some(h) = handle_opt
+            && self.any_modclass()
+            && let Some(inst) = self.modclass_instance(h)
+        {
+            self.modclass_rename_frame(h, &mclass, &inst);
+            self.modclass_depth.set(self.modclass_depth.get() + 1);
+            *self.activation_scope.borrow_mut() = Some(inst.clone());
+            // The resolve hint too, kept across a suspend (`frame_scope_hint`).
+            if cleanup.frame_scope_hint.is_none() {
+                cleanup.prev_hint = self.name_resolve_hint.borrow().clone();
+            }
+            *self.name_resolve_hint.borrow_mut() = Some(inst.clone());
+            cleanup.frame_scope_hint = Some(inst.clone());
+            cleanup.modclass = Some(inst);
         }
     }
 
@@ -160556,13 +160768,15 @@ impl Simulator {
                 // tries `current_scope` first, then the hint), so a proxy
                 // object built inside a bound module finds its binder's
                 // host signals even when the call comes from the top level.
+                // §8/§23.9: an object of a class declared inside a module
+                // runs in its instance (`modclass_instance`), whichever scope
+                // made the call.
+                let modclass_inst = if self.any_modclass() {
+                    self.modclass_instance(handle)
+                } else {
+                    None
+                };
                 let saved_resolve_hint = {
-                    let birth = self
-                        .heap
-                        .get(handle)
-                        .and_then(|o| o.as_ref())
-                        .map(|i| i.creation_scope.as_str())
-                        .unwrap_or_default();
                     // `creation_scope` is kept in `%m` form (`tb.u_w`, top
                     // module first) for the method's own `%m`; the
                     // resolution hint must be instance-relative (`u_w`,
@@ -160570,25 +160784,16 @@ impl Simulator {
                     // form made every hinted lookup miss, so a method of an
                     // object built inside `u_w` could not read `u_w`'s own
                     // variables or reach its sibling instances (issue #155).
-                    let mut birth = self.instance_relative_scope(birth);
-                    if birth.is_empty() {
-                        // No usable birth scope (the object was built at the
-                        // top or in a package): a class declared INSIDE a
-                        // module resolves bare and sibling names in that
-                        // module; when the module has exactly one instance
-                        // its path is the scope.
-                        if let Some(enc) = self.class_enclosing_module(handle) {
-                            let mut paths = self
-                                .module
-                                .instances
-                                .iter()
-                                .filter(|i| i.def_name == enc)
-                                .map(|i| i.path.as_str());
-                            if let (Some(only), None) = (paths.next(), paths.next()) {
-                                birth = only.to_string();
-                            }
-                        }
-                    }
+                    let birth = match &modclass_inst {
+                        Some(inst) => inst.clone(),
+                        None => self.instance_relative_scope(
+                            self.heap
+                                .get(handle)
+                                .and_then(|o| o.as_ref())
+                                .map(|i| i.creation_scope.as_str())
+                                .unwrap_or_default(),
+                        ),
+                    };
                     if birth.is_empty() {
                         None
                     } else {
@@ -160598,6 +160803,14 @@ impl Simulator {
                     }
                 };
                 self.commit_formal_dyn(formal_dyn);
+                // Its collections (kept out of the name resolution above)
+                // through the call's rename frame, under every formal and
+                // local of the body.
+                let saved_modclass = modclass_inst.map(|inst| {
+                    self.modclass_rename_frame(handle, &cname, &inst);
+                    self.modclass_depth.set(self.modclass_depth.get() + 1);
+                    self.activation_scope.replace(Some(inst))
+                });
                 self.push_local_frame_typed(locals, frame_types);
                 self.open_decl_shadow_frame();
                 // Record the `local_stack` depth BEFORE this method's own
@@ -160770,6 +160983,10 @@ impl Simulator {
                 self.restore_spec_pooled(saved_spec);
                 if let Some(prev) = saved_resolve_hint {
                     *self.name_resolve_hint.borrow_mut() = prev;
+                }
+                if let Some(prev) = saved_modclass {
+                    self.modclass_depth.set(self.modclass_depth.get() - 1);
+                    *self.activation_scope.borrow_mut() = prev;
                 }
                 self.local_iface_aliases.pop();
                 if self.parked_from_exec {

@@ -732,3 +732,5 @@ mod nonstatic_method_class_scope_fatal;
 
 #[path = "classes/struct_class_prop_patterns.rs"]
 mod struct_class_prop_patterns;
+#[path = "classes/class_in_module_instance.rs"]
+mod class_in_module_instance;
