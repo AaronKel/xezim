@@ -125,7 +125,6 @@ endmodule
 /// §6.22.1: two typedefs of the same queue type (`int[$]`, one through a
 /// class type parameter) are the same specialization argument.
 #[test]
-#[ignore = "typedefs of unpacked array types are keyed by name, not by type"]
 fn spec_typedef_queue_args_match() {
     const SRC: &str = r#"
 class db #(type T = int);
@@ -215,5 +214,27 @@ fn spec_value_args_by_value_siblings() {
         t_lines(include_str!("spec_value_args_by_value.sv")),
         expected
     );
+}
+
+/// §6.22.1 siblings: typedefs of the same unpacked array type — a queue,
+/// a dynamic array, a `[string]` associative array, `[3]` and `[0:2]`,
+/// a typedef of a typedef, a package typedef, `int signed` — are one type
+/// argument; `[2:0]`, `bit [31:0]` and `byte` elements are other types.
+#[test]
+fn spec_typedef_type_args_siblings() {
+    let expected = [
+        "T|q2|1",
+        "T|q3|1",
+        "T|pkg|1",
+        "T|isq|1",
+        "T|bq|0",
+        "T|byq|0",
+        "T|cls|1",
+        "T|cls_b|0",
+        "T|dyn|5 5",
+        "T|fix|7 0",
+        "T|aa|9",
+    ];
+    assert_eq!(t_lines(include_str!("spec_typedef_type_args.sv")), expected);
 }
 

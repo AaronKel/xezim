@@ -7635,6 +7635,14 @@ pub struct Simulator {
     /// The leaf name of every design parameter key (`LP` of `tb.LP`), built
     /// on first use: the gate before a scoped parameter lookup.
     param_leaf_names: std::cell::OnceCell<HashSet<String>>,
+    /// §6.22.1: canonical type text of each design-level unpacked typedef
+    /// (`int[$]`) -> the typedef that stands for that type in
+    /// specialization keys (built on first use; see `unpacked_typedef_rep`).
+    unpacked_typedef_reps: std::cell::OnceCell<HashMap<String, String>>,
+    /// Every typedef name (design or class scope, bare and qualified) that
+    /// carries unpacked dimensions or aliases one that does: the cheap gate
+    /// of `unpacked_typedef_rep`.
+    unpacked_typedef_names: std::cell::OnceCell<HashSet<String>>,
     /// Reused buffer for `frame_leaf_key_of`'s marker probe.
     marker_key_scratch: String,
     /// See `lvalue_root_is_unpacked_struct_prop`.
@@ -13135,6 +13143,8 @@ impl Simulator {
             vif_key_scratch: std::cell::RefCell::new(String::new()),
             spec_frag_fold_cache: RefCell::new(HashMap::default()),
             param_leaf_names: std::cell::OnceCell::new(),
+            unpacked_typedef_reps: std::cell::OnceCell::new(),
+            unpacked_typedef_names: std::cell::OnceCell::new(),
             marker_key_scratch: String::new(),
             unpacked_struct_prop_names: std::cell::OnceCell::new(),
             struct_root_names: HashSet::default(),
@@ -127860,6 +127870,10 @@ impl Simulator {
             } else {
                 inner_base.to_string()
             }
+        } else if let Some(t) = self.unpacked_typedef_rep(frag_norm) {
+            // §6.22.1: typedefs of the same unpacked array type are one type
+            // argument.
+            t
         } else if let Some(t) = self.typedef_alias_frag(frag_norm) {
             // §6.18: a typedef stands for its target type.
             self.canonicalize_spec_frag(&t)
@@ -147362,6 +147376,258 @@ impl Simulator {
             }
         }
         None
+    }
+
+    /// The unpacked dimensions a typedef `name` carries, in the enclosing
+    /// class context (its class-local typedefs first) or the design.
+    fn typedef_unpacked_dims_of(
+        &self,
+        name: &str,
+    ) -> Option<&Vec<crate::ast::types::UnpackedDimension>> {
+        if let Some(Some(ctx)) = self.class_context_stack.last() {
+            let mut cur = Some(ctx.as_str());
+            let mut hops = 0;
+            while let Some(cn) = cur {
+                hops += 1;
+                let Some(cd) = self.module.classes.get(cn).filter(|_| hops < 64) else {
+                    break;
+                };
+                if let Some(d) = cd.typedef_unpacked_dims.get(name) {
+                    return Some(d);
+                }
+                if cd.typedef_targets.contains_key(name) {
+                    return None;
+                }
+                cur = cd.extends.as_deref();
+            }
+        }
+        self.module.typedef_unpacked_dims.get(name)
+    }
+
+    /// §6.22.1: the canonical text of the type a typedef `name` stands for
+    /// when it carries unpacked dimensions (`typedef T tq_t[$]` in
+    /// `mon#(int)` -> `int[$]`); None for any other name. Two typedefs of
+    /// MATCHING types — same element type, same kind of array, the same
+    /// bounds for a fixed-size one — give the same text.
+    fn unpacked_typedef_type_key(&self, name: &str, depth: u32) -> Option<String> {
+        use crate::ast::types::UnpackedDimension as U;
+        if depth > 8 {
+            return None;
+        }
+        // `pkg::td`: a package typedef is tabled under its bare name.
+        let name = match name.rsplit_once("::") {
+            Some((pkg, leaf))
+                if self.module.packages.contains(pkg)
+                    && self.typedef_unpacked_dims_of(name).is_none() =>
+            {
+                leaf
+            }
+            _ => name,
+        };
+        let Some(dims) = self
+            .typedef_unpacked_dims_of(name)
+            .filter(|d| !d.is_empty())
+        else {
+            // A typedef of an unpacked typedef (`typedef intq_t q3_t;`), or of
+            // a type parameter bound to one, names the same type.
+            let DataType::TypeReference {
+                name: tn,
+                dimensions,
+                type_args,
+                ..
+            } = self.lookup_typedef_target(name)?
+            else {
+                return None;
+            };
+            if !dimensions.is_empty() || !type_args.is_empty() {
+                return None;
+            }
+            let mut target = if tn.has_scope() {
+                format!(
+                    "{}::{}",
+                    tn.scopes
+                        .iter()
+                        .map(|s| s.name.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                    tn.name.name
+                )
+            } else {
+                tn.name.name.clone()
+            };
+            if let Some(b) = self.resolve_type_param_binding(&target) {
+                target = b;
+            }
+            if target == name {
+                return None;
+            }
+            return self.unpacked_typedef_type_key(&target, depth + 1);
+        };
+        let elem = self.lookup_typedef_target(name)?;
+        let mut out = self.type_key_of_elem(&elem, depth)?;
+        let params = &self.module.parameters;
+        let ev = |e: &Expression| super::elaborate::const_eval_i64_with_params(e, Some(params));
+        for d in dims {
+            match d {
+                U::Queue { max_size: None, .. } => out.push_str("[$]"),
+                U::Queue {
+                    max_size: Some(m), ..
+                } => out.push_str(&format!("[$:{}]", ev(m)?)),
+                U::Unsized(_) => out.push_str("[]"),
+                U::Associative {
+                    data_type: None, ..
+                } => out.push_str("[*]"),
+                U::Associative {
+                    data_type: Some(k), ..
+                } => out.push_str(&format!("[{}]", self.type_key_of_elem(k, depth)?)),
+                U::Range { left, right, .. } => {
+                    out.push_str(&format!("[{}:{}]", ev(left)?, ev(right)?))
+                }
+                U::Expression { expr, .. } => out.push_str(&format!("[0:{}]", ev(expr)? - 1)),
+            }
+        }
+        Some(out)
+    }
+
+    /// The canonical text of an element (or key) type for
+    /// `unpacked_typedef_type_key`: a type parameter follows its binding, a
+    /// typedef its target; built-in types render with their signing.
+    fn type_key_of_elem(&self, dt: &DataType, depth: u32) -> Option<String> {
+        use crate::ast::types::{IntegerAtomType, Signing};
+        match dt {
+            DataType::TypeReference {
+                name,
+                dimensions,
+                type_args,
+                ..
+            } if dimensions.is_empty() && type_args.is_empty() && !name.has_scope() => {
+                let mut n = name.name.name.clone();
+                if let Some(b) = self.resolve_type_param_binding(&n) {
+                    n = b;
+                }
+                if let Some(k) = self.unpacked_typedef_type_key(&n, depth + 1) {
+                    return Some(k);
+                }
+                if !self.module.classes.contains_key(&n)
+                    && let Some(t) = self.lookup_typedef_target(&n)
+                    && !matches!(&t, DataType::TypeReference { name: tn, .. } if tn.name.name == n)
+                    && depth < 8
+                {
+                    return self.type_key_of_elem(&t, depth + 1);
+                }
+                Some(n)
+            }
+            DataType::IntegerAtom { kind, signing, .. } => {
+                let base = crate::elaborate::data_type_to_spec_fragment(dt)?;
+                // `int signed` is `int`; `int unsigned` is another type.
+                let default_signed = !matches!(kind, IntegerAtomType::Time);
+                Some(match signing {
+                    Some(Signing::Unsigned) if default_signed => format!("{} unsigned", base),
+                    Some(Signing::Signed) if !default_signed => format!("{} signed", base),
+                    _ => base,
+                })
+            }
+            _ => crate::elaborate::data_type_to_spec_fragment(dt),
+        }
+    }
+
+    /// §6.22.1: the typedef that stands, in specialization keys, for the
+    /// unpacked array type the typedef `name` names: the first (by name)
+    /// design-level typedef of a matching type. `db#(intq_t)` and
+    /// `db#(tq_t)` (`typedef T tq_t[$]` inside `mon#(int)`) are one
+    /// specialization. None when `name` is no unpacked typedef or no
+    /// design-level typedef matches it.
+    fn unpacked_typedef_rep(&self, name: &str) -> Option<String> {
+        if self.module.typedef_unpacked_dims.is_empty() {
+            return None;
+        }
+        let names = self.unpacked_typedef_names.get_or_init(|| {
+            let mut set: HashSet<String> = HashSet::default();
+            let mut add = |n: &str, set: &mut HashSet<String>| {
+                set.insert(n.to_string());
+                if let Some((_, leaf)) = n.rsplit_once("::") {
+                    set.insert(leaf.to_string());
+                }
+            };
+            for n in self.module.typedef_unpacked_dims.keys() {
+                add(n, &mut set);
+            }
+            for cd in self.module.classes.values() {
+                for n in cd.typedef_unpacked_dims.keys() {
+                    add(n, &mut set);
+                }
+            }
+            // Aliases of those (`typedef intq_t q3_t;`), to a fixed point.
+            let aliases: Vec<(&String, &String)> = self
+                .module
+                .typedef_types
+                .iter()
+                .chain(
+                    self.module
+                        .classes
+                        .values()
+                        .flat_map(|c| c.typedef_targets.iter()),
+                )
+                .filter_map(|(n, dt)| match dt {
+                    DataType::TypeReference {
+                        name: tn,
+                        dimensions,
+                        type_args,
+                        ..
+                    } if dimensions.is_empty() && type_args.is_empty() => Some((n, &tn.name.name)),
+                    _ => None,
+                })
+                .collect();
+            loop {
+                let before = set.len();
+                for (n, t) in &aliases {
+                    if set.contains(t.as_str()) && !set.contains(n.as_str()) {
+                        add(n, &mut set);
+                    }
+                }
+                if set.len() == before {
+                    break;
+                }
+            }
+            set
+        });
+        if !names.contains(name)
+            && !name
+                .rsplit_once("::")
+                .is_some_and(|(_, leaf)| names.contains(leaf))
+        {
+            return None;
+        }
+        let key = self.unpacked_typedef_type_key(name, 0)?;
+        let reps = self.unpacked_typedef_reps.get_or_init(|| {
+            // Typedefs declared at design level (module, package, $unit),
+            // keyed by their type outside any class context.
+            let mut names: Vec<&String> = self
+                .module
+                .typedef_unpacked_dims
+                .keys()
+                .filter(|n| {
+                    // Not a class's own typedef (bare, or `cls::td`).
+                    !self
+                        .module
+                        .classes
+                        .values()
+                        .any(|c| c.typedef_targets.contains_key(n.as_str()))
+                        && !n
+                            .rsplit_once("::")
+                            .is_some_and(|(h, _)| self.module.classes.contains_key(h))
+                })
+                .collect();
+            names.sort_by_key(|n| (n.contains("::"), n.as_str()));
+            let mut m: HashMap<String, String> = HashMap::default();
+            for n in names {
+                if let Some(k) = self.unpacked_typedef_type_key(n, 0) {
+                    m.entry(k).or_insert_with(|| n.clone());
+                }
+            }
+            m
+        });
+        reps.get(&key).cloned()
     }
 
     /// Remove whitespace outside of double-quoted string literals so that
