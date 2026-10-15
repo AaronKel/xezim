@@ -146190,6 +146190,23 @@ impl Simulator {
         if let Some(v) = self.resolve_value_param_in_current(name) {
             return Some(v);
         }
+        // §8.25/§6.20.2: a STATIC method of a class that is not itself
+        // parameterized but extends a specialization (`class d extends
+        // holder #(int, "ext", 9)`) has no instance and no active
+        // specialization; a parameter it inherits takes the value that
+        // extends clause binds, not the base's default.
+        if self.current_spec.is_none()
+            && self.class_member_names().params.contains(name)
+            && let Some(Some(ctx)) = self.class_context_stack.last()
+            && let Some(spec) = self.inherited_param_spec(&ctx.clone())
+        {
+            self.current_spec = Some(spec);
+            let v = self.resolve_value_param_in_current(name);
+            self.current_spec = None;
+            if v.is_some() {
+                return v;
+            }
+        }
         // Not declared by the leaf/callee spec — walk the caller chain,
         // innermost first (nearest caller wins).
         let chain: Vec<(String, String)> = self.spec_scope_stack.clone();
