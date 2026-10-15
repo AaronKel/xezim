@@ -356,6 +356,16 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   comparison such as `s[0] != "["` is right in hot methods; this also fixes
   the UVM 1.2 `print_topology()` table, which came out empty when its
   printer methods were compiled (§6.16).
+* Dimensions, packed widths, port widths, parameter defaults, generate
+  bounds and size casts written with a class-scoped constant (`cls::N`,
+  `pkg::cls::N`, `cls#(4)::N`, or one inherited from a base class) get
+  their declared size; such arrays used to elaborate with no elements, so
+  `foreach` and `randomize()` did nothing. Method-local arrays sized by a
+  parameter size correctly too (§8.23, §8.25.1). (#316, reported by urbanij)
+* `@(cb iff cond)` judges `cond` after the clocking block samples, so it
+  sees this edge's clockvars rather than the previous edge's, and a
+  clocking wait reached in the same slot as its edge honours its `iff`
+  (§14.13). (#317, reported by urbanij)
 
 **Performance**
 
