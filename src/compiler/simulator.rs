@@ -9250,6 +9250,170 @@ impl Simulator {
         }
     }
 
+    /// §6.18/§7.2.1: a struct MEMBER declared with a collection typedef
+    /// (`typedef addr_t aq_t[$]; struct { aq_t al; } s;`) is the same
+    /// dynamic member as `addr_t al[$]`. Every struct-collection path reads
+    /// a member's kind from its DECLARATOR dimensions, so rewrite such
+    /// members, once, into that direct form in every struct type the
+    /// runtime resolves: module/package typedefs, variable types, and the
+    /// class property and local typedef types. Otherwise the member was one
+    /// element-wide scalar: `aa[k].al.size()` read 0, a pattern item
+    /// `al: {1, 2}` kept its last element, and `%p` printed a number.
+    fn inline_struct_member_coll_typedefs(module: &mut ElaboratedModule) {
+        if module.typedef_unpacked_dims.is_empty()
+            && module
+                .classes
+                .values()
+                .all(|cd| cd.typedef_unpacked_dims.is_empty())
+        {
+            return;
+        }
+        let mut owner_of: HashMap<String, String> = HashMap::default();
+        {
+            let mut classes: Vec<&String> = module.classes.keys().collect();
+            classes.sort();
+            for cn in classes {
+                for tn in module.classes[cn].typedef_targets.keys() {
+                    owner_of.entry(tn.clone()).or_insert_with(|| cn.clone());
+                }
+            }
+        }
+        let mut keys: Vec<String> = module.typedef_types.keys().cloned().collect();
+        keys.sort();
+        for k in keys {
+            // A class-scoped key (`C::t`, `P::C::t`) resolves from C.
+            if !matches!(module.typedef_types.get(&k), Some(DataType::Struct(su)) if !su.packed) {
+                continue;
+            }
+            // A class-local typedef hoisted under its bare name resolves
+            // from its class.
+            let start = match owner_of.get(k.as_str()) {
+                Some(c) => c.as_str(),
+                None => k.rsplit_once("::").map_or("", |(scope, _)| {
+                    scope.rsplit_once("::").map_or(scope, |(_, c)| c)
+                }),
+            };
+            if let Some(dt) = module.typedef_types.get(&k)
+                && let Some(nd) = Self::inline_member_coll_dt(module, start, dt, 0)
+            {
+                module.typedef_types.insert(k, nd);
+            }
+        }
+        let mut keys: Vec<String> = module.var_decl_types.keys().cloned().collect();
+        keys.sort();
+        for k in keys {
+            if let Some(dt) = module.var_decl_types.get(&k)
+                && let Some(nd) = Self::inline_member_coll_dt(module, "", dt, 0)
+            {
+                module.var_decl_types.insert(k, nd);
+            }
+        }
+        let mut classes: Vec<String> = module.classes.keys().cloned().collect();
+        classes.sort();
+        for cn in classes {
+            let Some(cd) = module.classes.get(&cn) else {
+                continue;
+            };
+            let props: Vec<(String, DataType)> = cd
+                .property_types
+                .iter()
+                .filter_map(|(n, dt)| {
+                    Self::inline_member_coll_dt(module, &cn, dt, 0).map(|d| (n.clone(), d))
+                })
+                .collect();
+            let tds: Vec<(String, DataType)> = cd
+                .typedef_targets
+                .iter()
+                .filter_map(|(n, dt)| {
+                    Self::inline_member_coll_dt(module, &cn, dt, 0).map(|d| (n.clone(), d))
+                })
+                .collect();
+            if props.is_empty() && tds.is_empty() {
+                continue;
+            }
+            if let Some(cd) = module.classes.get_mut(&cn).map(std::sync::Arc::make_mut) {
+                cd.property_types.extend(props);
+                cd.typedef_targets.extend(tds);
+            }
+        }
+    }
+
+    /// The rewrite [`inline_struct_member_coll_typedefs`] makes to one type:
+    /// `Some` with the members of an unpacked struct (nested inline structs
+    /// included) that name a collection typedef spelled directly, `None`
+    /// when nothing changes.
+    fn inline_member_coll_dt(
+        module: &ElaboratedModule,
+        start: &str,
+        dt: &DataType,
+        depth: usize,
+    ) -> Option<DataType> {
+        let DataType::Struct(su) = dt else {
+            return None;
+        };
+        if su.packed || depth > 8 {
+            return None;
+        }
+        let mut out: Option<crate::ast::types::StructUnionType> = None;
+        for (i, m) in su.members.iter().enumerate() {
+            let mut nm: Option<crate::ast::types::StructMember> = None;
+            if let Some(nd) = Self::inline_member_coll_dt(module, start, &m.data_type, depth + 1) {
+                let mut c = m.clone();
+                c.data_type = nd;
+                nm = Some(c);
+            } else if let DataType::TypeReference {
+                name, dimensions, ..
+            } = &m.data_type
+                && dimensions.is_empty()
+                && m.declarators.iter().all(|d| d.dimensions.is_empty())
+            {
+                let from = name.scopes.last().map_or(start, |s| s.name.name.as_str());
+                if let Some(dims) = Self::typedef_dims_via_tables(module, from, &name.name.name)
+                    && Self::coll_kind_of(&dims).is_some()
+                    && let Some(elem) = Self::typedef_elem_via_tables(module, from, name)
+                {
+                    let mut c = m.clone();
+                    c.data_type = elem;
+                    for d in &mut c.declarators {
+                        d.dimensions = dims.clone();
+                    }
+                    nm = Some(c);
+                }
+            }
+            if let Some(c) = nm {
+                out.get_or_insert_with(|| su.clone()).members[i] = c;
+            }
+        }
+        out.map(DataType::Struct)
+    }
+
+    /// The ELEMENT type a dimensioned typedef names (its `typedef_types` /
+    /// class `typedef_targets` entry), resolved the way
+    /// [`typedef_dims_via_tables`] resolves the dimensions.
+    fn typedef_elem_via_tables(
+        module: &ElaboratedModule,
+        start_class: &str,
+        tn: &crate::ast::types::TypeName,
+    ) -> Option<DataType> {
+        let bare = tn.name.name.as_str();
+        let mut cur: Option<&str> = Some(start_class);
+        while let Some(cn) = cur {
+            let Some(cd) = module.classes.get(cn) else {
+                break;
+            };
+            if cd.typedef_unpacked_dims.contains_key(bare) {
+                return cd.typedef_targets.get(bare).cloned();
+            }
+            cur = cd.extends.as_deref();
+        }
+        if !tn.scopes.is_empty()
+            && let Some(dt) = module.typedef_types.get(&tn.qualified())
+        {
+            return Some(dt.clone());
+        }
+        module.typedef_types.get(bare).cloned()
+    }
+
     /// §6.18: the dimensioned typedefs the locals of `body` are declared
     /// with, keyed by the type's source spelling (see
     /// `bytecode::type_name_key`). A qualified name resolves from its
@@ -10588,6 +10752,9 @@ impl Simulator {
         // types into the module type tables so a rand property declared with
         // one gets its enum-member domain / packed bit layout.
         Self::hoist_class_local_typedefs(&mut module);
+        // §6.18/§7.2.1: struct members typed by a collection typedef take
+        // the direct `elem m[$]` form every struct-collection path reads.
+        Self::inline_struct_member_coll_typedefs(&mut module);
         // §6.18: a property typed by a module/package-level (or inherited)
         // collection typedef must be classified as a queue/assoc/array member
         // — elaborate_class only saw the class's OWN local typedefs.
