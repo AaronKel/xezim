@@ -151,3 +151,5 @@ mod deferred_retsnap_slow_path;
 mod assoc_locator_methods;
 #[path = "collections/struct_dynamic_members.rs"]
 mod struct_dynamic_members;
+#[path = "collections/typedef_and_fixed_collections.rs"]
+mod typedef_and_fixed_collections;
