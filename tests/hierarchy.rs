@@ -245,3 +245,5 @@ mod unit_scope_library_subroutine;
 mod unobserved_port_elision;
 #[path = "hierarchy/vif_packed_array_elem_nba.rs"]
 mod vif_packed_array_elem_nba;
+#[path = "hierarchy/named_block_hier_names.rs"]
+mod named_block_hier_names;

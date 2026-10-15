@@ -10867,6 +10867,8 @@ impl Simulator {
                         &mut n,
                         "b",
                         0,
+                        "",
+                        &mut Vec::new(),
                     ) {
                         renamed.push((k, st));
                     }
@@ -10899,6 +10901,8 @@ impl Simulator {
                         &mut n,
                         "b",
                         1,
+                        key,
+                        &mut Vec::new(),
                     ) {
                         tdone.push((key.clone(), st));
                     }
@@ -10920,6 +10924,8 @@ impl Simulator {
                         &mut n,
                         "b",
                         1,
+                        key,
+                        &mut Vec::new(),
                     ) {
                         fdone.push((key.clone(), st));
                     }
@@ -19162,6 +19168,7 @@ impl Simulator {
             .into_iter()
             .map(|p| {
                 let mut ib = p.materialize();
+                let scope = ib.scope.clone();
                 Self::rename_nested_shadowed(
                     &mut ib.stmt,
                     &claims,
@@ -19169,6 +19176,8 @@ impl Simulator {
                     &mut shadow_n,
                     "p",
                     1,
+                    &scope,
+                    &mut Vec::new(),
                 );
                 ib
             })
@@ -55056,8 +55065,10 @@ impl Simulator {
     /// 0 of `stmt` that shadow a name `claims` (a module item) or a local of
     /// an enclosing block (`enclosing`). `n` numbers the renamed blocks,
     /// `tag` prefixes that number in the fresh names. In an instance's
-    /// process (tag `p`) locals of every kind are renamed, and a labeled
-    /// block's too.
+    /// process (tag `p`) locals of every kind are renamed. A named block's
+    /// locals are stored under their hierarchical name — `scope` (the
+    /// instance path, or the subroutine) and the enclosing block labels
+    /// (`labels`) — so `inst.blk.var` still reaches them (§23.6).
     /// True when something was renamed.
     fn rename_nested_shadowed(
         stmt: &mut Statement,
@@ -55066,14 +55077,22 @@ impl Simulator {
         n: &mut usize,
         tag: &str,
         depth: usize,
+        scope: &str,
+        labels: &mut Vec<String>,
     ) -> bool {
         let unlabeled = tag == "p";
         let mut any = false;
-        let mut walk = |s: &mut Statement, enc: &mut Vec<String>, any: &mut bool| {
-            *any |= Self::rename_nested_shadowed(s, claims, enc, n, tag, depth + 1);
-        };
+        let mut walk =
+            |s: &mut Statement, enc: &mut Vec<String>, labels: &mut Vec<String>, any: &mut bool| {
+                *any |=
+                    Self::rename_nested_shadowed(s, claims, enc, n, tag, depth + 1, scope, labels);
+            };
         match &mut stmt.kind {
-            StatementKind::SeqBlock { stmts, .. } => {
+            StatementKind::SeqBlock { stmts, name } => {
+                let label_mark = labels.len();
+                if let Some(l) = name {
+                    labels.push(l.name.clone());
+                }
                 let mark = enclosing.len();
                 let mut mine: Vec<String> = Vec::new();
                 for c in stmts.iter() {
@@ -55090,22 +55109,27 @@ impl Simulator {
                     }
                 }
                 for c in stmts.iter_mut() {
-                    walk(c, enclosing, &mut any);
+                    walk(c, enclosing, labels, &mut any);
                 }
                 enclosing.truncate(mark);
+                let labeled = labels.len() > label_mark;
                 if depth > 0 && !mine.is_empty() {
                     *n += 1;
                     let taken: std::collections::HashSet<String> = mine.into_iter().collect();
-                    // A labeled block's locals take `label.name`, which two
-                    // instances of a module would share: in an instance's
-                    // process (`unlabeled`) they are salted instead.
-                    let label = if unlabeled {
-                        match &mut stmt.kind {
-                            StatementKind::SeqBlock { name, .. } => name.take(),
-                            _ => None,
+                    // §23.6: a named block's locals stay reachable by their
+                    // hierarchical name: they are stored under it — the
+                    // named-block path, after the instance path in an
+                    // instance's process (unique per instance) — and an
+                    // unnamed block's are salted.
+                    let label = match &mut stmt.kind {
+                        StatementKind::SeqBlock { name: Some(l), .. } if labeled => {
+                            let mut path = labels.join(".");
+                            if !scope.is_empty() {
+                                path = format!("{}.{}", scope, path);
+                            }
+                            Some(std::mem::replace(&mut l.name, path))
                         }
-                    } else {
-                        None
+                        _ => None,
                     };
                     if let Some(new) = super::elaborate::rename_process_shadowed_locals(
                         stmt,
@@ -55115,30 +55139,37 @@ impl Simulator {
                         *stmt = new;
                         any = true;
                     }
-                    if let (Some(l), StatementKind::SeqBlock { name, .. }) = (label, &mut stmt.kind)
+                    if let (Some(l), StatementKind::SeqBlock { name: Some(n), .. }) =
+                        (label, &mut stmt.kind)
                     {
-                        *name = Some(l);
+                        n.name = l;
                     }
                 }
+                labels.truncate(label_mark);
             }
-            StatementKind::ParBlock { stmts, .. } => {
-                for c in stmts.iter_mut() {
-                    walk(c, enclosing, &mut any);
+            StatementKind::ParBlock { stmts, name, .. } => {
+                let label_mark = labels.len();
+                if let Some(l) = name {
+                    labels.push(l.name.clone());
                 }
+                for c in stmts.iter_mut() {
+                    walk(c, enclosing, labels, &mut any);
+                }
+                labels.truncate(label_mark);
             }
             StatementKind::If {
                 then_stmt,
                 else_stmt,
                 ..
             } => {
-                walk(then_stmt, enclosing, &mut any);
+                walk(then_stmt, enclosing, labels, &mut any);
                 if let Some(e) = else_stmt {
-                    walk(e, enclosing, &mut any);
+                    walk(e, enclosing, labels, &mut any);
                 }
             }
             StatementKind::Case { items, .. } => {
                 for it in items.iter_mut() {
-                    walk(&mut it.stmt, enclosing, &mut any);
+                    walk(&mut it.stmt, enclosing, labels, &mut any);
                 }
             }
             StatementKind::For { body, .. }
@@ -55146,9 +55177,9 @@ impl Simulator {
             | StatementKind::DoWhile { body, .. }
             | StatementKind::Repeat { body, .. }
             | StatementKind::Forever { body }
-            | StatementKind::Foreach { body, .. } => walk(body, enclosing, &mut any),
+            | StatementKind::Foreach { body, .. } => walk(body, enclosing, labels, &mut any),
             StatementKind::TimingControl { stmt: s, .. } | StatementKind::Wait { stmt: s, .. } => {
-                walk(s, enclosing, &mut any)
+                walk(s, enclosing, labels, &mut any)
             }
             _ => {}
         }
