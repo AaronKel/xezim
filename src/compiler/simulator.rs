@@ -133912,6 +133912,20 @@ impl Simulator {
                         }
                     }
                 }
+                // §23.6/§23.8: a FULL hierarchical path rooted at the top
+                // module (`tb.u.f()`, `$root.tb.u.f()`) written in a class
+                // method. Instance subroutines are registered without the top
+                // name, so neither join above matched and the call read 0 /
+                // an empty string (issue #320).
+                if joined.starts_with("$root.")
+                    || joined
+                        .strip_prefix(self.module.name.as_str())
+                        .is_some_and(|r| r.starts_with('.'))
+                {
+                    if let Some(full) = self.scoped_subroutine_key(&joined) {
+                        return self.call_scoped_subroutine(&full, args);
+                    }
+                }
                 // Collection builtin on the flattened receiver name (the
                 // receiver's segments plus the member are always two or more).
                 {

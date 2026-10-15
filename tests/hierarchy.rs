@@ -29,6 +29,8 @@ mod bind_through_nested_part_select;
 mod bind_upward_refs;
 #[path = "hierarchy/c910_scoped_cont_assign.rs"]
 mod c910_scoped_cont_assign;
+#[path = "hierarchy/class_method_hier_subroutine_calls.rs"]
+mod class_method_hier_subroutine_calls;
 #[path = "hierarchy/colliding_actual_child_body.rs"]
 mod colliding_actual_child_body;
 #[path = "hierarchy/defparam_upward_paths.rs"]
