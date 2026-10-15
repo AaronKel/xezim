@@ -419,6 +419,20 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   character writes, `foreach`, `$fgets`, `toupper`/`tolower`, and in
   non-ASCII source text such as `"é"` (§6.16, §5.9).
 
+* A function's value takes its declared return type (§13.4.1): a real
+  returned from an integral function rounds (`int f(); return 7.6;` is 8), an
+  integral value returned from a `real` function is real, and a 2-state
+  return maps X/Z to 0, in every context and on every execution path,
+  including class methods, type-parameter returns and functions compiled into
+  `always` blocks. (#324, reported by Dragon-git)
+* DPI: a real passed to an integral C type converts by value, rounding half
+  away from zero, so an exported `longint` function returning `t / 1ns` hands
+  C `100`, not the bits of 100.0 (§35.5.6, §6.12.2). (#324, reported by
+  Dragon-git)
+* `$typename` of a real-valued expression, such as the time literal `1ns`, is
+  `real`, and a real in [2^63, 2^64) converts to `longint unsigned` without
+  saturating (§20.6.1, §6.12.2).
+
 **Performance**
 
 * Measured against 0.11.1 on the README workloads (cold cache, plain release
