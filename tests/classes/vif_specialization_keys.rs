@@ -100,10 +100,8 @@ fn vif_spec_keys_of_declared_objects() {
     assert_eq!(t_lines(include_str!("vif_spec_keys_declared.sv")), expected);
 }
 
-/// §8.25: value parameters match by VALUE — `P#(2+2)` is `P#(4)`. The
-/// specialization text is keyed unevaluated.
+/// §8.25: value parameters match by VALUE — `P#(2+2)` is `P#(4)`.
 #[test]
-#[ignore = "specialization args keyed as unevaluated text: P#(2+2) is not P#(4)"]
 fn spec_value_args_match_by_value() {
     const SRC: &str = r#"
 class P #(int N = 4); static int c; endclass
@@ -189,3 +187,33 @@ endmodule
     ];
     assert_eq!(t_lines(SRC), expected);
 }
+
+/// §8.25 siblings: products, shifts, unsized based and sized literals for a
+/// typed `int` parameter, named arguments, design parameters and partial
+/// argument lists match by value; an UNTYPED parameter takes a sized
+/// literal's width into its type, so `Q#(4'd4)` is not `Q#(4)`.
+#[test]
+fn spec_value_args_by_value_siblings() {
+    let expected = [
+        "T|mul|1",
+        "T|shift|1",
+        "T|paren|1",
+        "T|dec|1",
+        "T|sized|1",
+        "T|named|1",
+        "T|lp|1",
+        "T|lpx|1",
+        "T|dflt|1",
+        "T|q_sized|0",
+        "T|q_expr|1",
+        "T|r_expr|1",
+        "T|r_part|1",
+        "T|vif_mul|1",
+        "T|vif_dflt|1",
+    ];
+    assert_eq!(
+        t_lines(include_str!("spec_value_args_by_value.sv")),
+        expected
+    );
+}
+

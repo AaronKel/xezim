@@ -7628,6 +7628,13 @@ pub struct Simulator {
     hint_key_scratch: std::cell::RefCell<String>,
     /// Reused buffer for the `__vif_local__` key probes (`&self` paths).
     vif_key_scratch: std::cell::RefCell<String>,
+    /// §8.25: specialization-argument texts already folded to their value
+    /// (`2 + 2` -> `4`, `'h4` -> `4`), or None when the text is not a
+    /// constant integer expression (see `fold_const_spec_frag`).
+    spec_frag_fold_cache: RefCell<HashMap<String, Option<String>>>,
+    /// The leaf name of every design parameter key (`LP` of `tb.LP`), built
+    /// on first use: the gate before a scoped parameter lookup.
+    param_leaf_names: std::cell::OnceCell<HashSet<String>>,
     /// Reused buffer for `frame_leaf_key_of`'s marker probe.
     marker_key_scratch: String,
     /// See `lvalue_root_is_unpacked_struct_prop`.
@@ -13126,6 +13133,8 @@ impl Simulator {
             method_receiver_cache: HashMap::default(),
             hint_key_scratch: std::cell::RefCell::new(String::new()),
             vif_key_scratch: std::cell::RefCell::new(String::new()),
+            spec_frag_fold_cache: RefCell::new(HashMap::default()),
+            param_leaf_names: std::cell::OnceCell::new(),
             marker_key_scratch: String::new(),
             unpacked_struct_prop_names: std::cell::OnceCell::new(),
             struct_root_names: HashSet::default(),
@@ -127862,6 +127871,9 @@ impl Simulator {
                 .map(|a| self.canonicalize_spec_frag(a))
                 .collect();
             self.canonical_vif_frag(&name, args, modport)
+        } else if let Some(v) = self.fold_const_spec_frag(frag_norm, false) {
+            // §8.25: a value argument matches by VALUE (`P#(2+2)` is `P#(4)`).
+            v
         } else {
             let short = frag_norm.to_string();
             if let Some(cd) = self.get_class_def(&short) {
@@ -127874,6 +127886,227 @@ impl Simulator {
             }
             short
         }
+    }
+
+    /// §8.25: specializations match when their value arguments have the SAME
+    /// VALUE, however written: `P#(2+2)`, `P#('h4)` and `P#(4)` are one
+    /// specialization with one set of statics. The decimal value of a
+    /// specialization-argument text that is a constant integer expression
+    /// of unsized operands; None for anything else (a type, a name, a
+    /// string or real, x/z bits). A sized literal (`4'd4`) folds only for a
+    /// `typed` integral parameter: an untyped one takes the literal's width
+    /// as part of its type, so `Q#(4'd4)` is not `Q#(4)`. Memoized: keys are
+    /// canonicalized at run time.
+    fn fold_const_spec_frag(&self, frag: &str, typed: bool) -> Option<String> {
+        let b = frag.as_bytes();
+        let first = *b.first()?;
+        let ident_start = first.is_ascii_alphabetic() || first == b'_';
+        if !(ident_start
+            || first.is_ascii_digit()
+            || matches!(first, b'\'' | b'(' | b'-' | b'+' | b'~' | b'!'))
+        {
+            return None;
+        }
+        // A name is folded only when it is a design parameter (`P#(LP)`);
+        // a type, class, or enum name keeps its spelling. Its value depends
+        // on the scope, so it is not memoized.
+        if ident_start && b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_') {
+            // `scoped_param_value` tests the parameter leaf names first: the
+            // common type / class name costs one probe.
+            let v = self.scoped_param_value(frag)?;
+            if self.class_member_names().params.contains(frag) {
+                return None;
+            }
+            return v.to_i64().map(|n| n.to_string());
+        }
+        // Already canonical: a plain decimal.
+        let digits = b.strip_prefix(b"-").unwrap_or(b);
+        if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        // A text with names folds only as an expression (`LP * 2`): a type
+        // spelling (`int unsigned`, `virtual bus_if`) has no operator.
+        if ident_start
+            && !b.iter().any(|c| {
+                matches!(
+                    c,
+                    b'+' | b'-'
+                        | b'*'
+                        | b'/'
+                        | b'%'
+                        | b'<'
+                        | b'>'
+                        | b'&'
+                        | b'|'
+                        | b'^'
+                        | b'~'
+                        | b'!'
+                )
+            })
+        {
+            return None;
+        }
+        if b.iter().any(|&c| {
+            matches!(
+                c,
+                b'.' | b'"' | b'$' | b'x' | b'X' | b'z' | b'Z' | b'?' | b'#' | b'[' | b'{'
+            )
+        }) {
+            return None;
+        }
+        if !typed {
+            let mut prev = b' ';
+            for &c in b {
+                if c == b'\'' && prev.is_ascii_digit() {
+                    return None;
+                }
+                if !c.is_ascii_whitespace() {
+                    prev = c;
+                }
+            }
+        }
+        // A text naming parameters folds per scope: memoize it under the
+        // scope it was folded in.
+        let key = if b.iter().any(|c| c.is_ascii_alphabetic() || *c == b'_') {
+            let scope = self.name_resolve_hint.borrow().clone().unwrap_or_default();
+            format!("{}|{}", scope, frag)
+        } else {
+            frag.to_string()
+        };
+        if let Some(hit) = self.spec_frag_fold_cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let folded = self.fold_const_spec_text(frag);
+        self.spec_frag_fold_cache
+            .borrow_mut()
+            .insert(key, folded.clone());
+        folded
+    }
+
+    /// The value of design parameter `name` as seen from the executing scope:
+    /// the top's own (bare key), else the nearest enclosing instance's
+    /// (`scope.name`, walking the resolve hint outward).
+    fn scoped_param_value(&self, name: &str) -> Option<Value> {
+        let leaves = self.param_leaf_names.get_or_init(|| {
+            self.module
+                .parameters
+                .keys()
+                .map(|k| k.rsplit(['.', ':']).next().unwrap_or(k).to_string())
+                .collect()
+        });
+        if !leaves.contains(name) {
+            return None;
+        }
+        if let Some(v) = self.module.parameters.get(name) {
+            return Some(v.clone());
+        }
+        let hint = self.name_resolve_hint.borrow().clone()?;
+        let mut scope = hint.as_str();
+        loop {
+            if let Some(v) = self.module.parameters.get(&format!("{}.{}", scope, name)) {
+                return Some(v.clone());
+            }
+            scope = scope.rsplit_once('.')?.0;
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fold_const_spec_text(&self, text: &str) -> Option<String> {
+        use crate::ast::decl::{ModuleItem, ParameterKind};
+        // Literals, operators, and design parameters no class declares (a
+        // class's own parameter of the same name would shadow it).
+        let names = self.class_member_names();
+        let literal_only = |e: &Expression| -> bool {
+            fn walk(e: &Expression, ok_name: &dyn Fn(&str) -> bool) -> bool {
+                match &e.kind {
+                    ExprKind::Number(NumberLiteral::Integer { .. })
+                    | ExprKind::Number(NumberLiteral::UnbasedUnsized(_)) => true,
+                    ExprKind::Ident(h) => {
+                        h.root.is_none()
+                            && h.path.len() == 1
+                            && h.path[0].selects.is_empty()
+                            && ok_name(&h.path[0].name.name)
+                    }
+                    ExprKind::Paren(x) | ExprKind::Unary { operand: x, .. } => walk(x, ok_name),
+                    ExprKind::Binary { left, right, .. } => {
+                        walk(left, ok_name) && walk(right, ok_name)
+                    }
+                    ExprKind::Conditional {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        walk(condition, ok_name)
+                            && walk(then_expr, ok_name)
+                            && walk(else_expr, ok_name)
+                    }
+                    _ => false,
+                }
+            }
+            walk(e, &|n: &str| {
+                !names.params.contains(n) && self.scoped_param_value(n).is_some()
+            })
+        };
+        let src = format!(
+            "module __xezim_spec_arg; localparam __xezim_v = {};\nendmodule\n",
+            text
+        );
+        let tokens = crate::lexer::Lexer::new(&src).tokenize();
+        let mut parser = sv_parser::parse::Parser::new(tokens);
+        let parsed = parser.parse_source_text();
+        if parser
+            .diagnostics()
+            .iter()
+            .any(|d| d.severity == sv_parser::diagnostics::Severity::Error)
+        {
+            return None;
+        }
+        let Some(crate::ast::Description::Module(m)) = parsed.descriptions.into_iter().next()
+        else {
+            return None;
+        };
+        let init = m.items.into_iter().find_map(|it| match it {
+            ModuleItem::LocalparamDeclaration(pd) => match pd.kind {
+                ParameterKind::Data { assignments, .. } => {
+                    assignments.into_iter().next().and_then(|a| a.init)
+                }
+                _ => None,
+            },
+            _ => None,
+        })?;
+        if !literal_only(&init) {
+            return None;
+        }
+        // The parameters it names, as seen from this scope.
+        let mut ptab: HashMap<String, Value> = HashMap::default();
+        fn names_in(e: &Expression, out: &mut Vec<String>) {
+            match &e.kind {
+                ExprKind::Ident(h) => out.push(h.path[0].name.name.clone()),
+                ExprKind::Paren(x) | ExprKind::Unary { operand: x, .. } => names_in(x, out),
+                ExprKind::Binary { left, right, .. } => {
+                    names_in(left, out);
+                    names_in(right, out);
+                }
+                ExprKind::Conditional {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    names_in(condition, out);
+                    names_in(then_expr, out);
+                    names_in(else_expr, out);
+                }
+                _ => {}
+            }
+        }
+        let mut ids = Vec::new();
+        names_in(&init, &mut ids);
+        for n in ids {
+            ptab.insert(n.clone(), self.scoped_param_value(&n)?);
+        }
+        let v = super::elaborate::const_eval_i64_with_params(&init, Some(&ptab))?;
+        Some(v.to_string())
     }
 
     /// IEEE 1800-2017 §6.20.2: the DECLARED DEFAULT of parameter
@@ -128121,7 +128354,22 @@ impl Simulator {
         }
         let canon_frags: Vec<String> = frags
             .iter()
-            .map(|f| self.canonicalize_spec_frag(f))
+            .enumerate()
+            .map(|(i, f)| {
+                // §8.25/§6.20.2: an argument of a TYPED integral parameter
+                // (`int N`) is converted to that type, so a sized literal
+                // (`4'd4`) is the same value as `4`.
+                let typed = order.get(i).is_some_and(|p| {
+                    matches!(
+                        cd.property_types.get(p),
+                        Some(DataType::IntegerAtom { .. } | DataType::IntegerVector { .. })
+                    )
+                });
+                typed
+                    .then(|| self.fold_const_spec_frag(f.trim(), true))
+                    .flatten()
+                    .unwrap_or_else(|| self.canonicalize_spec_frag(f))
+            })
             .collect();
         canon_frags.join(",")
     }
