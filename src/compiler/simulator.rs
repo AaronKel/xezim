@@ -75907,6 +75907,18 @@ impl Simulator {
                         }
                     }
                 }
+                // §11.4.5 / §10.9: equality against an ASSIGNMENT PATTERN
+                // (`a == '{9, 5, 5, 5}`) compares element- / member-wise.
+                if matches!(
+                    op,
+                    BinaryOp::Eq | BinaryOp::Neq | BinaryOp::CaseEq | BinaryOp::CaseNeq
+                ) && (matches!(left.kind, ExprKind::AssignmentPattern(_))
+                    || matches!(right.kind, ExprKind::AssignmentPattern(_)))
+                {
+                    if let Some(v) = self.compare_with_pattern(*op, left, right) {
+                        return v;
+                    }
+                }
                 // §11.4.5: equality on unpacked structs is member-wise.
                 if matches!(op, BinaryOp::Eq | BinaryOp::Neq) {
                     if let Some(v) = self.compare_unpacked_structs(left, right) {
@@ -123429,6 +123441,243 @@ impl Simulator {
         })
     }
 
+    /// IEEE 1800-2017 §11.4.5 / §10.9: `==`, `!=`, `===`, `!==` between an
+    /// unpacked aggregate and an assignment pattern. The pattern is in an
+    /// assignment-like context, so it takes the type of the other operand and
+    /// the comparison runs element by element (member by member for a
+    /// struct), each element against its pattern item — `index:`, `N{..}`,
+    /// `default:` and nested patterns resolve exactly as for an assignment.
+    /// The packed-concatenation value of the pattern compared against the
+    /// array's (nonexistent) container signal and always came out 0.
+    /// `None` when the other operand is not an unpacked aggregate.
+    fn compare_with_pattern(
+        &mut self,
+        op: BinaryOp,
+        left: &Expression,
+        right: &Expression,
+    ) -> Option<Value> {
+        let (x, items) = match (&left.kind, &right.kind) {
+            (ExprKind::AssignmentPattern(_), ExprKind::AssignmentPattern(_)) => return None,
+            (_, ExprKind::AssignmentPattern(it)) => (left, it),
+            (ExprKind::AssignmentPattern(it), _) => (right, it),
+            _ => return None,
+        };
+        let case = matches!(op, BinaryOp::CaseEq | BinaryOp::CaseNeq);
+        let want_eq = matches!(op, BinaryOp::Eq | BinaryOp::CaseEq);
+        Some(match self.pattern_cmp(x, items, case)? {
+            PatCmp::Equal => Value::from_u64(want_eq as u64, 1),
+            PatCmp::Unequal => Value::from_u64(!want_eq as u64, 1),
+            PatCmp::Unknown => Value::new(1),
+            // An x/z array element: neither equal nor unequal, as for an
+            // array-to-array comparison.
+            PatCmp::Neither => Value::zero(1),
+        })
+    }
+
+    /// The element-wise comparison of `x` with the pattern `items`; `None`
+    /// when `x` is not an unpacked array, queue or struct.
+    fn pattern_cmp(
+        &mut self,
+        x: &Expression,
+        items: &[AssignmentPatternItem],
+        case: bool,
+    ) -> Option<PatCmp> {
+        // Fixed unpacked array of any rank: the declared dimensions, each
+        // positional item filling the LEFT bound first (§10.10).
+        let fixed = self
+            .fixed_array_operand(x)
+            .map(|(n, lo, hi)| (n, vec![(lo, hi)]));
+        let fixed = fixed.or_else(|| match &x.kind {
+            ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                let n = self.resolve_hier_name(h).to_string();
+                (self.module.arrays_2d.contains_key(&n) || self.module.arrays_nd.contains_key(&n))
+                    .then(|| self.foreach_dims(&n).map(|d| (n, d)))
+                    .flatten()
+            }
+            _ => None,
+        });
+        if let Some((name, dims)) = fixed {
+            let dims = match self.foreach_dims(&name) {
+                Some(d) if d.len() > dims.len() => d,
+                _ => dims,
+            };
+            let descending: Vec<bool> = match self
+                .module
+                .unpacked_decl_dims
+                .get(&name)
+                .filter(|d| d.len() == dims.len())
+            {
+                Some(decl) => decl.iter().map(|&(l, r)| l > r).collect(),
+                None => (0..dims.len())
+                    .map(|k| k == 0 && self.module.descending_arrays.contains(&name))
+                    .collect(),
+            };
+            return Some(self.pattern_cmp_dims(x, &dims, &descending, items, case));
+        }
+        // Queue / dynamic array: as many elements as the pattern has items.
+        if !matches!(x.kind, ExprKind::Index { .. }) {
+            if let Some(name) = self.dyn_cmp_operand_name(x) {
+                let n = self.get_queue_size(&name) as i64;
+                if n != self.pattern_ordered(items).len() as i64
+                    && !items
+                        .iter()
+                        .any(|it| matches!(it, AssignmentPatternItem::Default(_)))
+                {
+                    return Some(PatCmp::Unequal);
+                }
+                if n == 0 {
+                    return Some(PatCmp::Equal);
+                }
+                return Some(self.pattern_cmp_dims(x, &[(0, n - 1)], &[false], items, case));
+            }
+        }
+        // Unpacked struct: member by member (§10.9.2 binding rules).
+        let su = self.unpacked_struct_type_of(x)?;
+        let mut acc = PatCmp::Equal;
+        for (name, _, _, item, _) in self.bind_struct_pattern_items(&su, items) {
+            let Some(item) = item else {
+                return Some(PatCmp::Unequal);
+            };
+            let member = Self::append_member_expr(x, &name);
+            acc = acc.and(self.pattern_elem_cmp(member, item, case), true);
+            if acc == PatCmp::Unequal {
+                break;
+            }
+        }
+        Some(acc)
+    }
+
+    /// One dimension of [`Self::pattern_cmp`]: `x[i]` for every index of
+    /// `dims[0]` against its item; a nested pattern descends one dimension,
+    /// any other item covers the whole sub-array.
+    fn pattern_cmp_dims(
+        &mut self,
+        x: &Expression,
+        dims: &[(i64, i64)],
+        descending: &[bool],
+        items: &[AssignmentPatternItem],
+        case: bool,
+    ) -> PatCmp {
+        let (lo, hi) = dims[0];
+        let indices: Vec<i64> = if descending.first().copied().unwrap_or(false) {
+            (lo..=hi).rev().collect()
+        } else {
+            (lo..=hi).collect()
+        };
+        let elems = self.pattern_elems(items, &indices);
+        let mut acc = PatCmp::Equal;
+        for (k, e) in elems.into_iter().enumerate() {
+            let Some(e) = e else {
+                return PatCmp::Unequal;
+            };
+            let mut idx = Value::from_u64(indices[k] as u64, 64);
+            idx.is_signed = true;
+            let elem = Expression::new(
+                ExprKind::Index {
+                    expr: Box::new(x.clone()),
+                    index: Box::new(Expression::new(
+                        ExprKind::Number(NumberLiteral::Integer {
+                            size: Some(64),
+                            signed: true,
+                            base: NumberBase::Binary,
+                            value: idx.to_bin(),
+                            cached_val: Cell::new(idx.inline_bits().map(|(v, xz)| (v, xz, 64))),
+                        }),
+                        x.span,
+                    )),
+                },
+                x.span,
+            );
+            let r = if dims.len() > 1 {
+                let inner = descending.get(1..).unwrap_or(&[]);
+                match &e.kind {
+                    ExprKind::AssignmentPattern(sub) => {
+                        self.pattern_cmp_dims(&elem, &dims[1..], inner, sub, case)
+                    }
+                    _ => {
+                        let fill = [AssignmentPatternItem::Default(e.clone())];
+                        self.pattern_cmp_dims(&elem, &dims[1..], inner, &fill, case)
+                    }
+                }
+            } else {
+                self.pattern_elem_cmp(elem, e, case)
+            };
+            acc = acc.and(r, false);
+            if acc == PatCmp::Unequal {
+                break;
+            }
+        }
+        acc
+    }
+
+    /// One leaf of a pattern comparison: `elem == item` (`===` for a case
+    /// comparison) through the ordinary operator, so string, real, struct
+    /// and nested-pattern elements keep their own rules.
+    fn pattern_elem_cmp(&mut self, elem: Expression, item: &Expression, case: bool) -> PatCmp {
+        // §10.9: an item is assignment-like to its ELEMENT — an integral
+        // item converts to the element type first, so `-1` matches a
+        // `bit [7:0]` element holding 255.
+        if !matches!(item.kind, ExprKind::AssignmentPattern(_))
+            && !self.operand_is_string(&elem)
+            && self.unpacked_struct_type_of(&elem).is_none()
+        {
+            let ev = self.eval_expr(&elem);
+            if !ev.is_real && ev.width > 0 {
+                let iv = self.eval_expr_ctx(item, ev.width);
+                if !iv.is_real {
+                    let iv = iv.resize_for_assign(ev.width);
+                    let r = if case {
+                        ev.case_eq(&iv)
+                    } else {
+                        ev.is_equal(&iv)
+                    };
+                    return Self::pat_cmp_of(&r);
+                }
+            }
+        }
+        let span = elem.span;
+        let cmp = Expression::new(
+            ExprKind::Binary {
+                op: if case { BinaryOp::CaseEq } else { BinaryOp::Eq },
+                left: Box::new(elem),
+                right: Box::new(item.clone()),
+            },
+            span,
+        );
+        let v = self.eval_expr(&cmp);
+        Self::pat_cmp_of(&v)
+    }
+
+    fn pat_cmp_of(v: &Value) -> PatCmp {
+        if v.has_unknown() {
+            PatCmp::Unknown
+        } else if v.to_u64() == Some(1) {
+            PatCmp::Equal
+        } else {
+            PatCmp::Unequal
+        }
+    }
+
+    /// The unpacked-struct type of an operand, whichever storage holds it:
+    /// a class-collection element, a class property, or member signals.
+    fn unpacked_struct_type_of(
+        &mut self,
+        x: &Expression,
+    ) -> Option<crate::ast::types::StructUnionType> {
+        if let Some(su) = self.struct_elem_type(x) {
+            return Some(su);
+        }
+        if let Some(su) = self.class_prop_struct_of(x) {
+            return Some(su);
+        }
+        let a = self.flat_member_name(x)?;
+        let dt = self.p_elem_type_ref(&a)?;
+        match self.resolve_dt_ref(&dt) {
+            DataType::Struct(su) if Self::spreads_member_wise(su) => Some(su.clone()),
+            _ => None,
+        }
+    }
+
     /// IEEE 1800-2017 §7.3.2: a tagged union stores ONE member at a time. A
     /// member expression yields the stored value only when that member is the
     /// active one; reading any other member is not valid and yields X.
@@ -170507,5 +170756,31 @@ mod dpi_trampoline_cc_tests {
         assert_eq!(&b[..2], ["ccache", "aarch64-linux-gnu-gcc"]);
         assert!(!b.iter().any(|x| x == "-m64"));
         assert_eq!(args(Some("  "))[0], "cc");
+    }
+}
+
+/// The outcome of comparing an aggregate with an assignment pattern
+/// (`Simulator::pattern_cmp`, IEEE 1800-2017 §11.4.5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PatCmp {
+    Equal,
+    Unequal,
+    /// An x/z struct member: the comparison is x.
+    Unknown,
+    /// An x/z array element: neither `==` nor `!=` holds.
+    Neither,
+}
+
+impl PatCmp {
+    /// Fold the next element's outcome in: any unequal element decides;
+    /// otherwise an unknown one makes the result unknown (x for a struct
+    /// member, `Neither` for an array element).
+    fn and(self, next: PatCmp, member: bool) -> PatCmp {
+        match (self, next) {
+            (PatCmp::Unequal, _) | (_, PatCmp::Unequal) => PatCmp::Unequal,
+            (PatCmp::Equal, PatCmp::Equal) => PatCmp::Equal,
+            (PatCmp::Unknown, _) | (_, PatCmp::Unknown) if member => PatCmp::Unknown,
+            _ => PatCmp::Neither,
+        }
     }
 }

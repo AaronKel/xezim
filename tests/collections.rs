@@ -155,5 +155,7 @@ mod struct_dynamic_members;
 mod typedef_and_fixed_collections;
 #[path = "collections/block_local_shadow_module.rs"]
 mod block_local_shadow_module;
+#[path = "collections/pattern_equality.rs"]
+mod pattern_equality;
 #[path = "collections/compiled_string_queue_element_compare.rs"]
 mod compiled_string_queue_element_compare;
