@@ -3265,6 +3265,9 @@ struct ClassMemberNames {
     /// key spells by type (`typedef_alias_frag`): a virtual interface, a
     /// one-keyword built-in, or a plain alias of another name.
     alias_typedefs: HashSet<String>,
+    /// Typedef names (module or class scope) whose target is a class-scoped
+    /// type (`typedef R::elem_t et_t;`).
+    scoped_typedefs: HashSet<String>,
     /// Every class type/value parameter name.
     params: HashSet<String>,
     /// Every associative-array property name.
@@ -83961,7 +83964,14 @@ impl Simulator {
     ) {
         // §6.20.2 / §8.25: a local typed by a TYPE PARAMETER of the method's
         // class (`T tmp;`) has the type bound in this specialization.
-        let tp_concrete = self.local_type_param_concrete(data_type);
+        let tp_param = self.local_type_param_concrete(data_type);
+        // §8.25.1: a class-scope typedef reached through a specialization.
+        let tp_scoped = if tp_param.is_none() {
+            self.scoped_typedef_concrete(data_type)
+        } else {
+            None
+        };
+        let tp_concrete = tp_param.or_else(|| tp_scoped.clone());
         let tp_width = tp_concrete
             .as_deref()
             .and_then(|c| self.concrete_type_width(c));
@@ -84050,7 +84060,11 @@ impl Simulator {
         let is_real_type = super::elaborate::is_type_real(data_type);
         // §6.11.3: the declared signedness every declarator's value and
         // later reads carry.
-        let decl_signed = !plain_class && self.type_is_signed_concrete(data_type);
+        let decl_signed = !plain_class
+            && match tp_scoped.as_deref() {
+                Some(c) => self.concrete_type_signed(c) == Some(true),
+                None => self.type_is_signed_concrete(data_type),
+            };
         // §25.9 / IEEE 1800-2023 Table 6-7: a virtual-interface handle
         // defaults to `null`, also when its type is a typedef alias
         // (`vif_t v;`). The spelled-out `virtual bus_if v;` has no data
@@ -155481,6 +155495,123 @@ impl Simulator {
     /// parameter on `this` — carried down the `extends` chain when the
     /// method's class is an ancestor bound by `extends C #(byte)` — else the
     /// active specialization's. `None` for any other type.
+    /// §8.25.1/§6.18: the concrete type a class-scope typedef names when it
+    /// is reached through a SPECIALIZATION the static tables cannot see — a
+    /// type parameter or a typedef of a specialization used as the scope
+    /// (`R::elem_t`, `h_t::vec_t`), directly or through a class-local alias
+    /// (`typedef R::elem_t et_t;`). The elaborated tables hold the DEFAULT
+    /// specialization only, so `typedef T elem_t` read 32 bits for every
+    /// binding. Returns the concrete form `local_type_param_concrete` gives
+    /// (`byte`, `logic[5:0]`), or None for any other type.
+    fn scoped_typedef_concrete(&mut self, dt: &DataType) -> Option<String> {
+        let mut cur = dt.clone();
+        for _ in 0..8 {
+            let DataType::TypeReference {
+                name,
+                dimensions,
+                type_args,
+                ..
+            } = &cur
+            else {
+                return None;
+            };
+            if !dimensions.is_empty() || !type_args.is_empty() {
+                return None;
+            }
+            if name.scopes.is_empty() {
+                // A class-local (or module) alias of such a reference.
+                if self.module.classes.contains_key(&name.name.name)
+                    || !self
+                        .class_member_names()
+                        .scoped_typedefs
+                        .contains(&name.name.name)
+                {
+                    return None;
+                }
+                cur = self.lookup_typedef_target(&name.name.name)?;
+                continue;
+            }
+            let link = name.scopes.last()?;
+            if !link.type_args.is_empty() {
+                return None;
+            }
+            let (base, Some(sig)) = self.resolve_class_scope_prefix(&link.name.name)? else {
+                return None;
+            };
+            let leaf = name.name.name.clone();
+            let saved = self.current_spec.replace((base.clone(), sig));
+            let out = self.class_typedef_concrete_in_spec(&base, &leaf);
+            self.current_spec = saved;
+            return out;
+        }
+        None
+    }
+
+    /// `scoped_typedef_concrete` with `base`'s specialization active: the
+    /// concrete form of `base`'s (or an ancestor's) typedef `leaf`.
+    fn class_typedef_concrete_in_spec(&mut self, base: &str, leaf: &str) -> Option<String> {
+        use crate::ast::types::{IntegerAtomType as A, IntegerVectorType as V, Signing};
+        let mut c = Some(base.to_string());
+        let mut target = None;
+        while let Some(cn) = c {
+            let cd = self.module.classes.get(&cn)?;
+            if let Some(t) = cd.typedef_targets.get(leaf) {
+                target = Some(t.clone());
+                break;
+            }
+            c = cd.extends.clone();
+        }
+        match target? {
+            DataType::TypeReference {
+                name,
+                dimensions,
+                type_args,
+                ..
+            } if dimensions.is_empty() && type_args.is_empty() && !name.has_scope() => self
+                .resolve_type_param_binding(&name.name.name)
+                .map(|b| b.trim().to_string()),
+            DataType::IntegerAtom { kind, signing, .. } => {
+                let k = match kind {
+                    A::Byte => "byte",
+                    A::ShortInt => "shortint",
+                    A::Int => "int",
+                    A::LongInt => "longint",
+                    A::Integer => "integer",
+                    A::Time => "time",
+                };
+                // An explicitly `unsigned` atom has no keyword form here.
+                (!matches!(signing, Some(Signing::Unsigned))).then(|| k.to_string())
+            }
+            DataType::IntegerVector {
+                kind,
+                signing,
+                dimensions,
+                ..
+            } if !dimensions.is_empty() => {
+                let spec_params = self.params_with_class_spec();
+                let params = spec_params.as_ref().unwrap_or(&self.module.parameters);
+                let mut s = String::from(match kind {
+                    V::Bit => "bit",
+                    V::Logic => "logic",
+                    V::Reg => "reg",
+                });
+                if matches!(signing, Some(Signing::Signed)) {
+                    s.push_str(" signed");
+                }
+                for d in &dimensions {
+                    let crate::ast::types::PackedDimension::Range { left, right, .. } = d else {
+                        return None;
+                    };
+                    let l = super::elaborate::const_eval_i64_with_params(left, Some(params))?;
+                    let r = super::elaborate::const_eval_i64_with_params(right, Some(params))?;
+                    s.push_str(&format!("[{l}:{r}]"));
+                }
+                Some(s)
+            }
+            _ => None,
+        }
+    }
+
     fn local_type_param_concrete(&self, dt: &DataType) -> Option<String> {
         let ctx = self.class_context_stack.last()?.as_deref()?;
         self.type_param_concrete_in(dt, ctx)
@@ -160181,6 +160312,26 @@ impl Simulator {
                         .map(|(n, _)| n.clone()),
                 );
             }
+            // Typedefs (module or class scope) aliasing a CLASS-SCOPED type
+            // (`typedef R::elem_t et_t;`) — see `scoped_typedef_concrete`.
+            let scoped_target = |dt: &DataType| {
+                matches!(dt, DataType::TypeReference { name, .. } if name.has_scope())
+            };
+            let mut scoped_typedefs: HashSet<String> = self
+                .module
+                .typedef_types
+                .iter()
+                .filter(|(_, dt)| scoped_target(dt))
+                .map(|(n, _)| n.clone())
+                .collect();
+            for cd in self.module.classes.values() {
+                scoped_typedefs.extend(
+                    cd.typedef_targets
+                        .iter()
+                        .filter(|(_, dt)| scoped_target(dt))
+                        .map(|(n, _)| n.clone()),
+                );
+            }
             let mut ident_slow: HashSet<String> = HashSet::default();
             ident_slow.extend(statics.iter().cloned());
             ident_slow.extend(vif_props.iter().cloned());
@@ -160205,6 +160356,7 @@ impl Simulator {
                 static_methods,
                 subroutine_suffixes,
                 alias_typedefs,
+                scoped_typedefs,
                 params,
                 assoc_props,
                 string_props,
