@@ -5406,7 +5406,7 @@ impl Simulator {
         self.csp_add_carries(csp, carries);
         let frame = self.csp_frame(&env.binds);
         self.push_local_frame(frame);
-        let set = dom_norm(self.cons_ranges_i128(ranges));
+        let set = dom_norm(self.cons_ranges_i128_at(ranges, w));
         self.pop_local_frame();
         // A negative endpoint makes the checker read an unsigned value as
         // signed; leave that reading to the checker itself.

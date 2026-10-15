@@ -501,3 +501,5 @@ mod x_propagation_assertions;
 mod zero_width_select_unselected_generate;
 #[path = "misc/let_declaration_scopes.rs"]
 mod let_declaration_scopes;
+#[path = "misc/constraint_inside_wrap.rs"]
+mod constraint_inside_wrap;

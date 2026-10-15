@@ -154320,7 +154320,24 @@ impl Simulator {
     /// it denotes and not an empty one. A queue/array operand contributes each
     /// of its elements. `None` endpoints are skipped rather than coerced.
     fn cons_ranges_i128(&mut self, ranges: &[ConstraintRange]) -> Vec<(i128, i128)> {
+        self.cons_ranges_i128_at(ranges, 0)
+    }
+
+    /// `cons_ranges_i128` for an operand of `ctx_w` bits. §11.4.13/§11.8.2:
+    /// each bound is computed at the wider of that width and its own, and
+    /// wraps there — `exact_int` leaves `+`, `-`, `*` unreduced, so
+    /// `-2147483648` (the negation of a 32-bit -2^31) read +2^31 and
+    /// `[-2147483648:10]` was an empty range.
+    fn cons_ranges_i128_at(&mut self, ranges: &[ConstraintRange], ctx_w: u32) -> Vec<(i128, i128)> {
         let mut out: Vec<(i128, i128)> = Vec::new();
+        let at = |x: (i128, u32, bool)| -> i128 {
+            let w = x.1.max(ctx_w);
+            if w == 0 || w > 64 {
+                x.0
+            } else {
+                Self::as_ctx(x.0, w, x.2)
+            }
+        };
         for r in ranges {
             match r {
                 ConstraintRange::Value(e) => {
@@ -154338,14 +154355,24 @@ impl Simulator {
                         }
                         continue;
                     }
-                    if let Some((v, _, _)) = self.exact_int(e) {
+                    if let Some(x) = self.exact_int(e) {
+                        let v = at(x);
                         out.push((v, v));
                     }
                 }
                 ConstraintRange::Range { lo, hi } => {
-                    let (Some((l, ..)), Some((h, ..))) = (self.exact_int(lo), self.exact_int(hi))
-                    else {
+                    let (Some(lx), Some(hx)) = (self.exact_int(lo), self.exact_int(hi)) else {
                         continue;
+                    };
+                    let l = if matches!(lo.kind, ExprKind::Dollar) {
+                        lx.0
+                    } else {
+                        at(lx)
+                    };
+                    let h = if matches!(hi.kind, ExprKind::Dollar) {
+                        hx.0
+                    } else {
+                        at(hx)
                     };
                     // §11.4.13: `[hi:lo]` with the left bound above the
                     // right one is an empty range. A `$` bound keeps the
@@ -154365,7 +154392,7 @@ impl Simulator {
 
     /// Exact-signed membership test used by every `inside`/`dist` solve path.
     fn value_in_ranges(&mut self, val: &Value, ranges: &[ConstraintRange]) -> bool {
-        let rs = self.cons_ranges_i128(ranges);
+        let rs = self.cons_ranges_i128_at(ranges, val.width);
         let Some(raw) = val.to_u64() else {
             return false;
         };
@@ -154389,7 +154416,7 @@ impl Simulator {
         width: u32,
         signed: bool,
     ) -> Option<Value> {
-        let choices = self.cons_ranges_i128(ranges);
+        let choices = self.cons_ranges_i128_at(ranges, width);
         self.pick_i128_range(&choices, width, signed)
     }
 
