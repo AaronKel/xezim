@@ -445,6 +445,30 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Class-scope typedefs reached through a type parameter or a typedef of a
   specialization (`R::elem_t`, `h_t::vec_t`) have that specialization's width
   and signedness (§8.25.1). (#325, reported by Dragon-git)
+* A specialization written with an expression or a differently spelled value
+  (`P#(2+2)`, `P#('h4)`, `P#(4'd4)` for an `int` parameter, `P#(LP)`) is the
+  same specialization as `P#(4)` and shares its statics (§8.25).
+* Two typedefs of the same unpacked array type, including a class-local
+  `typedef T tq_t[$]` with `T = int`, are one type argument of a parameterized
+  class (§6.22.1).
+* A virtual interface held in a static class property, or in `static T` of
+  `G#(virtual bus_if)`, keeps its binding: reads and `return` of it reach the
+  interface (§25.9).
+* `cls#(4)::N`, `cls#(.W(5))::N` and constants of a typedef of a
+  specialization read that specialization's value at run time, and
+  `outer::inner::N` reads a nested class's constant (§8.25, §8.23).
+* `$bits` of a multi-dimensional class property, and of an unpacked struct with
+  a member sized by a module parameter, counts every element (§20.6.2).
+* A class declared in a module that is instantiated more than once has its
+  statics per instance, and its methods write the instance's struct members and
+  variables (§23.9).
+* Struct class properties with queue, dynamic or associative members copy those
+  members when pushed or assigned into collections, are not confused with a
+  same-named module variable inside methods, and print their dynamic and string
+  members with `%p` (§7.10.2, §8.4, §21.2.1.7).
+* Static structs of a parameterized class can be written and read from module
+  code through `C#(args)::` or a typedef of the specialization, and print with
+  `%p` from a static method (§8.25).
 
 **Performance**
 
