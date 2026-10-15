@@ -124942,7 +124942,21 @@ impl Simulator {
                     let key = self.eval_expr(arg);
                     let key_str = self.assoc_key_str(obj_name, &key);
                     let elem_name = format!("{}[{}]", obj_name, key_str);
-                    self.signals.remove(&elem_name);
+                    if self.signals.remove(&elem_name).is_none() {
+                        // §7.9.2: an aggregate element (an unpacked struct,
+                        // a nested collection) has no `aa[k]` cell of its
+                        // own — it lives as member / element cells under
+                        // that name (the shapes `exists` probes), and all
+                        // of them go. Only reached on the direct-entry miss.
+                        let member = Self::name_with_suffix(&elem_name, ".");
+                        let sub = Self::name_with_suffix(&elem_name, "[");
+                        let prefix = format!("{}[", obj_name);
+                        for k in self.signals.keys_with_elem_prefix(&prefix) {
+                            if k.starts_with(member.as_str()) || k.starts_with(sub.as_str()) {
+                                self.signals.remove(&k);
+                            }
+                        }
+                    }
                 } else {
                     let prefix = format!("{}[", obj_name);
                     let keys: Vec<String> = self.signals.keys_with_elem_prefix(&prefix);
