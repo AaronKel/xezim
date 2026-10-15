@@ -349,6 +349,13 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   strength, `%v` prints the resolved strength, including ranges and L/H, and an
   undriven trireg reads z (§28.12, §21.2.1.5). An output-port connection beside
   another continuous driver of the same variable is a driver conflict (§6.5).
+* DPI-C: output array formals (fixed, open, multi-dimensional, dynamic,
+  and task formals) reach C as a zeroed buffer, and elements C leaves
+  unwritten come back as 0 (§35.5.6.1). (test from PR #319 by Thomas Burg)
+* Compiled class methods read `s[i]` of a string local as a byte, so a
+  comparison such as `s[0] != "["` is right in hot methods; this also fixes
+  the UVM 1.2 `print_topology()` table, which came out empty when its
+  printer methods were compiled (§6.16).
 
 **Performance**
 
