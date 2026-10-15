@@ -129,3 +129,5 @@ mod dpi_typedef_return;
 mod compiled_method_test_env;
 #[path = "strings/string_char_select_signed.rs"]
 mod string_char_select_signed;
+#[path = "strings/string_raw_bytes.rs"]
+mod string_raw_bytes;

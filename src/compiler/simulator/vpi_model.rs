@@ -5847,7 +5847,7 @@ fn obj_get(
                             // Characters, not the storage's bits.
                             v.sig
                                 .and_then(|id| sim.signal_table.get(id))
-                                .map(|x| x.to_sv_string().len() as c_int)
+                                .map(|x| x.sv_string_bytes().len() as c_int)
                                 .unwrap_or(0)
                         } else if h.kind == VpiKind::Slice {
                             h.width as c_int

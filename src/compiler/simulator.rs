@@ -65001,16 +65001,14 @@ impl Simulator {
         if !self.string_char_receiver_is_scalar(expr) {
             return None;
         }
-        let content = self.eval_expr(expr).to_sv_string();
+        let mut b = self.eval_expr(expr).sv_string_bytes();
         let i = self.eval_expr(index).to_u64().unwrap_or(0) as usize;
         let cbyte = (val.resize(8).to_u64().unwrap_or(0) & 0xFF) as u8;
-        let mut b = content.into_bytes();
         if i < b.len() && cbyte != 0 {
             b[i] = cbyte;
-            let out = String::from_utf8_lossy(&b).into_owned();
             // A `Value` may carry string metadata; store the freshly rebuilt
             // string so the element keeps its string-ness.
-            return Some(self.assign_value(expr, &Value::from_string(&out)));
+            return Some(self.assign_value(expr, &Self::sv_string_from_bytes(&b)));
         }
         Some(false)
     }
@@ -66192,14 +66190,12 @@ impl Simulator {
                 // Replace the i-th character of the string CONTENT (not
                 // a byte of the fixed-width container, which would write
                 // the wrong position and grow the string). Mirrors putc.
-                let content = self.eval_expr(expr).to_sv_string();
+                let mut b = self.eval_expr(expr).sv_string_bytes();
                 let i = idx_val.to_u64().unwrap_or(0) as usize;
                 let cbyte = (val.resize(8).to_u64().unwrap_or(0) & 0xFF) as u8;
-                let mut b = content.into_bytes();
                 if i < b.len() && cbyte != 0 {
                     b[i] = cbyte;
-                    let out = String::from_utf8_lossy(&b).into_owned();
-                    return self.assign_value(expr, &Value::from_string(&out));
+                    return self.assign_value(expr, &Self::sv_string_from_bytes(&b));
                 }
                 return false;
             }
@@ -71243,7 +71239,9 @@ impl Simulator {
                     .unwrap_or(0);
                 match self.sv_read_line(fd) {
                     Some(line) => {
-                        let n = line.len() as u64;
+                        // One char per byte (the text form of a string), so
+                        // the CHAR count is the byte count (§21.3.4.2).
+                        let n = line.chars().count() as u64;
                         if let Some(dst) = args.first() {
                             self.assign_value(dst, &Value::from_string(&line));
                         }
@@ -71337,14 +71335,15 @@ impl Simulator {
                 if hit_end {
                     self.file_eof.insert(fd);
                 }
-                let s = String::from_utf8_lossy(&line).to_string();
+                // §21.3.4.2: the line's raw BYTES — a byte >= 0x80 is one
+                // string character, not part of a UTF-8 sequence.
                 if let Some(d) = dest {
-                    self.assign_value(d, &Value::from_string(&s));
+                    self.assign_value(d, &Self::sv_string_from_bytes(&line));
                 }
-                if got_eof && s.is_empty() {
+                if got_eof && line.is_empty() {
                     Value::zero(32)
                 } else {
-                    Value::from_u64(s.len() as u64, 32)
+                    Value::from_u64(line.len() as u64, 32)
                 }
             }
             // §21.3.8 `$feof(fd)`: returns nonzero if the file is at EOF.
@@ -83574,7 +83573,7 @@ impl Simulator {
                     // never applied (`string_signals` won because the
                     // collection-carried registration; the char count
                     // of the unbuilt queue was 0).
-                    let len = self.eval_expr(array).to_sv_string().len() as u64;
+                    let len = self.eval_expr(array).sv_string_bytes().len() as u64;
                     for i in 0..len {
                         if self.finished {
                             break;
@@ -83714,7 +83713,7 @@ impl Simulator {
                     // in a fixed-width container (e.g. 1024 bits), so
                     // `width/8` is the container size (128), not the
                     // string length — the loop ran 128 times over "hi".
-                    let len = self.eval_expr(array).to_sv_string().len() as u64;
+                    let len = self.eval_expr(array).sv_string_bytes().len() as u64;
                     for i in 0..len {
                         if self.finished {
                             break;
@@ -88946,16 +88945,14 @@ impl Simulator {
         // realtoa(v)` MODIFY the receiver in place. Every one of them was a
         // silent no-op.
         if mname == "putc" && args.len() == 2 {
-            let cur = self.eval_expr(recv).to_sv_string();
+            let mut b = self.eval_expr(recv).sv_string_bytes();
             let idx = self.eval_expr(&args[0]).to_i64().unwrap_or(-1);
             let ch = (self.eval_expr(&args[1]).to_u64().unwrap_or(0) & 0xFF) as u8;
             // §6.16.4: an out-of-range index or a null character leaves the
             // string unchanged.
-            if idx >= 0 && (idx as usize) < cur.len() && ch != 0 {
-                let mut b = cur.into_bytes();
+            if idx >= 0 && (idx as usize) < b.len() && ch != 0 {
                 b[idx as usize] = ch;
-                let out = String::from_utf8_lossy(&b).into_owned();
-                let v = Value::from_string(&out);
+                let v = Self::sv_string_from_bytes(&b);
                 self.assign_value(recv, &v);
             }
             return Some(Value::zero(1));
@@ -89794,9 +89791,8 @@ impl Simulator {
                         }
                     }
                 }
-                let s = String::from_utf8_lossy(&line).to_string();
                 if let Some(d) = dest {
-                    self.assign_value(d, &Value::from_string(&s));
+                    self.assign_value(d, &Self::sv_string_from_bytes(&line));
                 }
             }
             // §21.3.4.4 task-position `$fread(dest, fd, …)`: perform the read,
@@ -111403,14 +111399,12 @@ impl Simulator {
                 Value::from_string(&text)
             }
             K::PutC => {
-                let cur = v(0).to_sv_string();
+                let mut b = v(0).sv_string_bytes();
                 let idx = v(1).to_i64().unwrap_or(-1);
                 let ch = (v(2).to_u64().unwrap_or(0) & 0xFF) as u8;
-                if idx >= 0 && (idx as usize) < cur.len() && ch != 0 {
-                    let mut b: Vec<u8> = cur.chars().map(|c| c as u8).collect();
+                if idx >= 0 && (idx as usize) < b.len() && ch != 0 {
                     b[idx as usize] = ch;
-                    let text: String = b.into_iter().map(|c| c as char).collect();
-                    Value::from_string(&text)
+                    Self::sv_string_from_bytes(&b)
                 } else {
                     v(0).clone()
                 }
@@ -136076,12 +136070,7 @@ impl Simulator {
                 && !self.class_expr_has_method(expr, mname)
             {
                 let s = self.eval_expr(expr).to_sv_string();
-                let r = if mname == "tolower" {
-                    s.to_lowercase()
-                } else {
-                    s.to_uppercase()
-                };
-                return Value::from_string(&r);
+                return Value::from_string(&Self::sv_ascii_case(&s, mname == "toupper"));
             }
             // §6.16.4 putc / §6.16.10 itoa-family / §6.16.9 atoreal. A
             // user-defined class method of the same name (e.g. inherited
@@ -136524,14 +136513,12 @@ impl Simulator {
                             .get(1)
                             .map(|e| self.eval_expr(e).to_u64().unwrap_or(0) as usize)
                             .unwrap_or(0);
-                        let bytes = text.as_bytes();
+                        let bytes = Value::from_string(&text).sv_string_bytes();
                         // §6.16.8: an out-of-range or inverted range yields "".
                         if a > b || b >= bytes.len() {
                             return Value::from_string("");
                         }
-                        return Value::from_string(
-                            &String::from_utf8_lossy(&bytes[a..=b]).into_owned(),
-                        );
+                        return Self::sv_string_from_bytes(&bytes[a..=b]);
                     }
                     "getc" => {
                         let i = args
@@ -137246,12 +137233,7 @@ impl Simulator {
                     && !self.class_expr_has_method(&base_expr, &m)
                 {
                     let s = self.eval_expr(&base_expr).to_sv_string();
-                    let r = if m == "tolower" {
-                        s.to_lowercase()
-                    } else {
-                        s.to_uppercase()
-                    };
-                    return Value::from_string(&r);
+                    return Value::from_string(&Self::sv_ascii_case(&s, m == "toupper"));
                 } else if matches!(m.as_str(), "atoi" | "atohex" | "atooct" | "atobin")
                     && !self.class_expr_has_method(&base_expr, &m)
                 {
