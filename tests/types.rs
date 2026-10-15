@@ -115,6 +115,8 @@ mod formal_type_metadata_and_typedef_packed_array;
 mod forward_referenced_parameter;
 #[path = "types/forward_typedef_class_handle_width.rs"]
 mod forward_typedef_class_handle_width;
+#[path = "types/function_return_conversion.rs"]
+mod function_return_conversion;
 #[path = "types/function_return_width.rs"]
 mod function_return_width;
 #[path = "types/generate_scope_struct_metadata.rs"]

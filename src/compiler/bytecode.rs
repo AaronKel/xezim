@@ -1945,6 +1945,9 @@ pub struct BytecodeCompiler<'a> {
     /// compiles to result-move + jump; the jump indexes collect in
     /// `inline_ret_jumps` and the inliner patches them to its body end.
     inline_ret: Option<(Option<RegId>, u32)>,
+    /// The inlined function's declared return type is real (§13.4.1: an
+    /// integral `return` value converts to it).
+    inline_ret_real: bool,
     inline_ret_jumps: Vec<usize>,
     /// Base names of 2D/ND UNPACKED arrays. When a continuous-assign LHS
     /// `m[0][j]` targets one of these, the flattening short-circuit
@@ -2080,6 +2083,7 @@ impl<'a> BytecodeCompiler<'a> {
             purity_depth: std::cell::Cell::new(0),
             purity_cut: std::cell::Cell::new(false),
             inline_ret: None,
+            inline_ret_real: false,
             inline_ret_jumps: Vec::new(),
             multi_dim_arrays: None,
             arrays_2d: None,
@@ -3354,7 +3358,9 @@ impl<'a> BytecodeCompiler<'a> {
         let saved_break_patches = std::mem::take(&mut self.loop_break_patches);
         let saved_continue_patches = std::mem::take(&mut self.loop_continue_patches);
         self.inline_ret = Some((Some(ret_slot), ret_w));
+        let saved_ret_real = std::mem::replace(&mut self.inline_ret_real, ret_is_real);
         let mut ok = self.compile_pure_body(&items, ret_slot, ret_w, ctx_width);
+        self.inline_ret_real = saved_ret_real;
         // Early returns land HERE — after the body, before the output-formal
         // copy-out, which §13.5.3 performs on every return path.
         let body_end = self.insns.len() as u32;
@@ -9138,6 +9144,25 @@ impl<'a> BytecodeCompiler<'a> {
         }
     }
 
+    /// `expr_may_be_real`, also counting real casts and any subroutine call
+    /// (whose return type is not tracked here).
+    fn ret_expr_may_be_real(&self, e: &Expression) -> bool {
+        fn has_call(e: &Expression) -> bool {
+            match &e.kind {
+                ExprKind::Call { .. } => true,
+                ExprKind::Paren(x) | ExprKind::Unary { operand: x, .. } => has_call(x),
+                ExprKind::Binary { left, right, .. } => has_call(left) || has_call(right),
+                ExprKind::Conditional {
+                    then_expr,
+                    else_expr,
+                    ..
+                } => has_call(then_expr) || has_call(else_expr),
+                _ => false,
+            }
+        }
+        self.expr_is_real_static(e) || self.expr_may_be_real(e) || has_call(e)
+    }
+
     /// Conservative: true when `e` may evaluate to a real — a real literal,
     /// a real signal or local, or a real-valued system function.
     fn expr_may_be_real(&self, e: &Expression) -> bool {
@@ -10646,7 +10671,22 @@ impl<'a> BytecodeCompiler<'a> {
                         return false;
                     };
                     self.emit(Insn::Move(slot, v));
-                    if w > 0 {
+                    // §13.4.1: the returned value converts to the declared
+                    // type. A real return converts an integral value; an
+                    // integral return rounds a real, which `Resize` does for
+                    // every width but 64 (where it keeps the real as is), so
+                    // a 64-bit one goes through 65 bits first.
+                    if self.inline_ret_real {
+                        if w > 0 {
+                            self.emit(Insn::Resize(slot, w));
+                        }
+                        if !self.expr_is_real_static(e) {
+                            self.emit_to_real(slot);
+                        }
+                    } else if w > 0 {
+                        if w == 64 && self.ret_expr_may_be_real(e) {
+                            self.emit(Insn::Resize(slot, 65));
+                        }
                         self.emit(Insn::Resize(slot, w));
                     }
                 }

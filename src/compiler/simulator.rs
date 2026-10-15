@@ -4266,6 +4266,18 @@ struct PortPlan {
     never_vif: bool,
 }
 
+/// §13.4.1: the conversion a function's value takes to its declared return
+/// type (see `Simulator::ret_convert`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetConv {
+    /// Not a numeric scalar: the value passes through untouched.
+    Keep,
+    /// `real` / `shortreal` / `realtime`.
+    Real,
+    /// An integral type; `two_state` for bit, byte, int, ... (§6.11.1).
+    Int { two_state: bool },
+}
+
 /// See `MethodCallPlan` (functions only).
 struct RetPlan {
     /// `method_return_is_string`, when no specialization can change it (type
@@ -138858,6 +138870,172 @@ impl Simulator {
         Value::from_u64(bits, width.max(1))
     }
 
+    /// §13.4.1: how a function's value converts to its declared return type,
+    /// for `ty` already resolved through its typedefs. Anything that is not a
+    /// numeric scalar (a handle, string, void, unpacked aggregate or an
+    /// unresolved type) keeps its value.
+    fn ret_conv_of(ty: &DataType, typedef_types: &HashMap<String, DataType>) -> RetConv {
+        match ty {
+            DataType::Real { .. } => RetConv::Real,
+            DataType::IntegerVector { .. }
+            | DataType::IntegerAtom { .. }
+            | DataType::Enum(_)
+            | DataType::Implicit { .. } => RetConv::Int {
+                two_state: super::elaborate::is_type_two_state_resolved(ty, typedef_types),
+            },
+            DataType::Struct(su) if su.packed => RetConv::Int {
+                two_state: super::elaborate::is_type_two_state_resolved(ty, typedef_types),
+            },
+            _ => RetConv::Keep,
+        }
+    }
+
+    /// `ret_conv_of` for a free function's declared return type.
+    fn fn_ret_conv(&self, rt: &DataType) -> RetConv {
+        let tt = &self.module.typedef_types;
+        Self::ret_conv_of(super::elaborate::resolve_typedef_chain(rt, tt), tt)
+    }
+
+    /// `ret_conv_of` for a class method's declared return type: a typedef of
+    /// the class (or an ancestor) wins over a same-named global one, and a
+    /// type parameter takes the type bound on the running object (§8.25).
+    fn method_ret_conv(&self, rt: &DataType, cname: &str) -> RetConv {
+        let tt = &self.module.typedef_types;
+        if let DataType::TypeReference {
+            name, dimensions, ..
+        } = rt
+            && !name.has_scope()
+            && dimensions.is_empty()
+        {
+            let tn = name.name.name.as_str();
+            if self.module.classes.contains_key(tn) {
+                return RetConv::Keep;
+            }
+            if let Some(dt) = self.class_local_typedef(cname, tn) {
+                return Self::ret_conv_of(super::elaborate::resolve_typedef_chain(dt, tt), tt);
+            }
+            if self.class_member_names().params.contains(tn) {
+                return match self.type_param_concrete_in(rt, cname) {
+                    Some(c) => self.concrete_ret_conv(&c),
+                    None => RetConv::Keep,
+                };
+            }
+        }
+        self.fn_ret_conv(rt)
+    }
+
+    /// `ret_conv_of` for a concrete type-parameter binding, given by name.
+    fn concrete_ret_conv(&self, name: &str) -> RetConv {
+        if matches!(name, "real" | "realtime" | "shortreal") {
+            return RetConv::Real;
+        }
+        if let Some(dt) = self.module.typedef_types.get(name) {
+            let tt = &self.module.typedef_types;
+            return Self::ret_conv_of(super::elaborate::resolve_typedef_chain(dt, tt), tt);
+        }
+        if matches!(name, "bit" | "logic" | "reg")
+            || atom_type_keyword_width(name).is_some()
+            || vector_fragment_width(name).is_some()
+        {
+            return RetConv::Int {
+                two_state: self.concrete_type_two_state(name),
+            };
+        }
+        RetConv::Keep
+    }
+
+    /// §13.4.1 / §10.7: convert a returned value to the numeric kind of its
+    /// declared return type, exactly as assigning it to a variable of that
+    /// type would. A real converts to an integral return by rounding
+    /// (§6.12.2) — before this, `function int f(); return 7.6;` handed the
+    /// caller the real 7.6 (and a 64-bit return its raw f64 bits) — and an
+    /// integral value converts to a real return. Width and signedness are
+    /// fitted by the caller; a 2-state return also maps X/Z to 0 (§6.3.1),
+    /// which the caller applies after that fit via `ret_two_state`.
+    /// `width` (0 = 64) and `signed` size an integral result for a caller
+    /// that does not fit it afterwards.
+    #[cold]
+    #[inline(never)]
+    fn ret_convert(v: Value, conv: RetConv, width: u32, signed: Option<bool>) -> Value {
+        match conv {
+            RetConv::Int { .. } if v.is_real => {
+                let mut r = Self::real_to_int(v.to_f64(), if width > 0 { width } else { 64 });
+                if let Some(sg) = signed {
+                    r.is_signed = sg;
+                }
+                r
+            }
+            RetConv::Real if !v.is_real && !v.is_fill => Value::from_f64(v.to_f64()),
+            _ => v,
+        }
+    }
+
+    /// Width and signedness of a class method's declared return type that
+    /// the method epilogue's own fits do not cover: an enum, a packed struct
+    /// or a typedef (the class's own first). `(0, None)` otherwise.
+    #[cold]
+    #[inline(never)]
+    fn method_ret_typedef_fit(&self, rt: &DataType, cname: &str) -> (u32, Option<bool>) {
+        let tt = &self.module.typedef_types;
+        let dt = match rt {
+            DataType::TypeReference {
+                name, dimensions, ..
+            } if dimensions.is_empty() => {
+                let local = (!name.has_scope())
+                    .then(|| self.class_local_typedef(cname, &name.name.name))
+                    .flatten();
+                match local {
+                    Some(dt) => super::elaborate::resolve_typedef_chain(dt, tt),
+                    None => super::elaborate::resolve_typedef_chain(rt, tt),
+                }
+            }
+            DataType::Enum(_) | DataType::Struct(_) => rt,
+            _ => return (0, None),
+        };
+        if matches!(dt, DataType::TypeReference { .. }) {
+            return (0, None);
+        }
+        let w = resolve_type_width(
+            dt,
+            Some(&self.module.parameters),
+            Some(&self.module.typedefs),
+        );
+        (w, Some(super::elaborate::is_type_signed_resolved(dt, tt)))
+    }
+
+    /// §13.4.1: a compiled method's declared return is integral (the method
+    /// compiler admits no real return type), but its body can still produce
+    /// a real, and a 64-bit `Resize` keeps a real as is: convert it by value,
+    /// or a `longint` method returning `t / 1ns` handed back the f64 bits.
+    /// A string result (width 0) keeps its value.
+    #[cold]
+    #[inline(never)]
+    fn compiled_ret_from_real(v: &Value, width: u32) -> Value {
+        if width == 0 {
+            return v.clone();
+        }
+        Self::real_to_int(v.to_f64(), width)
+    }
+
+    /// Whether `ret_convert` changes `v` (the cheap inline test).
+    #[inline]
+    fn ret_needs_convert(v: &Value, conv: RetConv) -> bool {
+        match conv {
+            RetConv::Keep => false,
+            RetConv::Real => !v.is_real && !v.is_fill,
+            RetConv::Int { .. } => v.is_real,
+        }
+    }
+
+    /// The 2-state half of the §13.4.1 return conversion: X/Z read as 0.
+    #[inline]
+    fn ret_two_state(v: Value, conv: RetConv) -> Value {
+        match conv {
+            RetConv::Int { two_state: true } if v.has_xz() => v.to_two_state(),
+            _ => v,
+        }
+    }
+
     /// The full `a::b::c` join of a pure `::`-chain expression (nested
     /// member accesses rooted at a plain identifier), or `None` when the
     /// expression is not a pure name chain. Unlike
@@ -141896,6 +142074,12 @@ impl Simulator {
             self.static_fn_ret.insert(k, result.clone());
         }
         let unpacked_struct_ret = self.unpacked_struct_of(&fd.return_type).is_some();
+        // §13.4.1: a real returned from an integral function (or the
+        // reverse) converts by value first; the fit below then sizes it.
+        let ret_conv = self.fn_ret_conv(&fd.return_type);
+        if Self::ret_needs_convert(&result, ret_conv) {
+            result = Self::ret_convert(result, ret_conv, 0, None);
+        }
         if !result.is_real
             && !unpacked_struct_ret
             && !Self::is_string_data_type(&fd.return_type)
@@ -141913,6 +142097,7 @@ impl Simulator {
                 result = result.resize(w);
             }
             result.is_signed = super::elaborate::is_type_signed(&fd.return_type);
+            result = Self::ret_two_state(result, ret_conv);
         }
         // Assoc / fixed-array formals copy element-wise, but the copy is
         // applied only after the caller's shadowed storage is restored
@@ -148678,6 +148863,9 @@ impl Simulator {
                                 .cloned()
                                 .unwrap_or_else(|| Value::zero(1));
                             let mut result = value;
+                            if result.is_real && !entry.is_class_result && !entry.is_void_result {
+                                result = Self::compiled_ret_from_real(&result, entry.result_width);
+                            }
                             if entry.result_width > 0 && result.width != entry.result_width {
                                 result = result.resize_for_assign(entry.result_width);
                             }
@@ -161476,6 +161664,20 @@ impl Simulator {
                     },
                     _ => None,
                 };
+                // §13.4.1: the numeric kind of the declared return type, for
+                // the value conversion at the return below.
+                let ret_conv = match (&method.kind, plan.ret.as_ref()) {
+                    // A class-handle return (the common UVM shape): no lookup.
+                    (ClassMethodKind::Function(_), Some(r))
+                        if r.class.is_some() && plan.type_gen == self.type_tables_gen =>
+                    {
+                        RetConv::Keep
+                    }
+                    (ClassMethodKind::Function(f), _) if method_name != "new" => {
+                        self.method_ret_conv(&f.return_type, &cname)
+                    }
+                    _ => RetConv::Keep,
+                };
                 // A STATIC call (no object) of a function whose return is
                 // sized by a class parameter: the call's specialization
                 // sizes it, there being no instance to read it from.
@@ -161672,6 +161874,13 @@ impl Simulator {
                     .take()
                     .or(implicit)
                     .unwrap_or(Value::zero(32));
+                if Self::ret_needs_convert(&ret, ret_conv)
+                    && !ret_is_string
+                    && let ClassMethodKind::Function(f) = &method.kind
+                {
+                    let (w, sg) = self.method_ret_typedef_fit(&f.return_type, &cname);
+                    ret = Self::ret_convert(ret, ret_conv, w, sg);
+                }
                 // Per-instance return clamp for a class-parameter-sized
                 // return type: `box#(4)` with `function bit [W-1:0] mk()`
                 // must hand back 4 bits, not whatever width the body's
@@ -161736,6 +161945,7 @@ impl Simulator {
                         );
                     }
                 }
+                ret = Self::ret_two_state(ret, ret_conv);
                 // Snapshot output/ref formal values before dropping locals.
                 let writebacks: Vec<(String, Value, Expression)> = output_bindings
                     .iter()
@@ -164271,6 +164481,9 @@ impl Simulator {
         if pre.is_collection_result {
             return Some(Value::zero(32));
         }
+        if result.is_real && !pre.is_class_result && !pre.is_void_result {
+            result = Self::compiled_ret_from_real(&result, result_width);
+        }
         if result_width > 0 && result.width != result_width {
             result = result.resize_for_assign(result_width);
         }
@@ -164788,6 +165001,9 @@ impl Simulator {
         self.this_stack.pop();
         self.pop_and_restore_queue_frame();
         let mut result = result;
+        if result.is_real && !entry.is_class_result && !entry.is_void_result {
+            result = Self::compiled_ret_from_real(&result, entry.result_width);
+        }
         if entry.result_width > 0 && result.width != entry.result_width {
             result = result.resize_for_assign(entry.result_width);
         }
@@ -165085,6 +165301,9 @@ impl Simulator {
         self.this_stack.pop();
         self.pop_and_restore_queue_frame();
         let mut result = result;
+        if result.is_real && !entry.is_class_result && !entry.is_void_result {
+            result = Self::compiled_ret_from_real(&result, entry.result_width);
+        }
         if entry.result_width > 0 && result.width != entry.result_width {
             result = result.resize_for_assign(entry.result_width);
         }
@@ -165180,6 +165399,9 @@ impl Simulator {
                         .cloned()
                         .unwrap_or_else(|| Value::zero(1));
                     let mut result = value;
+                    if result.is_real && !entry.is_class_result && !entry.is_void_result {
+                        result = Self::compiled_ret_from_real(&result, entry.result_width);
+                    }
                     if entry.result_width > 0 && result.width != entry.result_width {
                         result = result.resize_for_assign(entry.result_width);
                     }
@@ -165344,6 +165566,9 @@ impl Simulator {
         self.pop_and_restore_queue_frame();
         // Result clamping mirrors `try_run_compiled_method`'s tail.
         let mut result = result;
+        if result.is_real && !entry.is_class_result && !entry.is_void_result {
+            result = Self::compiled_ret_from_real(&result, entry.result_width);
+        }
         if entry.result_width > 0 && result.width != entry.result_width {
             result = result.resize_for_assign(entry.result_width);
         }
