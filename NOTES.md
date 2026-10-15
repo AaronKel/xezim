@@ -319,6 +319,13 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   `randomize()`, derived classes and `C#(args)::name`, including packed and
   unpacked array typedefs (§8.25, §6.18). `T'(v)` casts to the bound type,
   `T [1:0]` sizes by it, and `$bits(obj.arr)` sizes the whole array member.
+  `obj.m = new` for a `self_t` or `G#(T)` member, packed structs with
+  type-parameter members and nested classes using the enclosing class's
+  parameters follow the object's specialization too (§8.23).
+* Values stored into queues and dynamic arrays (`push_back`, `push_front`,
+  `insert`, indexed writes, `q = {q, v}`) are converted to the element type in
+  every scope, and concatenation onto class queue members works (§7.10.2,
+  §10.10).
 * Compiled class methods: element selects and stores on multi-dimensional
   packed members give the right bits, collection returns and typedef-alias
   reads of static collections resolve per specialization, `Class::m()` inside
