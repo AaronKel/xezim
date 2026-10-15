@@ -277,6 +277,8 @@ mod typedef_same_named_hierarchy;
 mod typedef_specialization_dispatch;
 #[path = "types/typedef_two_state_and_untyped_param_sign.rs"]
 mod typedef_two_state_and_untyped_param_sign;
+#[path = "types/typename_real_expressions.rs"]
+mod typename_real_expressions;
 #[path = "types/typeparam_default_resolution.rs"]
 mod typeparam_default_resolution;
 #[path = "types/typeparam_typeid_create.rs"]

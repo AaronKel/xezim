@@ -72383,9 +72383,19 @@ impl Simulator {
                                     | "chandle"
                                     | "event"
                             ) {
+                                // §6.12: `realtime` is `real`.
+                                let kw = if kw == "realtime" { "real" } else { kw };
                                 return Value::from_string(kw);
                             }
                         }
+                    }
+                    // §20.6.1: an expression of type real — a real or time
+                    // literal (§5.8: `1ns` is realtime), real arithmetic, a
+                    // real-valued system or user function call.
+                    if !matches!(arg.kind, ExprKind::Ident(_))
+                        && (self.expr_is_real_static(arg) || self.call_returns_real(arg))
+                    {
+                        return Value::from_string("real");
                     }
                     // §20.6.1 / §25.9: a virtual-interface variable or class
                     // property (spelled out or through a typedef) names
@@ -113682,7 +113692,9 @@ impl Simulator {
             DataType::Real { kind, .. } => match kind {
                 RealType::Real => "real".to_string(),
                 RealType::ShortReal => "shortreal".to_string(),
-                RealType::RealTime => "realtime".to_string(),
+                // §6.12: `realtime` is a synonym for `real`; the reference
+                // simulator's $typename reports it as such.
+                RealType::RealTime => "real".to_string(),
             },
             DataType::Simple { kind, .. } => match kind {
                 SimpleType::String => "string".to_string(),
@@ -120086,6 +120098,27 @@ impl Simulator {
             },
             _ => false,
         }
+    }
+
+    /// §13.4.1: `e` calls a free function declared to return a real type.
+    fn call_returns_real(&self, e: &Expression) -> bool {
+        let ExprKind::Call { func, .. } = &e.kind else {
+            return false;
+        };
+        let ExprKind::Ident(h) = &func.kind else {
+            return false;
+        };
+        h.path.len() == 1
+            && self
+                .module
+                .functions
+                .get(&h.path[0].name.name)
+                .is_some_and(|fd| {
+                    super::elaborate::is_type_real_resolved(
+                        &fd.return_type,
+                        &self.module.typedef_types,
+                    )
+                })
     }
 
     /// A constant expression by its shape — literals, parameters, and
