@@ -287,6 +287,18 @@ struct Fit {
     modw: u32,
 }
 
+/// How a relation reads its operands at their own width (§11.8.2): `w`
+/// bits of signedness `s`, the first `n` fits being the operands' own. For
+/// a `Node::Lin` the next two fits are the left and right sides, and its
+/// `lin` is `sg·(left - right) + δ`.
+#[derive(Clone, Copy, Debug)]
+struct Wrap {
+    w: u32,
+    s: bool,
+    n: usize,
+    sg: i128,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Rel {
     /// `lin <= 0`
@@ -307,11 +319,13 @@ enum Node {
         fits: Vec<Fit>,
         src: usize,
         sneg: bool,
-        /// An equality compared at `w` bits whose first `n` fits are the
-        /// operands' own: (w, n). The remaining fits only keep each side
-        /// from wrapping, which an equality does not need, nor an operand
-        /// fit with `modw >= w` (see `csp_wrap_eq`, `St::fits_hold_mod`).
-        wrap: Option<(u32, usize)>,
+        /// A relation compared at `w` bits whose first `n` fits are the
+        /// operands' own, and whose two sides are the next two fits (see
+        /// `Wrap`). An equality does not need the side fits, nor an operand
+        /// fit with `modw >= w` (see `csp_wrap_eq`, `St::fits_hold_mod`);
+        /// another relation compares the sides' wrapped values
+        /// (`csp_wrap_rel`).
+        wrap: Option<Wrap>,
     },
     /// `lin inside set` (or not, with `neg`).
     In {
@@ -320,6 +334,11 @@ enum Node {
         neg: bool,
         fits: Vec<Fit>,
         src: usize,
+        /// §11.4.13: the operand is compared at `w` bits of signedness `s`
+        /// after its first `n` fits (the operands' own); past them only
+        /// its last fit (the operand staying in that type) is left, and a
+        /// value that leaves it wraps (`csp_wrap_set`).
+        wrap: Option<Wrap>,
     },
     AllDiff(Vec<usize>),
     /// §20.9: `c == $countones(x)` for a variable `x` of `w` bits and its
@@ -2622,9 +2641,12 @@ impl Simulator {
                 wrap,
             } => {
                 if !st.fits_hold(fits) {
-                    if let Some((w, n)) = *wrap
-                        && st.fits_hold_mod(&fits[..n], w)
-                        && let Some(ok) = Self::csp_wrap_eq(lin, w, st)
+                    if let Some(wr) = *wrap
+                        && st.fits_hold_mod(&fits[..wr.n], wr.w)
+                        && let Some(ok) = match rel {
+                            Rel::Eq => Self::csp_wrap_eq(lin, wr.w, st),
+                            _ => Self::csp_wrap_rel(lin, *rel, fits, wr, st),
+                        }
                     {
                         return ok;
                     }
@@ -2664,8 +2686,15 @@ impl Simulator {
                 neg,
                 fits,
                 src,
+                wrap,
             } => {
                 if !st.fits_hold(fits) {
+                    if let Some(wr) = *wrap
+                        && st.fits_hold_mod(&fits[..wr.n], wr.w)
+                        && let Some(ok) = Self::csp_wrap_set(lin, set, *neg, wr.w, wr.s, st)
+                    {
+                        return ok;
+                    }
                     return !self.csp_src_fixed(csp, st, *src)
                         || self.csp_eval_src(csp, st, *src) != *neg;
                 }
@@ -2913,6 +2942,163 @@ impl Simulator {
         Some(st.set(v, nd))
     }
 
+    /// §11.4.13/§11.8.2: `lin` computed at `w` bits of signedness `s` is
+    /// its value wrapped into that type, so with one variable left open
+    /// (`c + 4000 inside {[4003:4004]}`, `2 * c inside {[10:11]}`) keep the
+    /// values whose wrapped result lies in `set` (outside it with `neg`).
+    /// Without this a relation whose operand may overflow waited for the
+    /// evaluator until every variable was guessed. None when that does not
+    /// apply (several open variables, too many candidates).
+    fn csp_wrap_set(lin: &Lin, set: &Dom, neg: bool, w: u32, s: bool, st: &mut St) -> Option<bool> {
+        if w == 0 || w > 64 {
+            return None;
+        }
+        let m: i128 = 1i128 << w;
+        let (rlo, rhi) = ws_range(w, s);
+        let mut free: Option<(usize, i128)> = None;
+        let mut rest = lin.k;
+        for &(v, c) in &lin.t {
+            match st.fixed(v) {
+                Some(x) => rest += c * x,
+                None if free.is_none() => free = Some((v, c)),
+                None => return None,
+            }
+        }
+        let target: Dom = if neg {
+            dom_minus(&vec![(rlo, rhi)], set)
+        } else {
+            dom_clip(set, rlo, rhi)
+        };
+        let Some((v, c)) = free else {
+            return Some(dom_has(&target, rlo + (rest - rlo).rem_euclid(m)));
+        };
+        let (lo, hi) = st.bounds(v);
+        if lo > hi {
+            return Some(false);
+        }
+        const MAX_CANDS: usize = 64;
+        let mut allowed: Vec<(i128, i128)> = Vec::new();
+        if c == 1 || c == -1 {
+            // y = c·x + rest over x in [lo, hi] meets the target once per
+            // multiple of 2^w it spans.
+            let (ylo, yhi) = if c == 1 {
+                (lo + rest, hi + rest)
+            } else {
+                (rest - hi, rest - lo)
+            };
+            let (j0, j1) = (floor_div(ylo - rlo, m), floor_div(yhi - rlo, m));
+            if j1 - j0 > 8 {
+                return None;
+            }
+            for j in j0..=j1 {
+                for &(a, b) in &target {
+                    let (a, b) = ((a + j * m).max(ylo), (b + j * m).min(yhi));
+                    if a <= b {
+                        allowed.push(if c == 1 {
+                            (a - rest, b - rest)
+                        } else {
+                            (rest - b, rest - a)
+                        });
+                    }
+                }
+            }
+        } else {
+            // c·x ≡ t - rest (mod 2^w) for each target value t: solvable
+            // when 2^tz(c) divides it, then x is fixed modulo 2^(w - tz).
+            if dom_size(&target) > MAX_CANDS as u128 {
+                return None;
+            }
+            let tz = c.trailing_zeros().min(w);
+            if tz == w {
+                return Some(dom_has(&target, rlo + (rest - rlo).rem_euclid(m)));
+            }
+            let g = 1i128 << tz;
+            let mg = m >> tz;
+            let a = ((c >> tz).rem_euclid(mg)) as u128;
+            // Newton iteration: the inverse of an odd `a` modulo 2^128.
+            let mut inv: u128 = a;
+            for _ in 0..7 {
+                inv = inv.wrapping_mul(2u128.wrapping_sub(a.wrapping_mul(inv)));
+            }
+            let mask = (mg - 1) as u128;
+            for &(ta, tb) in &target {
+                for t in ta..=tb {
+                    let r = (t - rest).rem_euclid(m);
+                    if r % g != 0 {
+                        continue;
+                    }
+                    let x0 = (((r / g) as u128).wrapping_mul(inv) & mask) as i128;
+                    let mut x = x0 + ceil_div(lo - x0, mg) * mg;
+                    while x <= hi {
+                        if allowed.len() >= MAX_CANDS {
+                            return None;
+                        }
+                        allowed.push((x, x));
+                        x += mg;
+                    }
+                }
+            }
+        }
+        let nd = dom_meet(&st.d[v], &dom_norm(allowed));
+        Some(st.set(v, nd))
+    }
+
+    /// §11.8.2: a relation (`<=`, `!=`, …) compares its two sides each
+    /// wrapped at `w` bits, so once one side is fixed it is a set the other
+    /// side's wrapped value must lie in (`c + v0 >= v0 + 3` once `v0` is
+    /// known), handed to `csp_wrap_set`. None when both sides are open.
+    fn csp_wrap_rel(lin: &Lin, rel: Rel, fits: &[Fit], wr: Wrap, st: &mut St) -> Option<bool> {
+        let (la, lb) = (&fits.get(wr.n)?.lin, &fits.get(wr.n + 1)?.lin);
+        let (w, s, sg) = (wr.w, wr.s, wr.sg);
+        if w == 0 || w > 64 {
+            return None;
+        }
+        let m: i128 = 1i128 << w;
+        let (rlo, rhi) = ws_range(w, s);
+        let wrapv = |y: i128| rlo + (y - rlo).rem_euclid(m);
+        // `lin` is sg·(la - lb) + δ
+        let delta = lin.k - sg * (la.k - lb.k);
+        let value = |l: &Lin, st: &St| -> Option<i128> {
+            let mut x = l.k;
+            for &(v, c) in &l.t {
+                x += c * st.fixed(v)?;
+            }
+            Some(x)
+        };
+        let holds = |d: i128| match rel {
+            Rel::Le => d <= 0,
+            Rel::Eq => d == 0,
+            Rel::Ne => d != 0,
+        };
+        let (va, vb) = (value(la, st), value(lb, st));
+        // The open side `x` and the other side's wrapped value `k`:
+        // sg·(x - k) + δ (left open) or sg·(k - x) + δ (right open).
+        let (x, k, left) = match (va, vb) {
+            (Some(a), Some(b)) => return Some(holds(sg * (wrapv(a) - wrapv(b)) + delta)),
+            (None, Some(b)) => (la, wrapv(b), true),
+            (Some(a), None) => (lb, wrapv(a), false),
+            (None, None) => return None,
+        };
+        let (set, neg) = match rel {
+            Rel::Le => {
+                // x <= k - δ when the open side counts up, else x >= k + δ
+                let up = (sg == 1) == left;
+                let r = if up {
+                    (rlo, k - delta)
+                } else {
+                    (k + delta, rhi)
+                };
+                (if r.0 <= r.1 { vec![r] } else { Vec::new() }, false)
+            }
+            Rel::Eq | Rel::Ne => {
+                // sg·(±(x - k)) + δ == 0: x == k ∓ sg·δ
+                let t = if left { k - sg * delta } else { k + sg * delta };
+                (vec![(t, t)], rel == Rel::Ne)
+            }
+        };
+        Self::csp_wrap_set(x, &set, neg, w, s, st)
+    }
+
     /// Entailed (`Some(true)`), refuted (`Some(false)`) or open.
     fn csp_status(&mut self, csp: &Csp, n: &Node, st: &St) -> Option<bool> {
         match n {
@@ -2954,6 +3140,7 @@ impl Simulator {
                 neg,
                 fits,
                 src,
+                ..
             } => {
                 if !st.fits_hold(fits) {
                     if self.csp_src_fixed(csp, st, *src) {
@@ -4388,6 +4575,7 @@ impl Simulator {
                 neg: false,
                 fits: Vec::new(),
                 src,
+                wrap: None,
             };
             alts.push(Self::csp_wide_and(vec![pick, node]));
         }
@@ -4894,6 +5082,7 @@ impl Simulator {
             neg: inv,
             fits,
             src,
+            wrap: None,
         })
     }
 
@@ -5017,7 +5206,12 @@ impl Simulator {
         deps.sort_unstable();
         deps.dedup();
         let src = self.csp_src(csp, SrcItem::Expr(whole.clone()), env, deps);
-        let wrap = (rel == Rel::Eq).then_some((w, nleaf));
+        let sg = if matches!(op, BinaryOp::Gt | BinaryOp::Geq) {
+            -1
+        } else {
+            1
+        };
+        let wrap = Some(Wrap { w, s, n: nleaf, sg });
         Some(Node::Lin {
             lin,
             rel,
@@ -5220,6 +5414,7 @@ impl Simulator {
             return self.csp_eval_node(csp, whole, env, neg);
         }
         let (rlo, rhi) = ws_range(w, s);
+        let nleaf = fits.len();
         fits.push(Fit {
             lin: lin.clone(),
             lo: rlo,
@@ -5239,6 +5434,12 @@ impl Simulator {
             neg,
             fits,
             src,
+            wrap: Some(Wrap {
+                w,
+                s,
+                n: nleaf,
+                sg: 1,
+            }),
         })
     }
 
@@ -8932,6 +9133,7 @@ impl Simulator {
                 neg: false,
                 fits: Vec::new(),
                 src,
+                wrap: None,
             });
         }
         Some(out)
