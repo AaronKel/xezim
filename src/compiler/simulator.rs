@@ -76364,8 +76364,8 @@ impl Simulator {
                 let mut left_is_str: Option<bool> = None;
                 let mut right_is_str: Option<bool> = None;
                 if matches!(op, BinaryOp::Eq | BinaryOp::Neq)
-                    && *left_is_str.get_or_insert_with(|| self.expr_is_string_valued(left))
-                    && *right_is_str.get_or_insert_with(|| self.expr_is_string_valued(right))
+                    && *left_is_str.get_or_insert_with(|| self.operand_is_string(left))
+                    && *right_is_str.get_or_insert_with(|| self.operand_is_string(right))
                 {
                     let ls = l.to_sv_string();
                     let rs = r.to_sv_string();
@@ -76429,8 +76429,8 @@ impl Simulator {
                         | BinaryOp::Geq
                         | BinaryOp::Eq
                         | BinaryOp::Neq
-                ) && (left_is_str.unwrap_or_else(|| self.expr_is_string_valued(left))
-                    || right_is_str.unwrap_or_else(|| self.expr_is_string_valued(right)))
+                ) && (left_is_str.unwrap_or_else(|| self.operand_is_string(left))
+                    || right_is_str.unwrap_or_else(|| self.operand_is_string(right)))
                 {
                     // §6.16: string comparison is by TEXT. Equality also goes
                     // through here because an out-of-bounds string-collection
@@ -77612,10 +77612,10 @@ impl Simulator {
                 if let ExprKind::Ident(hier) = &expr.kind {
                     let nm = base_nm.as_deref().unwrap_or("");
                     if self.string_signals.contains(nm) {
-                        let content = self.eval_expr(expr).to_sv_string();
+                        let content = self.eval_expr(expr).sv_string_bytes();
                         let i = self.eval_expr(index).to_u64().unwrap_or(0) as usize;
-                        let byte = content.as_bytes().get(i).copied().unwrap_or(0);
-                        return Value::from_u64(byte as u64, 8);
+                        let byte = content.get(i).copied().unwrap_or(0);
+                        return Self::sv_byte(byte);
                     }
                 }
                 // Nested packed multi-D select (`a[i][j]` on
@@ -77836,10 +77836,10 @@ impl Simulator {
                 ) {
                     if let Some(fname) = self.flat_member_name(expr) {
                         if self.is_string_collection(&fname) {
-                            let text = self.eval_expr(expr).to_sv_string();
+                            let text = self.eval_expr(expr).sv_string_bytes();
                             let i = self.eval_expr(index).to_u64().unwrap_or(0) as usize;
-                            let b = text.as_bytes().get(i).copied().unwrap_or(0);
-                            return Value::from_u64(b as u64, 8);
+                            let b = text.get(i).copied().unwrap_or(0);
+                            return Self::sv_byte(b);
                         }
                     }
                 }
@@ -88966,12 +88966,7 @@ impl Simulator {
         if matches!(mname, "compare" | "icompare") && args.len() == 1 {
             let a = self.eval_expr(recv).to_sv_string();
             let b = self.eval_expr(&args[0]).to_sv_string();
-            let (a, b) = if mname == "icompare" {
-                (a.to_lowercase(), b.to_lowercase())
-            } else {
-                (a, b)
-            };
-            let d: i64 = Self::sv_strcmp(&a, &b);
+            let d: i64 = Self::sv_strcmp(&a, &b, mname == "icompare");
             let mut v = Value::from_u64(d as u64, 32);
             v.is_signed = true;
             return Some(v);
@@ -90524,6 +90519,19 @@ impl Simulator {
 
     /// Best-effort check that an expression evaluates to a SystemVerilog string
     /// (so `$write`/`$fwrite` without a format string emits text, not a number).
+    /// [`Self::expr_is_string_valued`] for an OPERATOR operand, minus the
+    /// character selects: `s[i]` on a scalar string is a `byte` (§6.16.3),
+    /// so `s[0] < 0` is an integral, signed comparison, not a text one.
+    fn operand_is_string(&mut self, expr: &Expression) -> bool {
+        if !self.expr_is_string_valued(expr) {
+            return false;
+        }
+        match &expr.kind {
+            ExprKind::Index { expr: base, .. } => !self.string_char_receiver_is_scalar(base),
+            _ => true,
+        }
+    }
+
     fn expr_is_string_valued(&self, expr: &Expression) -> bool {
         match &expr.kind {
             ExprKind::StringLiteral(_) => true,
@@ -111345,7 +111353,7 @@ impl Simulator {
             K::GetC => {
                 let idx = v(1).to_u64().unwrap_or(0) as usize;
                 let b = v(0).sv_string_bytes().get(idx).copied().unwrap_or(0);
-                Value::from_u64(b as u64, 8)
+                Self::sv_byte(b)
             }
             K::Substr => {
                 // Mirror of the AST rule: length from the highest set bit,
@@ -111369,16 +111377,15 @@ impl Simulator {
                     Value::zero(0)
                 }
             }
-            K::ToUpper => Value::from_string(&v(0).to_sv_string().to_uppercase()),
-            K::ToLower => Value::from_string(&v(0).to_sv_string().to_lowercase()),
-            K::Compare | K::ICompare => {
+            K::ToUpper => Value::from_string(&Self::sv_ascii_case(&v(0).to_sv_string(), true)),
+            K::ToLower => Value::from_string(&Self::sv_ascii_case(&v(0).to_sv_string(), false)),
+            K::Compare | K::ICompare | K::Order => {
                 let (a, b) = (v(0).to_sv_string(), v(1).to_sv_string());
-                let (a, b) = if kind == K::ICompare {
-                    (a.to_lowercase(), b.to_lowercase())
-                } else {
-                    (a, b)
+                let d = match kind {
+                    K::Compare => Self::sv_strcmp(&a, &b, false),
+                    K::ICompare => Self::sv_strcmp(&a, &b, true),
+                    _ => Self::sv_str_order(&a, &b),
                 };
-                let d = Self::sv_strcmp(&a, &b);
                 let mut out = Value::from_u64(d as u64, 32);
                 out.is_signed = true;
                 out
@@ -120251,16 +120258,69 @@ impl Simulator {
     /// §6.16.6 compare/icompare, matching the reference simulator: the
     /// byte difference at the first mismatch within the common length,
     /// or ±1 by length when one string is a prefix of the other.
-    fn sv_strcmp(a: &str, b: &str) -> i64 {
-        for (ca, cb) in a.bytes().zip(b.bytes()) {
+    /// `compare` takes the difference of the characters as SIGNED bytes
+    /// (`"\x80".compare("\x7f")` is -255), `icompare` as unsigned bytes
+    /// after ASCII case folding. Both operands are string text forms (one
+    /// Latin-1 char per byte), so they are walked by char, never by their
+    /// UTF-8 encoding.
+    fn sv_strcmp(a: &str, b: &str, icase: bool) -> i64 {
+        Self::sv_strcmp_by(a, b, |b| {
+            if icase {
+                b.to_ascii_lowercase() as i64
+            } else {
+                b as i8 as i64
+            }
+        })
+    }
+
+    /// The lexicographic ORDER of two strings for the `==`/`<` operator
+    /// family (§6.16 Table 6-9): unsigned byte differences.
+    fn sv_str_order(a: &str, b: &str) -> i64 {
+        Self::sv_strcmp_by(a, b, |b| b as i64)
+    }
+
+    fn sv_strcmp_by(a: &str, b: &str, byte: impl Fn(u8) -> i64) -> i64 {
+        let byte = |c: char| byte(c as u32 as u8);
+        for (ca, cb) in a.chars().zip(b.chars()) {
+            let (ca, cb) = (byte(ca), byte(cb));
             if ca != cb {
-                return ca as i64 - cb as i64;
+                return ca - cb;
             }
         }
-        match a.len().cmp(&b.len()) {
+        match a.chars().count().cmp(&b.chars().count()) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
+        }
+    }
+
+    /// §6.16: a string character is a `byte` — SIGNED 8-bit. `s[i]` and
+    /// `s.getc(i)` of `"\xff"` read -1, and `s[0] + s[1]` is an 8-bit signed
+    /// sum.
+    #[inline]
+    fn sv_byte(b: u8) -> Value {
+        let mut v = Value::from_u64(b as u64, 8);
+        v.is_signed = true;
+        v
+    }
+
+    /// §6.16: a string `Value` built from raw BYTES. The text form of a
+    /// string (`to_sv_string`) holds one Latin-1 char per byte, so bytes
+    /// round-trip through chars, never through UTF-8: `from_utf8_lossy` made
+    /// every byte >= 0x80 a U+FFFD, and `String::into_bytes` of a text form
+    /// yields two bytes for each of them.
+    fn sv_string_from_bytes(b: &[u8]) -> Value {
+        let s: String = b.iter().map(|&c| char::from(c)).collect();
+        Value::from_string(&s)
+    }
+
+    /// §6.16 `toupper`/`tolower`: ASCII letters only; every other byte,
+    /// including Latin-1 letters, is unchanged (and keeps its one-byte width).
+    fn sv_ascii_case(s: &str, upper: bool) -> String {
+        if upper {
+            s.to_ascii_uppercase()
+        } else {
+            s.to_ascii_lowercase()
         }
     }
 
@@ -125205,7 +125265,7 @@ impl Simulator {
                     .get(idx)
                     .copied()
                     .unwrap_or(0);
-                return Some(Value::from_u64(b as u64, 8));
+                return Some(Self::sv_byte(b));
             }
             return Some(Value::zero(8));
         }
@@ -136478,11 +136538,11 @@ impl Simulator {
                             .first()
                             .map(|e| self.eval_expr(e).to_u64().unwrap_or(0) as usize)
                             .unwrap_or(0);
-                        let b = text.as_bytes().get(i).copied().unwrap_or(0);
-                        return Value::from_u64(b as u64, 8);
+                        let b = text.chars().nth(i).map_or(0, |c| c as u32 as u8);
+                        return Self::sv_byte(b);
                     }
-                    "toupper" => return Value::from_string(&text.to_uppercase()),
-                    "tolower" => return Value::from_string(&text.to_lowercase()),
+                    "toupper" => return Value::from_string(&Self::sv_ascii_case(&text, true)),
+                    "tolower" => return Value::from_string(&Self::sv_ascii_case(&text, false)),
                     "atoi" | "atohex" | "atooct" | "atobin" => {
                         let radix = match mname {
                             "atohex" => 16,
@@ -136498,12 +136558,7 @@ impl Simulator {
                             .first()
                             .map(|e| self.eval_expr(e).to_sv_string())
                             .unwrap_or_default();
-                        let (l, r) = if mname == "icompare" {
-                            (text.to_lowercase(), other.to_lowercase())
-                        } else {
-                            (text.clone(), other)
-                        };
-                        let c: i64 = Self::sv_strcmp(&l, &r);
+                        let c: i64 = Self::sv_strcmp(&text, &other, mname == "icompare");
                         let mut v = Value::from_u64(c as u64, 32);
                         v.is_signed = true;
                         return v;
@@ -137012,18 +137067,17 @@ impl Simulator {
                                 } else {
                                     0
                                 };
-                                return Value::from_u64(b as u64, 8);
+                                return Self::sv_byte(b);
                             }
                             _ => {
                                 let (i, j) =
                                     (arg(self, 0).unwrap_or(-1), arg(self, 1).unwrap_or(-1));
-                                let out = if i < 0 || j < i || j as usize >= bytes.len() {
-                                    String::new()
+                                let out: &[u8] = if i < 0 || j < i || j as usize >= bytes.len() {
+                                    &[]
                                 } else {
-                                    String::from_utf8_lossy(&bytes[i as usize..=j as usize])
-                                        .into_owned()
+                                    &bytes[i as usize..=j as usize]
                                 };
-                                return Value::from_string(&out);
+                                return Self::sv_string_from_bytes(out);
                             }
                         }
                     }

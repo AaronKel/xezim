@@ -262,6 +262,10 @@ pub enum StrOpKind {
     HexToA,   // [v]
     OctToA,   // [v]
     BinToA,   // [v]
+    /// [a, b] -> unsigned-byte strcmp difference: the ORDER the `==`/`<`
+    /// family of operators compares strings by (§6.16 Table 6-9). Only the
+    /// `compare()` METHOD takes signed-byte differences.
+    Order,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -12865,7 +12869,7 @@ impl<'a> BytecodeCompiler<'a> {
                             && self.expr_is_string_static(right) =>
                     {
                         let cmp = self.alloc_reg();
-                        self.emit(Insn::StrOp(cmp, StrOpKind::Compare, Box::new(vec![l, r])));
+                        self.emit(Insn::StrOp(cmp, StrOpKind::Order, Box::new(vec![l, r])));
                         let z = self.alloc_reg();
                         let mut zero = Value::from_u64(0, 32);
                         zero.is_signed = true;
@@ -12897,7 +12901,7 @@ impl<'a> BytecodeCompiler<'a> {
                             && self.expr_is_string_static(right) =>
                     {
                         let cmp = self.alloc_reg();
-                        self.emit(Insn::StrOp(cmp, StrOpKind::Compare, Box::new(vec![l, r])));
+                        self.emit(Insn::StrOp(cmp, StrOpKind::Order, Box::new(vec![l, r])));
                         let z = self.alloc_reg();
                         let mut zero = Value::from_u64(0, 32);
                         zero.is_signed = true;

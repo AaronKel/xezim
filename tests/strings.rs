@@ -125,3 +125,7 @@ mod vpi_typed_port_kinds;
 mod wide_string2num;
 #[path = "strings/dpi_typedef_return.rs"]
 mod dpi_typedef_return;
+#[path = "classes/compiled_method_test_env.rs"]
+mod compiled_method_test_env;
+#[path = "strings/string_char_select_signed.rs"]
+mod string_char_select_signed;
