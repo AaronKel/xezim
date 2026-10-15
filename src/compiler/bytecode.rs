@@ -13050,6 +13050,15 @@ impl<'a> BytecodeCompiler<'a> {
                     self.bail("string_formal_index");
                     return None;
                 }
+                // §6.16: `s[i]` on a string local reads byte i, 0 when out of
+                // range, as `s.getc(i)`. The generic tail below bit-selected
+                // the register, so `s[0] != "["` compared bit 0 of the text.
+                if let Some(src) = self.string_local_reg(expr) {
+                    let i = self.compile_expr(index, 32)?;
+                    let dst = self.alloc_reg();
+                    self.emit(Insn::StrOp(dst, StrOpKind::GetC, Box::new(vec![src, i])));
+                    return Some(dst);
+                }
                 // class-perf Step 9b-ii: element READ of a member collection
                 // (`q[i]`, `aa[k]`, `this.aa[k]`, `obj.aa[k]`) inside a
                 // method body — lower to LoadCollElem (delegated exec). Sit
@@ -17768,6 +17777,21 @@ impl<'a> BytecodeCompiler<'a> {
         system_function_result(name).map(|(w, _)| w)
     }
 
+    /// The register of a bare string local (`s`, not `s[i]` or a member).
+    fn string_local_reg(&self, e: &Expression) -> Option<RegId> {
+        let ExprKind::Ident(h) = &e.kind else {
+            return None;
+        };
+        if h.root.is_some() || h.path.len() != 1 || !h.path[0].selects.is_empty() {
+            return None;
+        }
+        let name = h.path[0].name.name.as_str();
+        if !self.local_var_is_string.contains(name) {
+            return None;
+        }
+        self.local_var_regs.get(name).map(|&(r, _)| r)
+    }
+
     fn expr_max_width(&self, expr: &Expression) -> u32 {
         match &expr.kind {
             ExprKind::Ident(hier) => self
@@ -17911,6 +17935,8 @@ impl<'a> BytecodeCompiler<'a> {
             // `d[2] = s[1] >> N` (d's element narrower than s's) lost N extra
             // high bits. The procedural interpreter got this right, so the bug
             // only showed inside `always_comb`/compiled blocks.
+            // §6.16: a select on a string local is a byte.
+            ExprKind::Index { expr: base, .. } if self.string_local_reg(base).is_some() => 8,
             ExprKind::Index { expr: base, .. } => match &base.kind {
                 // An index select is ONE BIT only when the base is a plain
                 // vector. A packed-array element has its element width — and

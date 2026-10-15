@@ -291,7 +291,7 @@ fn method_tier_threshold() -> u32 {
 /// lowering, register allocation, block layout. Stale entries with an old
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3035;
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3036;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
