@@ -14041,6 +14041,20 @@ impl<'a> BytecodeCompiler<'a> {
                 "$__xz_named_cast" => {
                     // `pkg::T'(x)` prefers the qualified `pkg::T` entry.
                     let target = args.first().and_then(|a| match &a.kind {
+                        // §8.23: a scoped `cls::N` identifier path prefers
+                        // its qualified entry.
+                        ExprKind::Ident(h) if h.path.len() >= 2 => {
+                            let n = h.path.len();
+                            let key =
+                                format!("{}::{}", h.path[n - 2].name.name, h.path[n - 1].name.name);
+                            let known = self.cast_widths.is_some_and(|m| m.contains_key(&key))
+                                || self.params.is_some_and(|p| p.contains_key(&key));
+                            Some(if known {
+                                key
+                            } else {
+                                h.path[n - 1].name.name.clone()
+                            })
+                        }
                         ExprKind::Ident(h) => h.path.last().map(|s| s.name.name.clone()),
                         ExprKind::MemberAccess { expr, member } => match &expr.kind {
                             ExprKind::Ident(h) => {

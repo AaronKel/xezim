@@ -83706,6 +83706,16 @@ impl Simulator {
             } else {
                 &typedef_dims
             };
+            // §7.4.2 / §8.23: a dimension sized by a constant of the
+            // enclosing scope (`l[N]`, `l[N * 2]`, `l[cls::N]`) — the
+            // context-free evaluation below cannot resolve it.
+            let scope_sized: Option<Vec<crate::ast::types::UnpackedDimension>> =
+                if dims.iter().any(Self::local_dim_needs_scope) {
+                    self.scope_sized_local_dims(dims)
+                } else {
+                    None
+                };
+            let dims = scope_sized.as_ref().unwrap_or(dims);
             // A local MULTI-dimensional array was registered from its
             // first dimension only, so `int n[2][2]` became a 1-D array
             // of double-width elements: `n[1][0]` read 0 and the
@@ -87149,6 +87159,133 @@ impl Simulator {
                 );
             }
         }
+    }
+
+    /// Whether a local's unpacked dimension needs the enclosing scope to be
+    /// sized: a size or bound that does not fold without parameters, or a
+    /// `[NAME]` that parses as an associative key type but may name a
+    /// constant.
+    fn local_dim_needs_scope(dim: &crate::ast::types::UnpackedDimension) -> bool {
+        use super::elaborate::const_eval_i64_with_params as ce;
+        use crate::ast::types::UnpackedDimension as UD;
+        match dim {
+            UD::Expression { expr, .. } => ce(expr, None).is_none(),
+            UD::Range { left, right, .. } => ce(left, None).is_none() || ce(right, None).is_none(),
+            UD::Associative {
+                data_type: Some(dt),
+                ..
+            } => matches!(
+                dt.as_ref(),
+                crate::ast::types::DataType::TypeReference { dimensions, .. } if dimensions.is_empty()
+            ),
+            _ => false,
+        }
+    }
+
+    /// §7.4.2 / §8.23: fold a local's scope-sized dimensions to literals,
+    /// evaluated in the executing scope — `[N]` whose `N` is a constant and
+    /// not a type, `[cls::N]`, and size/bound expressions over parameters or
+    /// class constants. A dimension that does not resolve is left as is.
+    #[cold]
+    #[inline(never)]
+    fn scope_sized_local_dims(
+        &mut self,
+        dims: &[crate::ast::types::UnpackedDimension],
+    ) -> Option<Vec<crate::ast::types::UnpackedDimension>> {
+        use crate::ast::expr::{ExprKind, Expression, NumberBase, NumberLiteral};
+        use crate::ast::types::UnpackedDimension as UD;
+        fn lit(n: i64, span: crate::ast::Span) -> Box<Expression> {
+            Box::new(Expression::new(
+                ExprKind::Number(NumberLiteral::Integer {
+                    size: None,
+                    signed: true,
+                    base: NumberBase::Decimal,
+                    value: n.to_string(),
+                    cached_val: Default::default(),
+                }),
+                span,
+            ))
+        }
+        let normalized = super::elaborate::normalize_unpacked_dims(
+            dims,
+            &self.module.parameters,
+            &self.module.typedef_types,
+        );
+        let mut changed = false;
+        let mut out = Vec::with_capacity(normalized.len());
+        for (orig, dim) in dims.iter().zip(normalized) {
+            let folded = match &dim {
+                UD::Expression { expr, span }
+                    if super::elaborate::const_eval_i64_with_params(expr, None).is_none() =>
+                {
+                    self.eval_expr(expr)
+                        .to_i64()
+                        .filter(|&n| n > 0)
+                        .map(|n| UD::Expression {
+                            expr: lit(n, expr.span),
+                            span: *span,
+                        })
+                }
+                UD::Range { left, right, span } => {
+                    let l = self.eval_expr(left).to_i64();
+                    let r = self.eval_expr(right).to_i64();
+                    match (l, r) {
+                        (Some(l), Some(r)) => Some(UD::Range {
+                            left: lit(l, left.span),
+                            right: lit(r, right.span),
+                            span: *span,
+                        }),
+                        _ => None,
+                    }
+                }
+                // `[N]` still associative: a constant of the executing
+                // scope (not a type) sizes it.
+                UD::Associative {
+                    data_type: Some(dt),
+                    span,
+                } => match dt.as_ref() {
+                    crate::ast::types::DataType::TypeReference { name, .. }
+                        if name.scopes.is_empty()
+                            && !self.module.typedef_types.contains_key(&name.name.name)
+                            && !self.module.classes.contains_key(&name.name.name)
+                            && self.resolve_type_param_binding(&name.name.name).is_none() =>
+                    {
+                        let id = Expression::new(
+                            ExprKind::Ident(crate::ast::expr::HierarchicalIdentifier {
+                                root: None,
+                                path: vec![crate::ast::expr::HierPathSegment {
+                                    name: name.name.clone(),
+                                    selects: Vec::new(),
+                                }],
+                                span: name.span,
+                                cached_signal_id: std::cell::Cell::new(None),
+                                cached_resolved_name: std::cell::OnceCell::new(),
+                            }),
+                            name.span,
+                        );
+                        let v = self.eval_expr(&id);
+                        (!v.is_real && v.width > 0)
+                            .then(|| v.to_i64())
+                            .flatten()
+                            .filter(|&n| n > 0)
+                            .map(|n| UD::Expression {
+                                expr: lit(n, name.span),
+                                span: *span,
+                            })
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            // `normalize_unpacked_dims` turning `[N]` into a size counts too.
+            changed |= folded.is_some()
+                || matches!(
+                    (orig, &dim),
+                    (UD::Associative { .. }, UD::Expression { .. })
+                );
+            out.push(folded.unwrap_or(dim));
+        }
+        changed.then_some(out)
     }
 
     /// Member-wise declaration initializer of an unpacked-struct local
@@ -137152,8 +137289,9 @@ impl Simulator {
                     links.push(member.name.clone());
                     cur = expr;
                 }
+                // `cls::N` may also arrive as one scoped identifier path.
                 ExprKind::Ident(h) => {
-                    links.push(h.path.last()?.name.name.clone());
+                    links.extend(h.path.iter().rev().map(|sg| sg.name.name.clone()));
                     break;
                 }
                 _ => return None,

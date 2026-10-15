@@ -537,6 +537,8 @@ mod assoc_enum_key_class_property;
 
 #[path = "classes/array_of_collections_property.rs"]
 mod array_of_collections_property;
+#[path = "classes/class_scoped_param_dimension.rs"]
+mod class_scoped_param_dimension;
 #[path = "classes/array_query_handle_qualified_member.rs"]
 mod array_query_handle_qualified_member;
 #[path = "classes/assoc_wide_packed_struct_key.rs"]
