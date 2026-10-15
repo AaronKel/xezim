@@ -72723,10 +72723,18 @@ impl Simulator {
             } else {
                 q
             };
-            if self.module.classes.contains_key(&cls)
-                && let Some(v) = self.class_static_get(&cls, &member.name)
-            {
-                return v;
+            if self.module.classes.contains_key(&cls) {
+                // §13.5.1: a no-argument static FUNCTION named without
+                // parens (`pkg::C#(..)::type_name`) is a call.
+                if self.is_static_method(&cls, &member.name)
+                    && self.class_parameterless_function(&cls, &member.name)
+                    && let Some(v) = self.exec_static_method(&cls, &member.name, &[])
+                {
+                    return v;
+                }
+                if let Some(v) = self.class_static_get(&cls, &member.name) {
+                    return v;
+                }
             }
         }
         // §13.4.2: a member of a subroutine-local / formal unpacked
@@ -73426,6 +73434,19 @@ impl Simulator {
                         }
                     }
                     if let Some(v) = self.class_static_get(cls, &member.name) {
+                        return v;
+                    }
+                } else if !self.module.classes.contains_key(cls) {
+                    // §13.5.1/§8.25: the prefix is a type parameter bound to
+                    // a SPECIALIZATION or a typedef of one (UVM 2017's
+                    // `Tregistry::type_name`); it names no class key, so
+                    // resolve it with its specialization active.
+                    let nm = &hier.path[0].name.name;
+                    if !self.local_stack.last().is_some_and(|m| m.contains_key(nm))
+                        && !self.signal_name_to_id.contains_key(nm.as_str())
+                        && !self.signals.contains_key(nm)
+                        && let Some(v) = self.class_scope_member_value(nm, &member.name)
+                    {
                         return v;
                     }
                 }
@@ -75382,15 +75403,16 @@ impl Simulator {
                         // §8.25.1: typedef alias to a parameterized-class
                         // specialization (e.g. `typedef Reg#("foo") FooReg;`)
                         // — resolve the specialization and key the static
-                        // cell per-spec.
-                        if let Some((base, sig)) = self.resolve_typedef_spec(cls) {
-                            let saved = self.current_spec.take();
-                            self.current_spec = Some((base.clone(), sig.clone()));
-                            let v = self.class_static_get(&base, prop);
-                            self.current_spec = saved;
-                            if let Some(v) = v {
-                                return v;
-                            }
+                        // cell per-spec. The same holds for a type
+                        // parameter bound to a specialization. §13.5.1: a
+                        // no-argument static FUNCTION named without parens
+                        // is a call, so it runs under that specialization
+                        // too.
+                        if !self.module.classes.contains_key(cls)
+                            && let Some(v) =
+                                self.class_scope_member_value(&hier.path[0].name.name, prop)
+                        {
+                            return v;
                         }
                         if self.module.classes.contains_key(cls)
                             && !self
@@ -134949,6 +134971,67 @@ impl Simulator {
             }
         }
         None
+    }
+
+    /// §8.23/§8.25: the class a class-scope prefix `name` (the `name` of
+    /// `name::member`) denotes, with its specialization: a class TYPE
+    /// PARAMETER bound through the active specialization or `this`, a
+    /// `C#(..)` text, a parameterized typedef at module or class scope
+    /// (§8.25.1), a plain class typedef (§6.18), or a class. The same
+    /// resolution order `exec_class_scope_static_call` dispatches a call
+    /// with. None when `name` names no class.
+    fn resolve_class_scope_prefix(&self, name: &str) -> Option<(String, Option<String>)> {
+        let bound = self.resolve_type_param_binding(name);
+        let n = bound.as_deref().unwrap_or(name);
+        if let Some((b, s)) = self.extract_spec_from_string(n) {
+            return Some((b, Some(s)));
+        }
+        if self.module.classes.contains_key(n) {
+            return Some((n.to_string(), None));
+        }
+        if let Some((b, s)) = self.resolve_typedef_spec(n) {
+            return Some((b, Some(s)));
+        }
+        self.resolve_simple_typedef_class(n)
+            .filter(|c| self.module.classes.contains_key(c))
+            .map(|c| (c, None))
+    }
+
+    /// §13.5.1/§8.25: the value of a parenthesis-free class-scope reference
+    /// `name::member` whose prefix is not itself a class name (a type
+    /// parameter, a typedef, a specialization; see
+    /// `resolve_class_scope_prefix`). A no-argument static FUNCTION is a call
+    /// with an empty argument list, so its value is the call's return; a
+    /// value parameter or class localparam reads the specialization's
+    /// value; a static property reads the specialization's cell. Everything
+    /// runs with the prefix's specialization active, exactly as the
+    /// parenthesised call does. None when `member` is none of these.
+    fn class_scope_member_value(&mut self, name: &str, member: &str) -> Option<Value> {
+        let (base, sig) = self.resolve_class_scope_prefix(name)?;
+        let is_fn = self.is_static_method(&base, member)
+            && self.class_parameterless_function(&base, member);
+        let saved = sig.as_ref().map(|s| {
+            self.ensure_spec_statics(&base, s);
+            let saved = self.current_spec.replace((base.clone(), s.clone()));
+            if let Some(cs) = &saved {
+                self.spec_scope_stack.push(cs.clone());
+            }
+            saved
+        });
+        let v = if is_fn {
+            self.exec_static_method(&base, member, &[])
+        } else {
+            sig.as_ref()
+                .and_then(|_| self.resolve_value_param_in_current(member))
+                .or_else(|| self.class_static_get(&base, member))
+        };
+        if let Some(saved) = saved {
+            if saved.is_some() {
+                self.spec_scope_stack.pop();
+            }
+            self.current_spec = saved;
+        }
+        v
     }
 
     /// Execute `ClassName::method(args)` — a static method call with no
