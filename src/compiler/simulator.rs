@@ -7620,6 +7620,14 @@ pub struct Simulator {
     /// only name a typedef) can resolve to — the cheap gate in front of
     /// `class_struct_coll_name`'s receiver walk.
     struct_coll_member_prop_names: std::cell::OnceCell<HashSet<String>>,
+    /// §7.4.5: names whose ELEMENTS are collections — variables declared as
+    /// a fixed array of queues / dynamic / associative arrays (`int q3[3][$]`)
+    /// and struct members declared that way (`T sp[4][$]`). Gates the
+    /// whole-collection assignment of a selected element (`q3[0] = q3[1]`).
+    indexed_coll_roots: std::cell::OnceCell<HashSet<String>>,
+    /// Bit `len % 64` per name in `indexed_coll_roots` (0: none), so the
+    /// common miss costs no hashing.
+    indexed_coll_mask: std::cell::Cell<u64>,
     /// Bit `len % 64` set for the length of every name in
     /// `struct_coll_member_prop_names`: rejects most names without hashing.
     struct_coll_member_len_mask: std::cell::Cell<u64>,
@@ -12976,6 +12984,8 @@ impl Simulator {
             multidim_members: None,
             struct_capable_prop_names: std::cell::OnceCell::new(),
             struct_coll_member_prop_names: std::cell::OnceCell::new(),
+            indexed_coll_roots: std::cell::OnceCell::new(),
+            indexed_coll_mask: std::cell::Cell::new(0),
             struct_coll_member_len_mask: std::cell::Cell::new(0),
             assoc_elem_colls: HashSet::default(),
             pending_struct_coll_wb: Vec::new(),
@@ -79384,6 +79394,16 @@ impl Simulator {
         {
             return;
         }
+        // (A side-effecting lvalue index is folded first, below, and
+        // comes back through here.)
+        if self.indexed_colls_live()
+            && (self.may_name_indexed_coll(lvalue) || self.may_name_indexed_coll(rvalue))
+            && !Self::lvalue_has_incdec_index(lvalue)
+            && self.try_indexed_coll_assign(lvalue, rvalue)
+        {
+            self.settle_after_proc_write();
+            return;
+        }
         if (matches!(rvalue.kind, ExprKind::AssignmentPattern(_))
             || self.lvalue_may_name_struct_coll(lvalue))
             && self.try_struct_aggregate_assign(stmt, lvalue, rvalue)
@@ -80954,6 +80974,24 @@ impl Simulator {
         // result was a packed scalar written to a queue container signal
         // that nothing reads — the destination came back as X.
         if let Some((arr_name, mname, filter, iter_name)) = self.locator_call(rvalue) {
+            // §7.12.1: the destination may be a collection reached through
+            // selects — a struct's dynamic member (`fa[1].q`), an element of
+            // a fixed array of queues (`q3[0]`, `s.sp[3]`).
+            let lsel = match &lvalue.kind {
+                ExprKind::Ident(_) => None,
+                _ => self.expr_assoc_name(lvalue),
+            };
+            if let Some(lname) = lsel {
+                let idxs = self.locator_indices_named(
+                    &arr_name,
+                    &mname,
+                    filter.as_ref(),
+                    iter_name.as_deref(),
+                );
+                self.materialize_locator(&lname, &arr_name, &mname, &idxs);
+                self.settle_after_proc_write();
+                return;
+            }
             if let ExprKind::Ident(lhier) = &lvalue.kind {
                 // The destination may itself be a renamed subroutine
                 // local or a class-member queue — same storage rules
@@ -82481,6 +82519,45 @@ impl Simulator {
             for nm in &fe_names {
                 self.auto_loop_vars.push(nm.clone());
             }
+        }
+        // §12.7.3/§7.4.5: `foreach (a[i, j])` over a fixed array of queues
+        // walks each row's own size.
+        if vars.len() == 2
+            && (self.indexed_coll_mask.get() != 0 || self.indexed_coll_roots.get().is_none())
+            && !self.indexed_coll_roots().is_empty()
+            && let Some((an, rows)) = self.fixed_rows_of_colls(array)
+        {
+            let iv = vars[0].as_ref().map(|v| v.name.clone());
+            let jv = vars[1].as_ref().map(|v| v.name.clone());
+            for n in iv.iter().chain(jv.iter()) {
+                self.widths.insert(n.clone(), 32);
+            }
+            'rows: for i in rows {
+                let inner = self.get_queue_size(&Self::name_with_index(&an, i));
+                for j in 0..inner {
+                    if self.finished {
+                        break 'rows;
+                    }
+                    if let Some(n) = &iv {
+                        self.set_loop_var(n, Self::signed_loop_val(i));
+                    }
+                    if let Some(n) = &jv {
+                        self.set_loop_var(n, Self::signed_loop_val(j as i64));
+                    }
+                    self.continue_flag = false;
+                    self.exec_statement(body);
+                    if self.break_flag {
+                        break 'rows;
+                    }
+                    self.continue_flag = false;
+                }
+            }
+            self.auto_loop_vars.truncate(fe_auto_len);
+            self.restore_loop_vars(&fe_saved);
+            if !self.return_flag && self.disable_target.is_none() {
+                self.break_flag = false;
+            }
+            return;
         }
         // `foreach (obj.assoc_member[k])` — iterate that object's
         // instance-scoped associative array (base may be a 2-seg
@@ -113899,7 +113976,13 @@ impl Simulator {
                 if let Some(su) = self.unpacked_struct_of(&dt) {
                     for m in &su.members {
                         for d in &m.declarators {
-                            if Self::coll_kind_of(&d.dimensions).is_some() {
+                            // §7.4.5: a fixed array OF collections
+                            // (`T sp[4][$]`) names a collection per element.
+                            if Self::coll_kind_of(&d.dimensions).is_some()
+                                || d.dimensions.last().is_some_and(|l| {
+                                    Self::coll_kind_of(std::slice::from_ref(l)).is_some()
+                                })
+                            {
                                 set.insert(d.name.name.clone());
                             }
                         }
@@ -116417,6 +116500,32 @@ impl Simulator {
     /// one. `None` for anything else, including a collection reached through
     /// a further select (`s.q[1]` is an element, not the collection).
     fn struct_member_coll_of(&self, flat: &str) -> Option<(StructCollKind, DataType, bool)> {
+        let (mdt, dims, nidx) = self.struct_member_path_decl(flat)?;
+        // §7.4.5: the member itself (`s.q`), or one ELEMENT of a fixed
+        // array of collections (`s.sp[1]` of `T sp[4][$]`): every
+        // dimension but the trailing collection one selected.
+        let n = dims.len();
+        if n == 0 || nidx != n - 1 {
+            return None;
+        }
+        let kind = Self::coll_kind_of(&dims[n - 1..])?;
+        if dims[..n - 1]
+            .iter()
+            .any(|d| Self::coll_kind_of(std::slice::from_ref(d)).is_some())
+        {
+            return None;
+        }
+        Some((kind, mdt, self.string_keyed_dim(&dims[n - 1])))
+    }
+
+    /// The declaration of the struct member the flattened path `flat` ends
+    /// at (`s.in.q`, `aa[k].sp[1]`): its element type, its unpacked
+    /// dimensions and how many selects the path applies to it. Every
+    /// intermediate member must be selected down to one element.
+    fn struct_member_path_decl(
+        &self,
+        flat: &str,
+    ) -> Option<(DataType, Vec<crate::ast::types::UnpackedDimension>, usize)> {
         let segs = Self::split_flat_path(flat);
         if segs.len() < 2 {
             return None;
@@ -116443,6 +116552,73 @@ impl Simulator {
         None
     }
 
+    /// §12.7.3/§7.4.5: the rows of `foreach (a[i, j])` over a ONE-dimension
+    /// fixed array of queues / dynamic arrays — a variable (`int a[3][$]`)
+    /// or a struct member (`s.sp[i, j]` of `T sp[4][$]`): the flattened
+    /// array name and its first-dimension indices in left-to-right order.
+    /// Each row `a[i]` is its own collection with its own size.
+    fn fixed_rows_of_colls(&mut self, array: &Expression) -> Option<(String, Vec<i64>)> {
+        let name = match &array.kind {
+            ExprKind::Ident(h) if h.path.iter().any(|s| !s.selects.is_empty()) => {
+                let chain = Self::hier_select_chain(h, array.span);
+                self.flat_member_name(&chain)?
+            }
+            ExprKind::Ident(h) if h.path.len() == 1 => self.resolve_hier_name(h).into_owned(),
+            _ => self.flat_member_name(array)?,
+        };
+        if let Some(dims) = self.foreach_dims(&name)
+            && dims.len() == 1
+        {
+            let (lo, hi) = dims[0];
+            if !self
+                .module
+                .dynamic_arrays
+                .contains(&Self::name_with_index(&name, lo))
+            {
+                return None;
+            }
+            let mut rows: Vec<i64> = (lo..=hi).collect();
+            if self.module.descending_arrays.contains(&name) {
+                rows.reverse();
+            }
+            return Some((name, rows));
+        }
+        if !self.struct_colls_possible() {
+            return None;
+        }
+        let (_, dims, nidx) = self.struct_member_path_decl(&name)?;
+        if nidx != 0 || dims.len() != 2 {
+            return None;
+        }
+        use crate::ast::types::UnpackedDimension as UD;
+        if !matches!(dims[1], UD::Unsized(_) | UD::Queue { .. }) {
+            return None;
+        }
+        let rows: Vec<i64> = match &dims[0] {
+            UD::Range { left, right, .. } => {
+                let l = self.eval_expr(left).to_i64()?;
+                let r = self.eval_expr(right).to_i64()?;
+                if l <= r {
+                    (l..=r).collect()
+                } else {
+                    (r..=l).rev().collect()
+                }
+            }
+            UD::Expression { expr, .. } => {
+                let n = self.eval_expr(expr).to_i64()?;
+                (0..n).collect()
+            }
+            _ => return None,
+        };
+        for r in &rows {
+            let rn = Self::name_with_index(&name, *r);
+            if !self.ensure_struct_member_coll(&rn) {
+                return None;
+            }
+        }
+        Some((name, rows))
+    }
+
     /// Put the struct-member collection `name` on the §7.8 collection
     /// registries (see [`register_coll_name`]) when its declared type says it
     /// is one. Returns whether `name` is a registered collection afterwards.
@@ -116462,6 +116638,11 @@ impl Simulator {
         )
         .max(1);
         self.register_coll_name(name, kind, elem_w, string_key);
+        // A packed-struct element type slices `m[j].f` / a locator's
+        // `item.f` through the collection's field layout.
+        if !self.module.packed_struct_fields.contains_key(name) {
+            self.register_packed_leaf_layout(name, &dt);
+        }
         if self.owner_is_assoc_elem(name) {
             self.assoc_elem_colls.insert(name.to_string());
         }
@@ -122924,7 +123105,16 @@ impl Simulator {
         }
         let (arr, mname) = match &target.kind {
             ExprKind::MemberAccess { expr, member } => {
-                (flatten_dotted(self, expr)?, member.name.clone())
+                let arr = match flatten_dotted(self, expr) {
+                    Some(a) => a,
+                    // A receiver reached through selects — a struct's
+                    // dynamic member (`fa[1].q`), an element of a fixed
+                    // array of queues (`q3[1]`, `s.sp[2]`) — names its
+                    // store through the collection resolver.
+                    None if Self::is_locator_method(&member.name) => self.expr_assoc_name(expr)?,
+                    None => return None,
+                };
+                (arr, member.name.clone())
             }
             // `q.find` flattens to a 2-seg Ident; `s.arb_q.find` to 3-seg.
             // The last segment is the method, the rest the receiver path.
@@ -131316,6 +131506,15 @@ impl Simulator {
             _ => None,
         };
         if obj_member_name.is_some_and(|m| !self.coll_member_possible(m)) {
+            // `foreach (s.sp[2][k])`: a selected struct member may still
+            // name an element of a fixed array of collections (§7.4.5).
+            if let ExprKind::Ident(h) = &expr.kind
+                && h.path.len() == 2
+                && !h.path[1].selects.is_empty()
+                && self.indexed_colls_live()
+            {
+                return self.selected_ident_coll_name(expr);
+            }
             return None;
         }
         // `obj`/`member` pair → instance-scoped name if `member` is an
@@ -131501,10 +131700,19 @@ impl Simulator {
                 _ => None,
             },
             ExprKind::Ident(h) if h.path.len() == 1 => {
+                // §7.4.5: `foreach (q3[1][j])` names an element of a fixed
+                // array of collections as one identifier carrying the select.
+                if !h.path[0].selects.is_empty() && self.indexed_colls_live() {
+                    return self.selected_ident_coll_name(expr);
+                }
                 self.instance_assoc_member(&h.path[0].name.name)
             }
             // Flattened `obj.member` as a 2-segment hierarchical Ident.
             ExprKind::Ident(h) if h.path.len() == 2 => {
+                // `foreach (s.sp[2][k])`: the same, through a struct member.
+                if !h.path[1].selects.is_empty() && self.indexed_colls_live() {
+                    return self.selected_ident_coll_name(expr);
+                }
                 // §8.25.1: a leading segment that is a TYPEDEF ALIAS of a
                 // parameterized-class specialization (`typedef rt#(int) rt_i;`
                 // then `rt_i::all.push_back(v)` — the call path strips the
@@ -131673,7 +131881,197 @@ impl Simulator {
                 }
                 None
             }
+            // Gated by name first: resolving evaluates the selects.
+            ExprKind::Index { .. } if self.indexed_colls_live() => {
+                self.indexed_coll_name_gated(expr)
+            }
             _ => None,
+        }
+    }
+
+    /// §7.4.5: an ELEMENT of a fixed array of collections is a collection of
+    /// its own — `q3[1]` of `int q3[3][$]`, `s.sp[1]` / `fa[i].sp[1]` of a
+    /// struct member `T sp[4][$]`. The flattened element name is the store
+    /// the element-wise paths (`push_back`, `size`, `q3[1][j]`) already use.
+    fn indexed_coll_roots(&self) -> &HashSet<String> {
+        self.indexed_coll_roots.get_or_init(|| {
+            let mut set: HashSet<String> = HashSet::default();
+            let names = self
+                .module
+                .dynamic_arrays
+                .iter()
+                .chain(self.module.associative_arrays.keys());
+            for n in names {
+                if let Some((root, _)) = n.split_once('[')
+                    && !root.contains(['.', '#'])
+                    && self.module.var_decl_types.contains_key(root)
+                {
+                    set.insert(root.to_string());
+                }
+            }
+            let mut work: Vec<DataType> = Vec::new();
+            for cd in self.module.classes.values() {
+                work.extend(cd.property_types.values().cloned());
+            }
+            work.extend(self.module.typedef_types.values().cloned());
+            work.extend(self.module.var_decl_types.values().cloned());
+            let mut budget = 65536usize;
+            while let Some(dt) = work.pop() {
+                if budget == 0 {
+                    break;
+                }
+                budget -= 1;
+                if let Some(su) = self.unpacked_struct_of(&dt) {
+                    for m in &su.members {
+                        for d in &m.declarators {
+                            if d.dimensions.len() >= 2
+                                && d.dimensions.last().is_some_and(|l| {
+                                    Self::coll_kind_of(std::slice::from_ref(l)).is_some()
+                                })
+                            {
+                                set.insert(d.name.name.clone());
+                            }
+                        }
+                        work.push(m.data_type.clone());
+                    }
+                }
+            }
+            let mask = set.iter().fold(0u64, |m, n| m | (1u64 << (n.len() & 63)));
+            self.indexed_coll_mask.set(mask);
+            set
+        })
+    }
+
+    /// Whether any fixed array of collections exists (also before the
+    /// lazily built root set is known): the one-load gate in front of
+    /// every indexed-collection probe.
+    #[inline(always)]
+    fn indexed_colls_live(&self) -> bool {
+        self.indexed_coll_mask.get() != 0 || self.indexed_coll_roots.get().is_none()
+    }
+
+    /// Whether `name` may be one of [`indexed_coll_roots`]: the length
+    /// mask rejects most names before any hashing.
+    #[inline]
+    fn indexed_coll_root(&self, name: &str) -> bool {
+        let roots = match self.indexed_coll_roots.get() {
+            Some(r) => r,
+            None => self.indexed_coll_roots(),
+        };
+        self.indexed_coll_mask.get() & (1u64 << (name.len() & 63)) != 0 && roots.contains(name)
+    }
+
+    /// Whether the select `e` (`q3[0]`, `s.sp[1]`) may name an element of
+    /// a fixed array of collections: the name it selects from is one
+    /// [`indexed_coll_roots`] lists. Allocation-free.
+    #[inline]
+    fn may_name_indexed_coll(&self, e: &Expression) -> bool {
+        let ExprKind::Index { expr: base, .. } = &e.kind else {
+            return false;
+        };
+        if self.indexed_coll_mask.get() == 0 && self.indexed_coll_roots.get().is_some() {
+            return false;
+        }
+        let mut cur = base.as_ref();
+        while let ExprKind::Index { expr, .. } = &cur.kind {
+            cur = expr;
+        }
+        let name = match &cur.kind {
+            ExprKind::Ident(h) => match h.path.last() {
+                Some(seg) => seg.name.name.as_str(),
+                None => return false,
+            },
+            ExprKind::MemberAccess { member, .. } => member.name.as_str(),
+            _ => return false,
+        };
+        self.indexed_coll_root(name)
+    }
+
+    /// §7.4.5/§7.6/§7.10: `q3[0] = q3[1]`, `s.sp[3] = '{..}`, `r = q3[1]` —
+    /// a whole-collection assignment whose target or source is an element
+    /// of a fixed array of collections. The scalar element store paths
+    /// would treat the element as one value. Returns whether it assigned.
+    #[cold]
+    #[inline(never)]
+    fn try_indexed_coll_assign(&mut self, lvalue: &Expression, rvalue: &Expression) -> bool {
+        if self.may_name_indexed_coll(lvalue) {
+            let Some(name) = self.indexed_coll_name(lvalue) else {
+                return false;
+            };
+            let dt = self
+                .struct_member_coll_of(&name)
+                .map(|(_, dt, _)| dt)
+                .or_else(|| {
+                    let root = name.split_once('[').map_or(name.as_str(), |(r, _)| r);
+                    self.module.var_decl_types.get(root).cloned()
+                });
+            // §7.12.1: a locator method's result queue.
+            if let Some((arr, method, filter, iter)) = self.locator_call(rvalue) {
+                let idxs =
+                    self.locator_indices_named(&arr, &method, filter.as_ref(), iter.as_deref());
+                self.materialize_locator(&name, &arr, &method, &idxs);
+                return true;
+            }
+            return self.assign_whole_coll(&name, dt.as_ref(), rvalue);
+        }
+        if self.may_name_indexed_coll(rvalue)
+            && let Some(dst) = self.expr_assoc_name(lvalue).or_else(|| match &lvalue.kind {
+                ExprKind::Ident(h) => Some(self.resolve_hier_name(h).into_owned()),
+                _ => None,
+            })
+            && (self.module.dynamic_arrays.contains(&dst) || self.is_associative_array(&dst))
+            && let Some(src) = self.indexed_coll_name(rvalue)
+        {
+            if src == dst {
+                return true;
+            }
+            if self.is_associative_array(&dst) {
+                self.copy_assoc_entries(&dst, &src);
+            } else {
+                self.copy_whole_queue(&dst, &src);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// [`indexed_coll_name`] behind the name gate (resolving evaluates the
+    /// selects, so only a select of a listed root goes further).
+    #[cold]
+    #[inline(never)]
+    fn indexed_coll_name_gated(&mut self, e: &Expression) -> Option<String> {
+        if !self.may_name_indexed_coll(e) {
+            return None;
+        }
+        self.indexed_coll_name(e)
+    }
+
+    /// `q3[1]` / `s.sp[2]` written as one hierarchical identifier whose
+    /// segments carry the selects (the `foreach` array shape).
+    #[cold]
+    #[inline(never)]
+    fn selected_ident_coll_name(&mut self, e: &Expression) -> Option<String> {
+        let ExprKind::Ident(h) = &e.kind else {
+            return None;
+        };
+        if !self.indexed_coll_root(&h.path.last()?.name.name) {
+            return None;
+        }
+        let chain = Self::hier_select_chain(h, e.span);
+        self.indexed_coll_name(&chain)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn indexed_coll_name(&mut self, e: &Expression) -> Option<String> {
+        let n = self.flat_member_name(e)?;
+        if self.module.dynamic_arrays.contains(&n)
+            || self.module.associative_arrays.contains_key(&n)
+            || (self.struct_colls_possible() && self.ensure_struct_member_coll(&n))
+        {
+            Some(n)
+        } else {
+            None
         }
     }
 
