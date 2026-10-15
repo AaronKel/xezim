@@ -1848,6 +1848,11 @@ pub struct BytecodeCompiler<'a> {
     /// marker so the runtime resolves the store via `dyn_name_lookup` —
     /// the same precedence as the AST path for a bare local receiver.
     local_coll_names: HashSet<String>,
+    /// The subset of `local_coll_names` whose ELEMENTS are `string`s
+    /// (`string q[$]`). Their element reads are string operands: §6.16 gives
+    /// a string no fixed width, so they are never resized to a context and
+    /// compare by text.
+    local_coll_strings: HashSet<String>,
     /// Packed-struct field layout of the CURRENT assignment's destination,
     /// installed by the assign arms around their rvalue compile so an
     /// `'{...}` assignment pattern can compile to a Concat. An assignment
@@ -2058,6 +2063,7 @@ impl<'a> BytecodeCompiler<'a> {
             local_const_kinds: HashMap::default(),
             local_array_regs: HashMap::default(),
             local_coll_names: HashSet::default(),
+            local_coll_strings: HashSet::default(),
             top_module_name: None,
             packed_elem_widths: None,
             assoc_elem_widths: None,
@@ -5566,6 +5572,30 @@ impl<'a> BytecodeCompiler<'a> {
         key.strip_prefix('\u{1}')
     }
 
+    /// Is `base` (select-free) a LOCAL queue / dynamic array of `string`
+    /// elements that no block local or formal shadows?
+    fn local_string_coll(&self, base: &Expression) -> bool {
+        match &base.kind {
+            ExprKind::Ident(h) if h.root.is_none() && h.path.len() == 1 => {
+                let n = h.path[0].name.name.as_str();
+                h.path[0].selects.is_empty()
+                    && !self.local_var_regs.contains_key(n)
+                    && self.local_coll_strings.contains(n)
+            }
+            _ => false,
+        }
+    }
+
+    fn dt_is_string(dt: &crate::ast::types::DataType) -> bool {
+        matches!(
+            dt,
+            crate::ast::types::DataType::Simple {
+                kind: crate::ast::types::SimpleType::String,
+                ..
+            }
+        )
+    }
+
     /// issue-301: the select width of `arr[i][k]` — the first packed dim's
     /// ELEMENT width, when `root` admits to the member element read and the
     /// plan carries multi-dim packed dims for the member. Feeds
@@ -5701,6 +5731,8 @@ impl<'a> BytecodeCompiler<'a> {
             }
         };
         let idx_reg = self.compile_expr(index, 0)?;
+        let elem_is_string =
+            Self::split_local_coll_key(&coll).is_some_and(|n| self.local_coll_strings.contains(n));
         let elem_is_class = self
             .method_class
             .as_deref()
@@ -5725,7 +5757,10 @@ impl<'a> BytecodeCompiler<'a> {
         // and a ctx width of 1 (the `if (refs[i] == v)` condition context)
         // zeroed the handle, killing uvm_packer's cycle detection and
         // recursing forever on cyclic object graphs (6693).
-        if ctx_width > 0 && !elem_is_class {
+        // §6.16: neither does a STRING element — a string has no fixed width,
+        // and a self-determined compare context (`q[0] == b`, sized from
+        // the operands' nominal widths) truncated it to a few bits.
+        if ctx_width > 0 && !elem_is_class && !elem_is_string {
             self.emit(Insn::Resize(dest, ctx_width));
         }
         Some(dest)
@@ -6768,6 +6803,9 @@ impl<'a> BytecodeCompiler<'a> {
     fn expr_is_string_static(&self, e: &Expression) -> bool {
         match &e.kind {
             ExprKind::StringLiteral(_) => true,
+            // §7.10 / §6.16: an element of a LOCAL string queue / dynamic
+            // array (`q[0]` on `string q[$]`) is a string.
+            ExprKind::Index { expr: base, .. } => self.local_string_coll(base),
             ExprKind::Paren(inner) => self.expr_is_string_static(inner),
             ExprKind::SystemCall { name, .. } => {
                 matches!(name.as_str(), "$sformatf" | "$psprintf")
@@ -10626,6 +10664,11 @@ impl<'a> BytecodeCompiler<'a> {
                                 Arc::from("VarDecl_local_coll"),
                             ))));
                             self.local_coll_names.insert(decl.name.name.clone());
+                            if Self::dt_is_string(data_type) {
+                                self.local_coll_strings.insert(decl.name.name.clone());
+                            } else {
+                                self.local_coll_strings.remove(&decl.name.name);
+                            }
                             continue;
                         }
                         self.bail("VarDecl_typedef_array");
@@ -10681,6 +10724,11 @@ impl<'a> BytecodeCompiler<'a> {
                                 Arc::from("VarDecl_local_coll"),
                             ))));
                             self.local_coll_names.insert(decl.name.name.clone());
+                            if Self::dt_is_string(data_type) {
+                                self.local_coll_strings.insert(decl.name.name.clone());
+                            } else {
+                                self.local_coll_strings.remove(&decl.name.name);
+                            }
                             continue;
                         }
                         // One constant-bounded unpacked dimension, small: a
@@ -12733,7 +12781,24 @@ impl<'a> BytecodeCompiler<'a> {
                         | BinaryOp::Mod
                         | BinaryOp::Power
                 );
-                let sub_ctx = if is_self_determined {
+                // §6.16 Table 6-9: a comparison of two STRING operands is
+                // textual (the `StrOp` arms below); a string has no fixed
+                // width, so neither operand takes a context — a literal
+                // compiled at the nominal width of a string-queue element
+                // (`q[0] == "e"`) was cut to one bit.
+                let string_cmp = matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::Neq
+                        | BinaryOp::Lt
+                        | BinaryOp::Leq
+                        | BinaryOp::Gt
+                        | BinaryOp::Geq
+                ) && self.expr_is_string_static(left)
+                    && self.expr_is_string_static(right);
+                let sub_ctx = if string_cmp {
+                    0
+                } else if is_self_determined {
                     let lw = self.expr_max_width(left);
                     let rw = self.expr_max_width(right);
                     lw.max(rw)
