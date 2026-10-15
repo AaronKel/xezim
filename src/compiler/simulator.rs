@@ -147706,6 +147706,18 @@ impl Simulator {
                         }
                         continue;
                     }
+                    // §8.25/§6.20.2: a STRING value parameter bound by the
+                    // extends clause (`extends holder #(int, "ext")`) — the
+                    // integer folds below cannot carry it, so the instance
+                    // kept the base's default.
+                    if let Some(s) = frag
+                        .strip_prefix('"')
+                        .and_then(|r| r.strip_suffix('"'))
+                        .filter(|s| !s.contains('"') && !s.contains('\\'))
+                    {
+                        binds.insert(pname.clone(), Value::from_string(s));
+                        continue;
+                    }
                     if let Some(lit) = Self::parse_spec_number(frag) {
                         let e = Expression::new(ExprKind::Number(lit), crate::ast::Span::dummy());
                         if let Some(v) = crate::elaborate::const_eval_i64_with_params(&e, None) {
