@@ -407,6 +407,17 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   overwrite a module item of the same name, locals of a module's processes are
   no longer shared between its instances, and a `for` loop over a block local
   that shadows a module variable terminates (§6.21, §9.3.4).
+* Comparing an unpacked array, queue or struct with an assignment pattern
+  (`a == '{9, 5, 5, 5}`, `!=`, `===`, `!==`) compares element by element,
+  with `default:`, `index:` keys and nested patterns (§11.4.5, §10.9).
+* A local string-queue element compared with a string in a compiled class
+  method (`q[0] == name`) no longer always reads as unequal (§6.16, §7.10).
+* A string character `s[i]` and `getc()` are signed bytes (`"\xff"[0]` is
+  -1), and `compare()` returns signed character differences (§6.16.3,
+  §6.16.6).
+* Strings keep bytes above 0x7F intact in `s[i]`, `substr`, `putc`,
+  character writes, `foreach`, `$fgets`, `toupper`/`tolower`, and in
+  non-ASCII source text such as `"é"` (§6.16, §5.9).
 
 **Performance**
 
