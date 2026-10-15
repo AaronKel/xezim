@@ -379,6 +379,26 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Methods of a class declared inside a module resolve bare function, task and
   variable names in the instance they run for, not a same-named top-level
   declaration or the first instance's copy (§23.8). (found while fixing #320)
+* `randomize()` and `std::randomize()` solve `inside`, `dist` and relations
+  whose operand can wrap at its width (`c + 4000 inside {[4003:4004]}`,
+  `2 * c inside {…}`, 8 to 64 bits, signed and unsigned); they used to fail
+  with "no solution found". Range bounds wrap at the operand width, so
+  `[-2147483648:x]` starts at INT_MIN instead of being empty (§11.4.13,
+  §11.8.2).
+* Static queues and other collections of structs in parameterized classes read
+  back through `C#(args)::q[i].member` from outside the class (§8.25). (#321,
+  reported by Ganesh-TNL)
+* An element of a fixed array of queues, dynamic or associative arrays,
+  declared directly or as a struct member, is a collection for assignment,
+  locator results, methods, `foreach (a[i, j])` and `inside` (§7.4.5). (#322,
+  reported by Ganesh-TNL)
+* Struct members and package variables declared with a queue, dynamic-array or
+  associative-array typedef behave like the directly declared forms, and
+  `q_t x = {a, b}` initializers hold every element of `a` and `b` (§6.18,
+  §7.2.1, §10.10). (#323, reported by Ganesh-TNL)
+* `find with (item.field …)` on queues of packed structs, `delete(key)` on
+  associative arrays of structs, and string keys on associative members of
+  struct class properties work (§7.12, §7.9.2, §7.8.1).
 
 **Performance**
 
