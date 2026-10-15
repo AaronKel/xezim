@@ -277,7 +277,6 @@ fn issue_312_foreach_typedef_assoc_of_structs() {
 /// name must block like any task call, so `mailbox.get()` waits for the
 /// puts at 10 and 20 (§8.10, §13.3, §15.4), run verbatim.
 #[test]
-#[ignore = "#313: a bare static-to-static task call runs on the synchronous path; blocking statements in it return at once"]
 fn issue_313_static_task_calls_block() {
     let msgs = outputs(
         include_str!("../issue_cases/static_task_blocking_313.sv"),

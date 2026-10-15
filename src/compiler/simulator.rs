@@ -52870,6 +52870,12 @@ impl Simulator {
                                 })
                                 .is_some_and(|cls| {
                                     self.class_has_method(&cls, &h.path[0].name.name)
+                                })
+                                // §8.10: in a static method a bare name binds
+                                // to the class's methods before any
+                                // compilation-unit task of the same name.
+                                || self.static_class_context().is_some_and(|cls| {
+                                    self.class_has_method(&cls, &h.path[0].name.name)
                                 });
                             if let Some(td) = (!is_this_method)
                                 .then(|| self.task_decl_rc(&h.path[0].name.name))
@@ -53173,6 +53179,16 @@ impl Simulator {
                     // bare class name reaching here is a static call.
                     let scoped: Option<(String, String, Option<(String, String)>)> =
                         match &func.kind {
+                            // §8.10, §13.3: a bare `m(args)` inside a static
+                            // method (no `this`) names a method of the
+                            // enclosing class. Stage 1b needs a live `this`,
+                            // so without this arm a blocking static task
+                            // called by bare name ran synchronously and its
+                            // waits (a mailbox `get`, `@`, `wait`) returned
+                            // at once.
+                            ExprKind::Ident(h) if h.path.len() == 1 => self
+                                .static_class_context()
+                                .map(|c| (c, h.path[0].name.name.clone(), None)),
                             ExprKind::Ident(h)
                                 if h.path.len() == 2
                                     && self.module.classes.contains_key(&h.path[0].name.name) =>
@@ -53306,6 +53322,9 @@ impl Simulator {
                                     .push(self.local_stack.len().saturating_sub(1));
                                 cleanup.pushed_method_this = true;
                                 let saved_spec = self.current_spec.clone();
+                                // The frame's unwind restores the caller's
+                                // specialization (§8.25).
+                                cleanup.saved_spec = saved_spec.clone();
                                 if let Some((sb, ss)) = recv_spec {
                                     self.ensure_spec_statics(&sb, &ss);
                                     self.current_spec = Some((sb, ss));
@@ -136256,6 +136275,15 @@ impl Simulator {
             }
         }
         true
+    }
+
+    /// The enclosing class while a static method runs (a null `this` on top
+    /// of the method-context stack), for resolving bare method names.
+    fn static_class_context(&self) -> Option<String> {
+        match self.this_stack.last() {
+            Some(None) => self.class_context_stack.last().cloned().flatten(),
+            _ => None,
+        }
     }
 
     /// Find a class TASK method named `method` in `start_class` or an ancestor.
