@@ -62995,6 +62995,14 @@ impl Simulator {
                     if let Some(uq) = self.dyn_name_lookup(&h.path[0].name.name) {
                         return Some(uq.to_string());
                     }
+                    // §8.9/§8.25: inside a STATIC method of a parameterized
+                    // class, a bare static collection names this
+                    // specialization's store (`C#int::q`), the one its
+                    // builtin methods and `C#(int)::q[i].m` use, so an
+                    // element write `q[k] = s` spreads its members there.
+                    if let Some(k) = self.static_method_coll_key(&h.path[0].name.name) {
+                        return Some(k);
+                    }
                 }
                 // §26.3: strip a PACKAGE prefix — `P::s` flattens to the bare
                 // storage name `s` (see resolve_hier_name), so member paths
@@ -63072,6 +63080,20 @@ impl Simulator {
                 // profile showed dominating this path. A nested index builds
                 // one of these per dimension, per access.
                 Some(Self::name_with_index(&base, i))
+            }
+            // §8.25: `C#(args)::m` names the static property `m` of THAT
+            // specialization, whose store is keyed per specialization
+            // (`C#args::m`, the key a static method of the class uses), so
+            // `C#(int)::q[0].f` reaches the element members the class wrote.
+            ExprKind::MemberAccess { expr, member }
+                if matches!(expr.kind, ExprKind::Specialization { .. }) =>
+            {
+                let spec = self
+                    .resolve_call_spec_params(Self::extract_call_spec(expr), &self.current_spec)?;
+                let saved = self.current_spec.replace(spec.clone());
+                let key = self.static_prop_key(&spec.0, &member.name);
+                self.current_spec = saved;
+                key
             }
             ExprKind::MemberAccess { expr, member } => {
                 let mut base = self.flat_member_name(expr)?;
@@ -90236,11 +90258,20 @@ impl Simulator {
         // Steps outermost first: `Some(member)` or `None` for a select.
         let mut steps: Vec<Option<&str>> = Vec::new();
         let mut cur = e;
+        // §8.25: `C#(args)::q[i].name` is rooted at the specialized class.
+        let mut spec_root: Option<String> = None;
         let root: Option<&str> = loop {
             match &cur.kind {
                 ExprKind::MemberAccess { expr, member } => {
                     steps.push(Some(member.name.as_str()));
                     cur = expr;
+                }
+                ExprKind::Specialization { .. } => {
+                    let Some((cn, _)) = Self::extract_call_spec(cur) else {
+                        return false;
+                    };
+                    spec_root = Some(cn);
+                    break None;
                 }
                 ExprKind::Index { expr, .. } => {
                     steps.push(None);
@@ -90301,6 +90332,7 @@ impl Simulator {
             }
         };
         let mut ty = match root {
+            None if spec_root.is_some() => Ty::Class(spec_root.unwrap_or_default()),
             None | Some("this") => Ty::Class(match &this_class {
                 Some(c) => c.clone(),
                 None => return false,
@@ -121158,8 +121190,15 @@ impl Simulator {
     fn render_p_var(&mut self, name: &str) -> Option<String> {
         // A queue / dynamic array prints exactly its `size()` elements — not the
         // fixed 64-slot buffer it is backed by. Its ELEMENTS (`q[i]` of an
-        // array of queues) have no declared type of their own.
-        if self.module.dynamic_arrays.contains(name) {
+        // array of queues) have no declared type of their own. A static
+        // queue keyed per specialization (`C#int::q`, §8.25) is known by
+        // its size shadow.
+        if self.module.dynamic_arrays.contains(name)
+            || (name.contains("::")
+                && self
+                    .signals
+                    .contains_key(&Self::name_with_suffix(name, ".size")))
+        {
             let sz = self.get_queue_size(name);
             // A LOCAL queue has no entry in `var_decl_types`, so `p_elem_type`
             // returns None; fall back to rendering each element from its stored
@@ -124966,7 +125005,15 @@ impl Simulator {
                 }
                 return Some(Value::zero(32));
             }
-            if self.module.arrays.contains_key(obj_name) {
+            // §7.10.2.3: a queue keyed per specialization (`C#int::q`,
+            // §8.25) is known by its size shadow alone.
+            if self.module.arrays.contains_key(obj_name)
+                || self.module.dynamic_arrays.contains(obj_name)
+                || (obj_name.contains("::")
+                    && self
+                        .signals
+                        .contains_key(&Self::name_with_suffix(obj_name, ".size")))
+            {
                 if let Some(arg) = args.first() {
                     let idx = self.eval_expr(arg).to_u64().unwrap_or(0) as usize;
                     let cur_size = self.get_queue_size(obj_name) as usize;
@@ -126938,6 +126985,37 @@ impl Simulator {
             return std::borrow::Cow::Borrowed(name);
         };
         std::borrow::Cow::Owned(self.spec_static_coll_key_in_class(name, &ctx))
+    }
+
+    /// The per-specialization store of the static collection `name` when
+    /// running a static method of a parameterized class (see
+    /// `spec_static_coll_key`); `None` everywhere else.
+    #[inline]
+    fn static_method_coll_key(&self, name: &str) -> Option<String> {
+        if !matches!(self.class_context_stack.last(), Some(Some(_)))
+            || self
+                .this_stack
+                .last()
+                .copied()
+                .flatten()
+                .is_some_and(|h| h != 0)
+        {
+            return None;
+        }
+        self.static_method_coll_key_slow(name)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn static_method_coll_key_slow(&self, name: &str) -> Option<String> {
+        let Some(Some(ctx)) = self.class_context_stack.last() else {
+            return None;
+        };
+        if !self.coll_member_possible(name) || !self.collection_is_static_in(ctx, name) {
+            return None;
+        }
+        let k = self.spec_static_coll_key_in_class(name, ctx);
+        k.contains('#').then_some(k)
     }
 
     /// Resolve a bare static-collection member `name` to its storage key,
