@@ -432,6 +432,19 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * `$typename` of a real-valued expression, such as the time literal `1ns`, is
   `real`, and a real in [2^63, 2^64) converts to `longint unsigned` without
   saturating (§20.6.1, §6.12.2).
+* A parenthesis-free reference to a no-argument static function, static
+  property or parameter through a class type parameter or a typedef bound to a
+  parameterized-class specialization (`Tregistry::type_name`) runs under that
+  specialization, as do `pkg::C#(..)::f` and bare static calls inside the class
+  chain (§13.5.1, §8.25). UVM 2017-0.9 factory registration works again.
+  (#325, reported by Dragon-git)
+* `C#(args)::P`, `C#(args)::LP`, string parameters given in an `extends`
+  clause, and parameters read by static methods of a class extending a
+  specialization take the specialization's values instead of the defaults
+  (§8.25). (#325, reported by Dragon-git)
+* Class-scope typedefs reached through a type parameter or a typedef of a
+  specialization (`R::elem_t`, `h_t::vec_t`) have that specialization's width
+  and signedness (§8.25.1). (#325, reported by Dragon-git)
 
 **Performance**
 
