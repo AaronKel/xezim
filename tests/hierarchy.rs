@@ -91,6 +91,8 @@ mod local_method_static_binding;
 mod member_access_roots;
 #[path = "hierarchy/mixed_port_connections.rs"]
 mod mixed_port_connections;
+#[path = "hierarchy/module_class_bare_names.rs"]
+mod module_class_bare_names;
 #[path = "hierarchy/module_timescale_cli.rs"]
 mod module_timescale_cli;
 #[path = "hierarchy/multi_instance_scope.rs"]

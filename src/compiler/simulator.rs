@@ -95059,6 +95059,13 @@ impl Simulator {
                 }
             }
         }
+        // §23.8: a bare name in a method of a class declared inside a
+        // (non-top) module resolves in the instance the method runs for (the
+        // resolve hint). Every instance shares the class body's AST nodes, so
+        // the per-node cache below would pin the first instance's variable.
+        if hier.path.len() == 1 && self.module_class_method_active() {
+            return self.resolve_hier_name_uncached(hier);
+        }
         // Per-hier cache: first call resolves and memoizes the result on the
         // AST node; every subsequent call on the same node returns in O(1)
         // without HashMap lookups, path-join allocation, or hint bookkeeping.
@@ -128518,6 +128525,40 @@ impl Simulator {
         }
     }
 
+    /// Is a method of a class declared inside a non-top module running? Its
+    /// bare names resolve per instance (§23.8).
+    fn module_class_method_active(&self) -> bool {
+        let Some(Some(ctx)) = self.class_context_stack.last() else {
+            return false;
+        };
+        self.module
+            .classes
+            .get(ctx)
+            .and_then(|cd| cd.declaring_module.as_deref())
+            .is_some_and(|m| m != self.module.name)
+    }
+
+    /// The instance subroutine key a BARE `name` called from a method of a
+    /// class declared inside a (non-top) module names: `name` under the
+    /// resolve hint or its nearest ancestor scope that declares it (§23.8).
+    /// None outside such a method, so other bare calls are unchanged.
+    fn class_module_subroutine_key(&self, name: &str) -> Option<String> {
+        if !self.module_class_method_active()
+            || !self.class_member_names().subroutine_suffixes.contains(name)
+        {
+            return None;
+        }
+        let hint = self.name_resolve_hint.borrow().clone()?;
+        let mut scope = hint.as_str();
+        loop {
+            let cand = format!("{}.{}", scope, name);
+            if self.module.functions.contains_key(&cand) || self.module.tasks.contains_key(&cand) {
+                return Some(cand);
+            }
+            scope = scope.rsplit_once('.')?.0;
+        }
+    }
+
     /// Run the instance subroutine registered as `full` (a function's value,
     /// or 0 after a task) with its instance as the resolution scope.
     fn call_scoped_subroutine(&mut self, full: &str, args: &[Expression]) -> Value {
@@ -137093,6 +137134,15 @@ impl Simulator {
                         self.exec_task_call(&td, args);
                         return Value::zero(32);
                     }
+                }
+            }
+            // §23.8: a bare call in a method of a class declared INSIDE a
+            // module names that module's subroutine — the instance the method
+            // resolves in (the resolve hint: the object's creation scope) —
+            // before any same-named one of the top or the compilation unit.
+            if hier.path.len() == 1 {
+                if let Some(full) = self.class_module_subroutine_key(name) {
+                    return self.call_scoped_subroutine(&full, args);
                 }
             }
             // Module-level function call
@@ -161433,6 +161483,20 @@ impl Simulator {
                     true
                 }
             };
+            // §23.8: a class declared inside a non-top module resolves its
+            // bare names in the instance each call runs for; a compiled plan
+            // binds them once, to the top-level namesake.
+            if self
+                .module
+                .classes
+                .get(cname)
+                .and_then(|cd| cd.declaring_module.as_deref())
+                .is_some_and(|m| m != self.module.name)
+            {
+                trace_decline("module-class");
+                self.compiled_method_skip.insert((cid, mid, spec_id));
+                return None;
+            }
             // A wait-free TASK compiles exactly like a `function void`: the
             // compiler bails on any timing control (allow_waits=false), so a
             // task whose body compiles is purely sequential and the
