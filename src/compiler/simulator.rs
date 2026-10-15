@@ -63431,6 +63431,13 @@ impl Simulator {
                     if let Some(uq) = self.dyn_name_lookup(&h.path[0].name.name) {
                         return Some(uq.to_string());
                     }
+                    // §8/§23.9: in a method of a class declared inside a
+                    // module, the instance's own struct / variable.
+                    if self.modclass_depth.get() > 0
+                        && let Some(q) = self.modclass_item(&h.path[0].name.name)
+                    {
+                        return Some(q);
+                    }
                     // §8.9/§8.25: inside a STATIC method of a parameterized
                     // class, a bare static collection names this
                     // specialization's store (`C#int::q`), the one its
@@ -95412,6 +95419,34 @@ impl Simulator {
             })
             .max_by_key(|p| p.len())
             .cloned()
+    }
+
+    /// `inst.name` when, in a method of a class declared inside a module,
+    /// the bare `name` is an item (unpacked struct, variable) of the instance
+    /// `inst` the method runs in — not a local or a property of `this`.
+    fn modclass_item(&self, name: &str) -> Option<String> {
+        if self
+            .local_stack
+            .last()
+            .is_some_and(|l| l.contains_key(name))
+        {
+            return None;
+        }
+        if let Some(th) = self.this_stack.last().copied().flatten()
+            && self
+                .heap
+                .get(th)
+                .and_then(|o| o.as_ref())
+                .is_some_and(|i| i.properties.contains_key(name))
+        {
+            return None;
+        }
+        let q = self.modclass_scoped(name)?;
+        (self.module.struct_members.contains_key(&q)
+            || self.module.var_decl_types.contains_key(&q)
+            || self.signal_name_to_id.contains_key(q.as_str())
+            || self.signals.contains_key(&q))
+        .then_some(q)
     }
 
     /// Is any class declared inside a module with several instances

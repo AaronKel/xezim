@@ -329,9 +329,8 @@ endmodule
     assert_eq!(t_lines(src), expected);
 }
 
-/// Pinned: a member write of the instance's unpacked struct from a method.
+/// A member write of the instance's unpacked struct from a method.
 #[test]
-#[ignore = "a struct member write from a module-class method misses the instance's struct"]
 fn module_class_writes_instance_struct_member() {
     let src = r#"module kid;
   typedef struct { int a; int b; } pair_t;
@@ -407,3 +406,60 @@ endmodule
     assert_eq!(got, expected);
 }
 
+/// Siblings of the struct member write: a nested struct member, a member of
+/// an element of an array of structs, a plain variable, a task, and a whole
+/// struct assignment pattern, from two instances.
+#[test]
+fn module_class_writes_instance_items() {
+    let src = r#"module kid;
+  typedef struct { int a; int b; } pair_t;
+  typedef struct { pair_t p; int c; } nest_t;
+  pair_t pr;
+  nest_t ns;
+  pair_t arr[2];
+  int plain;
+  class helper;
+    function int rd(); return pr.a; endfunction
+    function void wr(); pr.b = 77; endfunction
+    function void wr2(); ns.p.a = 5; ns.c = 6; endfunction
+    function void wr3(); arr[1].b = 9; plain = 4; endfunction
+    function void wr4(); pr = '{a:1, b:2}; endfunction
+    task twr(); pr.a = 33; endtask
+  endclass
+  helper h;
+  initial begin
+    h = new;
+    pr.a = 5;
+    $display("T|%m rd=%0d", h.rd());
+    h.wr();
+    $display("T|%m b=%0d", pr.b);
+    h.wr2(); h.wr3();
+    $display("T|%m ns=%0d %0d arr=%0d plain=%0d", ns.p.a, ns.c, arr[1].b, plain);
+    h.twr();
+    $display("T|%m twr=%0d", pr.a);
+    h.wr4();
+    $display("T|%m wr4=%0d %0d", pr.a, pr.b);
+  end
+endmodule
+module top;
+  kid a();
+  kid b();
+endmodule
+"#;
+    let mut got = t_lines(src);
+    got.sort();
+    // Expected values from the reference simulator.
+    let expected = [
+        "T|top.a b=77",
+        "T|top.a ns=5 6 arr=9 plain=4",
+        "T|top.a rd=5",
+        "T|top.a twr=33",
+        "T|top.a wr4=1 2",
+        "T|top.b b=77",
+        "T|top.b ns=5 6 arr=9 plain=4",
+        "T|top.b rd=5",
+        "T|top.b twr=33",
+        "T|top.b wr4=1 2",
+    ];
+    assert_eq!(got, expected);
+}
