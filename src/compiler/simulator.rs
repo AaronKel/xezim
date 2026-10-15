@@ -116320,7 +116320,7 @@ impl Simulator {
     ) -> Option<String> {
         let mut level = su.clone();
         let mut key = prop.to_string();
-        let mut found: Option<(DataType, StructCollKind)> = None;
+        let mut found: Option<(DataType, StructCollKind, bool)> = None;
         for (j, mname) in tail.iter().enumerate() {
             let (dt, dims) = Self::struct_member_decl(&level, mname)?;
             let last = j + 1 == tail.len();
@@ -116328,7 +116328,7 @@ impl Simulator {
                 Some(kind) if last => {
                     key.push('.');
                     key.push_str(mname);
-                    found = Some((dt, kind));
+                    found = Some((dt, kind, self.string_keyed_dim(&dims[0])));
                     break;
                 }
                 Some(_) => return None, // collection mid-path: nested machinery
@@ -116342,14 +116342,14 @@ impl Simulator {
                 }
             }
         }
-        let (dt, kind) = found?;
+        let (dt, kind, string_key) = found?;
         let elem_w = resolve_type_width(
             &dt,
             Some(&self.module.parameters),
             Some(&self.module.typedefs),
         )
         .max(1);
-        self.register_struct_coll(handle, &key, kind, elem_w);
+        self.register_struct_coll(handle, &key, kind, elem_w, string_key);
         Some(format!("{}#{}", handle, key))
     }
 
@@ -116366,9 +116366,11 @@ impl Simulator {
         key: &str,
         kind: StructCollKind,
         elem_w: u32,
+        string_key: bool,
     ) {
         let name = format!("{}#{}", handle, key);
-        self.register_coll_name(&name, kind, elem_w, false);
+        // §7.8.1: a `[string]` member keys its entries by text.
+        self.register_coll_name(&name, kind, elem_w, string_key);
     }
 
     /// §7.2.1/§7.5/§7.8/§7.10: the collection a DYNAMIC member of an unpacked
@@ -116399,13 +116401,8 @@ impl Simulator {
             let su = self.unpacked_struct_of(&dt)?;
             let (mdt, dims) = Self::struct_member_decl(&su, seg)?;
             if j == last {
-                if *nidx != 0 || dims.len() != 1 {
-                    return None;
-                }
-                let kind = Self::coll_kind_of(&dims)?;
-                return Some((kind, mdt, self.string_keyed_dim(&dims[0])));
+                return Some((mdt, dims, *nidx));
             }
-            // An intermediate member must be selected down to one element.
             if *nidx != dims.len() {
                 return None;
             }
