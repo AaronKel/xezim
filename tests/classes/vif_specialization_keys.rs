@@ -151,7 +151,6 @@ endmodule
 /// §25.9/§8.9: a virtual interface held in a STATIC class property (plain,
 /// queue element, function return, `static T` of `G#(virtual pif)`).
 #[test]
-#[ignore = "virtual interface values are not stored in static class properties"]
 fn static_class_vif_properties() {
     const SRC: &str = r#"
 interface pif; int data; endinterface
@@ -238,3 +237,27 @@ fn spec_typedef_type_args_siblings() {
     assert_eq!(t_lines(include_str!("spec_typedef_type_args.sv")), expected);
 }
 
+/// §25.9/§8.9 siblings: a static virtual interface written and read from a
+/// static method, an instance method, through a handle, a derived class, a
+/// direct `S::spv = ...`, a `static T` of `G#(virtual pif)` beside
+/// `G#(int)`, and cleared with `null`.
+#[test]
+fn static_vif_property_shapes() {
+    let expected = [
+        "T|static_set|4",
+        "T|inst_get_static|4",
+        "T|inst_set|9",
+        "T|via_handle|9",
+        "T|derived|9",
+        "T|derived_fn|9",
+        "T|direct_write|4",
+        "T|gen_get|9",
+        "T|gen_one|9",
+        "T|gen_int|5",
+        "T|null|1",
+    ];
+    assert_eq!(
+        t_lines(include_str!("static_vif_property_shapes.sv")),
+        expected
+    );
+}

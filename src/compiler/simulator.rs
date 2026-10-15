@@ -6506,6 +6506,21 @@ pub struct Simulator {
     /// bus_if.master vif`) so the rewrite path can also emit a direction
     /// warning when writing to a modport-input member.
     virtual_iface_bindings: HashMap<(usize, String), (String, Option<String>)>,
+    /// §25.9/§8.9: the interface instance a STATIC class property holding a
+    /// virtual interface is bound to, keyed by the property's static storage
+    /// key (`S::spv`, `G#virtual pif::one`) — one binding per class (per
+    /// specialization), shared by every object and static method.
+    static_vif_bindings: HashMap<String, String>,
+    /// The property names `static_vif_bindings` holds a binding of (the
+    /// cheap gate `vif_rhs_possible` checks).
+    static_vif_names: HashSet<String>,
+    /// Every static property name some class declares as a virtual
+    /// interface or through a type parameter (built on first use): the gate
+    /// before `bind_static_vif` looks at an assignment.
+    vif_capable_statics: std::cell::OnceCell<HashSet<String>>,
+    /// False once start-up found no such static (`vif_capable_statics`
+    /// empty): the one-byte test every blocking assignment makes.
+    may_bind_static_vif: bool,
     /// §13.4/§8.5: the CALL in receiver position of a member/select chain
     /// being evaluated (`me()` in `me().o.x`, `q.pop_front()` in
     /// `q.pop_front().addr`), with its one value: `(node address, call-frame
@@ -12832,6 +12847,10 @@ impl Simulator {
             uvm_dpi: Default::default(),
             heap: vec![None], // index 0 is null
             virtual_iface_bindings: HashMap::default(),
+            static_vif_bindings: HashMap::default(),
+            static_vif_names: HashSet::default(),
+            vif_capable_statics: std::cell::OnceCell::new(),
+            may_bind_static_vif: true,
             recv_call_memo: Vec::new(),
             vif_tokens_stored: false,
             tb_cache: task_suspend::CycleMemo::default(),
@@ -17886,6 +17905,7 @@ impl Simulator {
         self.has_method_cache.borrow_mut().clear();
         self.init_two_state_struct_members();
         self.init_static_struct_holders();
+        self.may_bind_static_vif = !self.vif_capable_static_set().is_empty();
         // LRM §14.3 — populate clocking-block metadata: per-cb clock
         // signal + per-signal direction. `tick_clocking_blocks`
         // consumes this to maintain `clocking_snapshots`.
@@ -66771,6 +66791,8 @@ impl Simulator {
                 }),
                 crate::ast::Span::dummy(),
             );
+            // §25.9/§8.9: a static virtual-interface property binds too.
+            self.bind_static_vif(lhs, &synth);
             let _ = self.try_bind_virtual_iface(lhs, &synth);
         }
         // §13.5.2: a selected write through a `ref` formal lands on the
@@ -79998,6 +80020,9 @@ impl Simulator {
         lvalue: &Expression,
         rvalue: &Expression,
     ) {
+        // §25.9: a static virtual-interface property binds by name before
+        // any value path below stores (and returns).
+        self.bind_static_vif(lvalue, rvalue);
         if self.simple_blocking_assign(lvalue, rvalue) || self.member_target_assign(lvalue, rvalue)
         {
             return;
@@ -130285,6 +130310,209 @@ impl Simulator {
         let _ = self.try_bind_virtual_iface(caller, &synth);
     }
 
+    /// Every static property some class declares as a virtual interface or
+    /// through a type parameter, collections excluded (built on first use).
+    fn vif_capable_static_set(&self) -> &HashSet<String> {
+        self.vif_capable_statics.get_or_init(|| {
+            let mut out: HashSet<String> = HashSet::default();
+            for cd in self.module.classes.values() {
+                for sp in cd.static_properties.iter() {
+                    if Self::static_is_vif_capable(cd, sp) {
+                        out.insert(sp.clone());
+                    }
+                }
+            }
+            out
+        })
+    }
+
+    /// Whether static property `sp` of `cd` can hold a virtual interface:
+    /// declared one, or typed by a type parameter (not a collection of it).
+    fn static_is_vif_capable(cd: &super::elaborate::ElaboratedClass, sp: &str) -> bool {
+        if cd.static_collections.iter().any(|(n, ..)| n == sp)
+            || cd.static_fixed_arrays.iter().any(|(n, ..)| n == sp)
+        {
+            return false;
+        }
+        cd.virtual_iface_properties.contains_key(sp)
+            || matches!(cd.property_types.get(sp),
+                Some(DataType::TypeReference { name, dimensions, .. })
+                    if dimensions.is_empty() && cd.type_param_names.contains(&name.name.name))
+    }
+
+    /// Could the assignment target `lv` be a static property holding a
+    /// virtual interface (see `bind_static_vif`)? A name test only.
+    fn static_vif_target_possible(&self, lv: &Expression) -> bool {
+        let leaf = match &lv.kind {
+            ExprKind::Ident(h) if h.path.len() <= 2 => h.path.last().map(|s| s.name.name.as_str()),
+            ExprKind::MemberAccess { member, .. } => Some(member.name.as_str()),
+            _ => None,
+        };
+        leaf.is_some_and(|l| self.vif_capable_static_set().contains(l))
+    }
+
+    /// §25.9/§8.9: `S::spv = pi`, `spv = x` in a method, `one = v` in
+    /// `G#(virtual pif)`: a STATIC property holding a virtual interface binds
+    /// per class / specialization (`static_vif_bindings`). The value
+    /// assignment still runs.
+    #[inline(always)]
+    fn bind_static_vif(&mut self, lvalue: &Expression, rvalue: &Expression) {
+        // One byte on the per-assignment path: start-up clears it when no
+        // class declares a static that can hold a virtual interface.
+        if self.may_bind_static_vif {
+            self.bind_static_vif_slow(lvalue, rvalue);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn bind_static_vif_slow(&mut self, lvalue: &Expression, rvalue: &Expression) {
+        if self.vif_capable_static_set().is_empty() {
+            return;
+        }
+        if !matches!(
+            &rvalue.kind,
+            ExprKind::Null
+                | ExprKind::Ident(_)
+                | ExprKind::MemberAccess { .. }
+                | ExprKind::Index { .. }
+        ) || !self.static_vif_target_possible(lvalue)
+        {
+            return;
+        }
+        let Some(key) = self.static_vif_key(lvalue) else {
+            return;
+        };
+        if matches!(&rvalue.kind, ExprKind::Null) {
+            self.static_vif_bindings.remove(&key);
+        } else if let Some(nm) = self.resolve_vif_rhs_name_strict(rvalue) {
+            if let Some(leaf) = key.rsplit("::").next() {
+                self.static_vif_names.insert(leaf.to_string());
+            }
+            self.static_vif_bindings.insert(key, nm);
+        }
+    }
+
+    /// §8.9: the static storage key of the static class property `e` names
+    /// — bare inside a method of its class (no local, no instance property
+    /// shadowing it), `C::p`, `C#(args)::p`, `alias_t::p`, or `obj.p` — or
+    /// None. Gated on the property name: only a name some class declares
+    /// static gets past the first check.
+    fn static_vif_key(&self, e: &Expression) -> Option<String> {
+        let names = self.class_member_names();
+        let static_name = |n: &str| names.static_or_param.contains(n);
+        let class_head = |c: &str| -> Option<(String, Option<(String, String)>)> {
+            if self.local_stack.last().is_some_and(|l| l.contains_key(c))
+                || self.signal_name_to_id.contains_key(c)
+            {
+                return None;
+            }
+            if self.module.classes.contains_key(c) {
+                return Some((c.to_string(), None));
+            }
+            // A type parameter or a typedef (§8.25.1, §6.18).
+            if self.class_member_names().scope_prefixes.contains(c) {
+                let (b, sig) = self.resolve_class_scope_prefix(c)?;
+                return Some((b.clone(), sig.map(|s| (b, s))));
+            }
+            None
+        };
+        let keyed = |cls: &str, spec: Option<(String, String)>, p: &str| -> Option<String> {
+            let k = self.static_prop_key_spec(cls, p, spec.as_ref())?;
+            // A class constant is no variable.
+            let decl = k.split("::").next()?.split('#').next()?;
+            self.module
+                .classes
+                .get(decl)
+                .is_some_and(|cd| cd.static_properties.contains(p))
+                .then_some(k)
+        };
+        match &e.kind {
+            ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                match h.path.as_slice() {
+                    [seg] => {
+                        let n = seg.name.name.as_str();
+                        if !static_name(n)
+                            || self.local_stack.last().is_some_and(|l| l.contains_key(n))
+                        {
+                            return None;
+                        }
+                        let ctx = match self
+                            .this_stack
+                            .last()
+                            .copied()
+                            .flatten()
+                            .filter(|&h| h != 0)
+                        {
+                            Some(th) => {
+                                let inst = self.heap.get(th)?.as_ref()?;
+                                if inst.properties.contains_key(n) {
+                                    return None;
+                                }
+                                inst.class_name.clone()
+                            }
+                            None => self.class_context_stack.last().cloned().flatten()?,
+                        };
+                        keyed(&ctx, None, n)
+                    }
+                    [head, prop] => {
+                        let p = prop.name.name.as_str();
+                        if !static_name(p) {
+                            return None;
+                        }
+                        if let Some((cls, spec)) = class_head(&head.name.name) {
+                            return keyed(&cls, spec, p);
+                        }
+                        let oh = self.eval_ident_handle(&head.name.name)?;
+                        let cls = self.heap.get(oh)?.as_ref()?.class_name.clone();
+                        keyed(&cls, None, p)
+                    }
+                    _ => None,
+                }
+            }
+            ExprKind::MemberAccess { expr, member } => {
+                let p = member.name.as_str();
+                if !static_name(p) {
+                    return None;
+                }
+                match &expr.kind {
+                    ExprKind::Specialization { .. } => {
+                        let spec = self.resolve_call_spec_params(
+                            Self::extract_call_spec(expr),
+                            &self.current_spec,
+                        )?;
+                        keyed(&spec.0.clone(), Some(spec), p)
+                    }
+                    ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
+                        if let Some((cls, spec)) = class_head(&h.path[0].name.name) {
+                            return keyed(&cls, spec, p);
+                        }
+                        let oh = self.eval_ident_handle(&h.path[0].name.name)?;
+                        let cls = self.heap.get(oh)?.as_ref()?.class_name.clone();
+                        keyed(&cls, None, p)
+                    }
+                    ExprKind::This => {
+                        let th = self.this_stack.last().copied().flatten()?;
+                        let cls = self.heap.get(th)?.as_ref()?.class_name.clone();
+                        keyed(&cls, None, p)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The interface instance a static virtual-interface property `e` names
+    /// is bound to (see `static_vif_bindings`).
+    fn static_vif_binding(&self, e: &Expression) -> Option<String> {
+        if self.static_vif_bindings.is_empty() {
+            return None;
+        }
+        let k = self.static_vif_key(e)?;
+        self.static_vif_bindings.get(&k).cloned()
+    }
+
     fn resolve_vif_rhs_name_strict(&self, rvalue: &Expression) -> Option<String> {
         if !self.vif_rhs_possible(rvalue) {
             return None;
@@ -130657,6 +130885,9 @@ impl Simulator {
     /// is neither (so the caller falls back to a normal value assignment).
 
     fn resolve_vif_rhs_name(&self, rvalue: &Expression) -> Option<String> {
+        if let Some(b) = self.static_vif_binding(rvalue) {
+            return Some(b);
+        }
         match &rvalue.kind {
             // `v` — a bound vif of the current `this`, else a vif
             // formal/local alias (LRM §25.9), else a direct instance.
@@ -131878,6 +132109,16 @@ impl Simulator {
     /// strict resolver returns None and callers filtering on
     /// `is_interface_instance` find nothing; the resolver only reads state.
     fn vif_rhs_possible(&self, e: &Expression) -> bool {
+        if !self.static_vif_names.is_empty() {
+            let leaf = match &e.kind {
+                ExprKind::Ident(h) => h.path.last().map(|s| s.name.name.as_str()),
+                ExprKind::MemberAccess { member, .. } => Some(member.name.as_str()),
+                _ => None,
+            };
+            if leaf.is_some_and(|l| self.static_vif_names.contains(l)) {
+                return true;
+            }
+        }
         match &e.kind {
             ExprKind::Ident(h) if h.path.len() == 1 => self.vif_name_possible(&h.path[0].name.name),
             ExprKind::Ident(h) => {
@@ -165321,6 +165562,7 @@ impl Simulator {
                 let mut const_names: HashSet<String> = HashSet::default();
                 let mut instance_props: HashSet<String> = HashSet::default();
                 let mut spec_scoped: HashSet<String> = HashSet::default();
+                let mut vif_statics: HashSet<String> = HashSet::default();
                 {
                     let mut cur = Some(cname.to_string());
                     let mut guard = 0;
@@ -165337,7 +165579,15 @@ impl Simulator {
                                 .cloned()
                                 .collect();
                             for sp in cd.static_properties.iter() {
-                                static_members.insert(sp.clone());
+                                // §25.9: a static holding a virtual interface
+                                // (declared so, or through a type parameter
+                                // that may bind one) binds by name — the
+                                // interpreter's `static_vif_bindings`.
+                                if Self::static_is_vif_capable(&cd, sp) {
+                                    vif_statics.insert(sp.clone());
+                                } else {
+                                    static_members.insert(sp.clone());
+                                }
                             }
                             for (pn, _) in cd.param_defaults.iter() {
                                 const_names.insert(pn.clone());
@@ -165380,6 +165630,12 @@ impl Simulator {
                     static_members.remove(vpn);
                     const_names.remove(vpn);
                     shadow_names.insert(vpn.clone());
+                }
+                // A method naming a vif-capable static stays interpreted.
+                for vs in vif_statics.iter() {
+                    if !static_members.contains(vs) && !instance_props.contains(vs) {
+                        shadow_names.insert(vs.clone());
+                    }
                 }
                 let mut bare_targets: HashMap<String, String> = HashMap::default();
                 for m in method_name_set.iter() {
