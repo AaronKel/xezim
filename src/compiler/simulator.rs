@@ -122652,6 +122652,11 @@ impl Simulator {
         match self.resolve_dt(dt) {
             DataType::Struct(su) if su.packed => self.render_p_packed(v, &su),
             DataType::Real { .. } => format!("{}", v.to_f64()),
+            // §21.2.1.7: a string prints quoted.
+            DataType::Simple {
+                kind: crate::ast::types::SimpleType::String,
+                ..
+            } => format!("\"{}\"", v.to_sv_string()),
             _ => {
                 if v.is_real {
                     format!("{}", v.to_f64())
@@ -122957,6 +122962,40 @@ impl Simulator {
         for m in &su.members {
             for md in &m.declarators {
                 let key = format!("{}.{}", leaf, md.name.name);
+                // §7.10/§21.2.1.7: a dynamic / queue / associative member
+                // (declared so, or through a collection typedef) is the
+                // collection `<handle>#<key>`, not a cell.
+                let coll_dims: Option<Vec<crate::ast::types::UnpackedDimension>> =
+                    if !md.dimensions.is_empty() {
+                        Some(md.dimensions.clone())
+                    } else if let DataType::TypeReference {
+                        name, dimensions, ..
+                    } = &m.data_type
+                        && dimensions.is_empty()
+                        && !name.has_scope()
+                    {
+                        self.class_chain_typedef_dims(handle, &name.name.name)
+                    } else {
+                        None
+                    };
+                if let Some(cd) = coll_dims.as_deref()
+                    && let Some(kind) = Self::coll_kind_of(cd)
+                {
+                    let string_key = self.string_keyed_dim(&cd[0]);
+                    let ew = resolve_type_width(
+                        &m.data_type,
+                        Some(&self.module.parameters),
+                        Some(&self.module.typedefs),
+                    )
+                    .max(1);
+                    self.register_struct_coll(handle, &key, kind, ew, string_key);
+                    let name = format!("{}#{}", handle, key);
+                    let r = self
+                        .render_p_var(&name)
+                        .unwrap_or_else(|| "'{}".to_string());
+                    parts.push(format!("{}:{}", md.name.name, r));
+                    continue;
+                }
                 // §7.4: a member with fixed unpacked dimensions is a nested
                 // list of its element cells (`<key>[i]`).
                 let rendered = match self.member_dim_indices(&md.dimensions) {
@@ -123010,9 +123049,21 @@ impl Simulator {
         {
             return "null".into();
         }
-        v.as_ref()
-            .map(|vv| self.render_p_value_typed(vv, dt))
-            .unwrap_or_else(|| "x".into())
+        match v {
+            Some(vv) => self.render_p_value_typed(&vv, dt),
+            // §6.16/§6.8: an unwritten string member is the empty string.
+            None if matches!(
+                self.resolve_dt_ref(dt),
+                DataType::Simple {
+                    kind: crate::ast::types::SimpleType::String,
+                    ..
+                }
+            ) =>
+            {
+                "\"\"".into()
+            }
+            None => "x".into(),
+        }
     }
 
     /// §21.2.1.7: `%p` of class property `prop` of object `handle` from its

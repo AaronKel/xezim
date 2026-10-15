@@ -277,7 +277,6 @@ fn pin_class_struct_prop_shadowed_by_module_var() {
     );
 }
 
-#[ignore = "%p of a whole struct class property prints a dynamic member as x (§21.2.1.7)"]
 #[test]
 fn pin_class_struct_prop_whole_p() {
     assert_eq!(
@@ -302,3 +301,24 @@ fn pin_spec_static_struct_misc() {
         ]
     );
 }
+
+/// Siblings of the struct-class-property pins: `push_front` and a string-
+/// keyed member of a pushed element, the property copied into an element of
+/// a dynamic, associative and fixed array, the property beside a same-named
+/// module variable, `%p` of the whole property inside a method and from
+/// outside, and a member typed by a design-level queue typedef.
+#[test]
+fn class_struct_prop_dyn_member_siblings() {
+    assert_eq!(
+        t_lines(include_str!("class_struct_prop_dyn_siblings.sv")),
+        [
+            "T|01 '{1} '{\"x\":3 } 2",
+            "T|02 '{1} '{1} '{1}",
+            "T|03 c='{1} m='{}",
+            "T|04 '{q:'{1}, a:'{\"x\":3 }, k:5}",
+            "T|05 '{q:'{1}, a:'{\"x\":3 }, k:5}",
+            "T|06 '{q:'{8}, k:2} '{8}",
+        ]
+    );
+}
+
