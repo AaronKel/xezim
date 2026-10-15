@@ -123020,6 +123020,28 @@ impl Simulator {
         let saved_iter = self.locator_iter.clone();
         self.locator_iter = iter_name.unwrap_or("item").to_string();
 
+        // §7.12/§7.2.1: a PACKED-struct element binds its fields too, so
+        // `find with (item.lo > 2)` slices them out of `item`.
+        let pfields = if elem_su.is_none() {
+            match self.module.packed_struct_fields.get(arr) {
+                Some(f) => Some(f.clone()),
+                // A struct's dynamic member (`s.sp[2]`): its declared type.
+                None if arr.contains('.') && self.struct_colls_possible() => {
+                    self.struct_member_coll_of(arr).and_then(|(_, dt, _)| {
+                        super::elaborate::packed_struct_field_layout(
+                            &dt,
+                            &self.module.parameters,
+                            &self.module.typedefs,
+                            &self.module.typedef_types,
+                        )
+                    })
+                }
+                None => None,
+            }
+            .filter(|f| !f.is_empty())
+        } else {
+            None
+        };
         let mut keys: Vec<i64> = Vec::with_capacity(size);
         let mut truth: Vec<bool> = Vec::with_capacity(size);
         for &i in &order {
@@ -123046,6 +123068,13 @@ impl Simulator {
                 if let Some(k) = &iter_index {
                     f.insert(k.clone(), ix);
                 }
+                if let Some(fields) = &pfields {
+                    let it = iter_name.unwrap_or("item");
+                    for (fname, off, w) in fields {
+                        let slice = v.range_select((off + w - 1) as usize, *off as usize);
+                        f.insert(format!("{}.{}", it, fname), slice);
+                    }
+                }
             }
             match filter {
                 Some(f) => {
@@ -123060,6 +123089,12 @@ impl Simulator {
             }
         }
 
+        if let (Some(fields), Some(f)) = (&pfields, self.local_stack.last_mut()) {
+            let it = iter_name.unwrap_or("item");
+            for (fname, _, _) in fields {
+                f.remove(&format!("{}.{}", it, fname));
+            }
+        }
         self.item_alias = saved_alias;
         self.locator_iter = saved_iter;
         if let Some(f) = self.local_stack.last_mut() {
