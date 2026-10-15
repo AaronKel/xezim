@@ -208,3 +208,82 @@ endmodule
         ["T|lix 44 4294967295 45", "T|fix 46 44", "T|tix 44"]
     );
 }
+
+/// §8.25/§6.12: a queue of a type parameter takes the element type of the
+/// object's own specialization: a real, shortreal or string binding stores
+/// values unchanged (push_back, push_front, insert, indexed write, a method),
+/// a byte binding truncates; the same for a static queue per
+/// specialization and through `extends Pq#(real)`.
+#[test]
+fn type_parameter_queues_follow_the_specialization() {
+    let src = r#"
+class K; int v = 9; endclass
+typedef struct { int a; byte b; } us_t;
+class Pq #(type T = int);
+  T q[$];
+  static T sq[$];
+  function void f(T x); q.push_back(x); endfunction
+endclass
+class D extends Pq#(real); endclass
+module top;
+  Pq#(real) pq; Pq#(shortreal) ps; Pq#(string) pst; Pq#(byte) pb; Pq#(K) pk; Pq#(us_t) pu; D d; Pq pi;
+  initial begin
+    K k = new; us_t u;
+    pq = new; ps = new; pst = new; pb = new; pk = new; pu = new; d = new; pi = new;
+    pq.q.push_back(1.5); pq.q.push_front(2.25); pq.q.insert(1, 3.75); pq.q.push_back(0); pq.q[3] = 4.5; pq.f(5.125);
+    $display("T|real %f %f %f %f %f %0d", pq.q[0], pq.q[1], pq.q[2], pq.q[3], pq.q[4], pq.q.size());
+    ps.q.push_back(1.5); ps.q.push_front(2.25); ps.q.insert(1, 3.75); ps.q[0] = 6.5;
+    $display("T|sreal %f %f %f", ps.q[0], ps.q[1], ps.q[2]);
+    pst.q.push_back("abc"); pst.q.push_front("hello world"); pst.q.insert(1, "x"); pst.q[2] = "yz";
+    $display("T|str %s %s %s", pst.q[0], pst.q[1], pst.q[2]);
+    pb.q.push_back(300); pb.q.push_front(2.75); pb.q.insert(1, 302); pb.q[2] = -129; pb.f(301);
+    $display("T|byte %0d %0d %0d %0d", pb.q[0], pb.q[1], pb.q[2], pb.q[3]);
+    pk.q.push_back(k); u.a = 100000; u.b = 7; pu.q.push_back(u);
+    $display("T|oth %0d %0d %0d", pk.q[0].v, pu.q[0].a, pu.q[0].b);
+    Pq#(real)::sq.push_back(1.5); Pq#(real)::sq.push_front(2.25); Pq#(real)::sq.insert(1, 3.75);
+    Pq#(byte)::sq.push_back(300);
+    $display("T|static %f %f %f %0d", Pq#(real)::sq[0], Pq#(real)::sq[1], Pq#(real)::sq[2], Pq#(byte)::sq[0]);
+    d.q.push_back(1.5); d.q.push_front(2.25); d.q.insert(1, 3.75); d.q[0] = 7.5; d.f(8.25);
+    $display("T|der %f %f %f %f", d.q[0], d.q[1], d.q[2], d.q[3]);
+    pi.q.push_back(1.5); pi.q.push_back(300);
+    $display("T|dflt %0d %0d", pi.q[0], pi.q[1]);
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(src),
+        [
+            "T|real 2.250000 3.750000 1.500000 4.500000 5.125000 5",
+            "T|sreal 6.500000 3.750000 1.500000",
+            "T|str hello world x yz",
+            "T|byte 3 46 127 45",
+            "T|oth 9 100000 7",
+            "T|static 2.250000 3.750000 1.500000 44",
+            "T|der 7.500000 3.750000 1.500000 8.250000",
+            "T|dflt 2 300",
+        ]
+    );
+}
+
+/// §8.25: the specialization of a class variable declared in a package, in
+/// a module (with a `realtime` argument) or as a class property.
+#[test]
+fn specialization_of_package_module_and_property_variables() {
+    let src = r#"
+package pk;
+  class Pq #(type T = int); T q[$]; endclass
+  Pq#(realtime) pv;
+  Pq#(byte) pb;
+endpackage
+import pk::*;
+class H; Pq#(real) m; function new(); m = new; m.q.push_back(1.5); endfunction endclass
+module top;
+  Pq#(realtime) pt;
+  initial begin
+    H h = new; pt = new; pt.q.push_back(2.5); pk::pv = new; pk::pv.q.push_back(3.5); pk::pb = new; pk::pb.q.push_back(300);
+    $display("T|ctx %f %f %f %0d", h.m.q[0], pt.q[0], pk::pv.q[0], pk::pb.q[0]);
+  end
+endmodule
+"#;
+    assert_eq!(t_lines(src), ["T|ctx 1.500000 2.500000 3.500000 44"]);
+}
