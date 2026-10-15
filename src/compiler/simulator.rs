@@ -75343,6 +75343,25 @@ impl Simulator {
                             }
                         }
                     }
+                    // §13.5.1/§8.10: a bare NO-ARGUMENT STATIC function of the
+                    // executing class chain (`type_name` inherited from
+                    // `holder #(int, "ext")`) is a call as well; it runs
+                    // under the specialization the chain binds.
+                    if let Some(Some(ctx)) = self.class_context_stack.last().cloned()
+                        && self.is_static_method(&ctx, name)
+                        && self.class_parameterless_function(&ctx, name)
+                    {
+                        let this_h = self.this_stack.last().copied().flatten().unwrap_or(0);
+                        let r = if this_h != 0 {
+                            self.exec_static_method_via_object(&ctx, name, &[], this_h)
+                        } else {
+                            self.exec_static_method(&ctx, name, &[])
+                        };
+                        if let Some(v) = r {
+                            self.return_flag = false;
+                            return v;
+                        }
+                    }
                 } else if hier.path.len() > 1 {
                     // LRM §25.8: `<obj>.<vif>` external read — if `<obj>`
                     // is a class handle whose class declares `<vif>` as a
