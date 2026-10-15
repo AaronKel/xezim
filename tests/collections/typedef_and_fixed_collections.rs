@@ -269,7 +269,6 @@ fn pin_class_queue_push_struct_with_dyn_member() {
     );
 }
 
-#[ignore = "a dynamic member of a struct class property resolves to a same-named module struct variable (§8.4 scoping)"]
 #[test]
 fn pin_class_struct_prop_shadowed_by_module_var() {
     assert_eq!(

@@ -129636,6 +129636,45 @@ impl Simulator {
         true
     }
 
+    /// §8.4: is the bare `name` a property of `this` (own or inherited) that
+    /// no local of the current frame shadows? It then hides a same-named
+    /// variable of an enclosing scope.
+    fn this_prop_hides(&self, name: &str) -> bool {
+        let Some(th) = self
+            .this_stack
+            .last()
+            .copied()
+            .flatten()
+            .filter(|&h| h != 0)
+        else {
+            return false;
+        };
+        if self
+            .local_stack
+            .last()
+            .is_some_and(|l| l.contains_key(name))
+        {
+            return false;
+        }
+        let mut cur = self
+            .heap
+            .get(th)
+            .and_then(|o| o.as_ref())
+            .map(|i| i.class_name.as_str());
+        let mut hops = 0;
+        while let Some(cn) = cur {
+            hops += 1;
+            let Some(cd) = self.module.classes.get(cn).filter(|_| hops < 64) else {
+                break;
+            };
+            if cd.property_types.contains_key(name) && !cd.static_properties.contains(name) {
+                return true;
+            }
+            cur = cd.extends.as_deref();
+        }
+        false
+    }
+
     /// §23.9: does a nearer declaration hide a same-named interface instance
     /// or vif alias for a BARE name? A local or formal of the current frame,
     /// or a non-vif property of `this` (§8.5), is found before any enclosing
@@ -136431,9 +136470,15 @@ impl Simulator {
                             };
                         }
                     }
-                    if self.module.dynamic_arrays.contains(&recv_name)
+                    if (self.module.dynamic_arrays.contains(&recv_name)
                         || self.module.associative_arrays.contains_key(&recv_name)
-                        || self.module.arrays.contains_key(&recv_name)
+                        || self.module.arrays.contains_key(&recv_name))
+                        // §8.4/§23.9: in a method, a property of `this`
+                        // (`s.q` of a struct property `s`) hides a
+                        // same-named module variable.
+                        && !self.this_prop_hides(
+                            recv_name.split(['.', '[']).next().unwrap_or(&recv_name),
+                        )
                     {
                         if let Some(res) = self.eval_builtin_method(&recv_name, &member.name, args)
                         {
