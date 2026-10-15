@@ -3268,6 +3268,11 @@ struct ClassMemberNames {
     /// Typedef names (module or class scope) whose target is a class-scoped
     /// type (`typedef R::elem_t et_t;`).
     scoped_typedefs: HashSet<String>,
+    /// Names that may prefix a class-scope reference without being a
+    /// class: class parameters and typedef names.
+    scope_prefixes: HashSet<String>,
+    /// First bytes of the `params` names: a cheap prefilter.
+    param_first: [bool; 256],
     /// Every class type/value parameter name.
     params: HashSet<String>,
     /// Every associative-array property name.
@@ -73451,7 +73456,8 @@ impl Simulator {
                     // `Tregistry::type_name`); it names no class key, so
                     // resolve it with its specialization active.
                     let nm = &hier.path[0].name.name;
-                    if !self.local_stack.last().is_some_and(|m| m.contains_key(nm))
+                    if self.class_member_names().scope_prefixes.contains(nm)
+                        && !self.local_stack.last().is_some_and(|m| m.contains_key(nm))
                         && !self.signal_name_to_id.contains_key(nm.as_str())
                         && !self.signals.contains_key(nm)
                         && let Some(v) = self.class_scope_member_value(nm, &member.name)
@@ -75347,10 +75353,18 @@ impl Simulator {
                     // executing class chain (`type_name` inherited from
                     // `holder #(int, "ext")`) is a call as well; it runs
                     // under the specialization the chain binds.
-                    if let Some(Some(ctx)) = self.class_context_stack.last().cloned()
-                        && self.is_static_method(&ctx, name)
-                        && self.class_parameterless_function(&ctx, name)
-                    {
+                    // Borrowed test first: this point is reached by every
+                    // unresolved bare name in a method.
+                    let static_fn = match self.class_context_stack.last() {
+                        Some(Some(ctx))
+                            if self.class_member_names().static_methods.contains(name) =>
+                        {
+                            self.is_static_method(ctx, name)
+                                && self.class_parameterless_function(ctx, name)
+                        }
+                        _ => false,
+                    };
+                    if static_fn && let Some(Some(ctx)) = self.class_context_stack.last().cloned() {
                         let this_h = self.this_stack.last().copied().flatten().unwrap_or(0);
                         let r = if this_h != 0 {
                             self.exec_static_method_via_object(&ctx, name, &[], this_h)
@@ -75437,6 +75451,10 @@ impl Simulator {
                         // is a call, so it runs under that specialization
                         // too.
                         if !self.module.classes.contains_key(cls)
+                            && self
+                                .class_member_names()
+                                .scope_prefixes
+                                .contains(&hier.path[0].name.name)
                             && let Some(v) =
                                 self.class_scope_member_value(&hier.path[0].name.name, prop)
                         {
@@ -146246,6 +146264,10 @@ impl Simulator {
         // specialization; a parameter it inherits takes the value that
         // extends clause binds, not the base's default.
         if self.current_spec.is_none()
+            && name
+                .as_bytes()
+                .first()
+                .is_some_and(|b| self.class_member_names().param_first[*b as usize])
             && self.class_member_names().params.contains(name)
             && let Some(Some(ctx)) = self.class_context_stack.last()
             && let Some(spec) = self.inherited_param_spec(&ctx.clone())
@@ -155540,6 +155562,18 @@ impl Simulator {
     /// binding. Returns the concrete form `local_type_param_concrete` gives
     /// (`byte`, `logic[5:0]`), or None for any other type.
     fn scoped_typedef_concrete(&mut self, dt: &DataType) -> Option<String> {
+        // Cheap reject first: this runs for every local declaration.
+        let DataType::TypeReference { name, .. } = dt else {
+            return None;
+        };
+        if !name.has_scope()
+            && !self
+                .class_member_names()
+                .scoped_typedefs
+                .contains(&name.name.name)
+        {
+            return None;
+        }
         let mut cur = dt.clone();
         for _ in 0..8 {
             let DataType::TypeReference {
@@ -160368,12 +160402,26 @@ impl Simulator {
                         .map(|(n, _)| n.clone()),
                 );
             }
+            // Names that can prefix `name::member` without being a class
+            // key: class parameters and typedef names (module or class
+            // scope) — see `class_scope_member_value`.
+            let mut scope_prefixes: HashSet<String> = params.clone();
+            scope_prefixes.extend(self.module.typedef_types.keys().cloned());
+            for cd in self.module.classes.values() {
+                scope_prefixes.extend(cd.typedef_targets.keys().cloned());
+            }
             let mut ident_slow: HashSet<String> = HashSet::default();
             ident_slow.extend(statics.iter().cloned());
             ident_slow.extend(vif_props.iter().cloned());
             ident_slow.extend(self.struct_capable_names().iter().cloned());
             ident_slow.insert("UVM_ACTIVE".to_string());
             ident_slow.insert("UVM_PASSIVE".to_string());
+            let mut param_first = [false; 256];
+            for n in &params {
+                if let Some(&b) = n.as_bytes().first() {
+                    param_first[b as usize] = true;
+                }
+            }
             let mut vif_first = [false; 256];
             for n in &vif_props {
                 if let Some(&b) = n.as_bytes().first() {
@@ -160393,6 +160441,8 @@ impl Simulator {
                 subroutine_suffixes,
                 alias_typedefs,
                 scoped_typedefs,
+                scope_prefixes,
+                param_first,
                 params,
                 assoc_props,
                 string_props,
