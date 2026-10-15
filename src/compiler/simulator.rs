@@ -72732,6 +72732,9 @@ impl Simulator {
                 {
                     return v;
                 }
+                if let Some(v) = self.active_spec_param_value(&cls, &member.name) {
+                    return v;
+                }
                 if let Some(v) = self.class_static_get(&cls, &member.name) {
                     return v;
                 }
@@ -73432,6 +73435,9 @@ impl Simulator {
                         if let Some(v) = self.exec_static_method(cls, &member.name, &[]) {
                             return v;
                         }
+                    }
+                    if let Some(v) = self.active_spec_param_value(cls, &member.name) {
+                        return v;
                     }
                     if let Some(v) = self.class_static_get(cls, &member.name) {
                         return v;
@@ -75436,6 +75442,9 @@ impl Simulator {
                                 if let Some(v) = self.exec_static_method(cls, prop, &[]) {
                                     return v;
                                 }
+                            }
+                            if let Some(v) = self.active_spec_param_value(cls, prop) {
+                                return v;
                             }
                             if let Some(v) = self.class_static_get(cls, prop) {
                                 return v;
@@ -128592,6 +128601,10 @@ impl Simulator {
                 }
             }
         }
+        // §8.25: a parameter of the active specialization of this class.
+        if let Some(v) = self.active_spec_param_value(start_class, member) {
+            return Some(v);
+        }
         // Static property / localparam fallback.
         for cn in &chain_classes {
             if let Some(v) = self.class_static_get(cn, member) {
@@ -135032,6 +135045,27 @@ impl Simulator {
             self.current_spec = saved;
         }
         v
+    }
+
+    /// §8.25: `C#(args)::P` / `C#(args)::LP` — a value parameter or class
+    /// localparam of class `cls` read while `cls`'s own specialization is
+    /// active (the stripped `Specialization` wrapper set it) takes that
+    /// specialization's value, not the declared default the shared static
+    /// cell holds. None when no specialization of `cls` is active or
+    /// `member` is no parameter of it.
+    fn active_spec_param_value(&mut self, cls: &str, member: &str) -> Option<Value> {
+        if !self.current_spec.as_ref().is_some_and(|(b, _)| b == cls) {
+            return None;
+        }
+        let declares = self.module.classes.get(cls).is_some_and(|cd| {
+            !cd.type_param_names.iter().any(|t| t == member)
+                && (cd.param_order.iter().any(|p| p == member)
+                    || cd.param_defaults.iter().any(|(n, _)| n == member))
+        });
+        if !declares {
+            return None;
+        }
+        self.resolve_value_param_in_current(member)
     }
 
     /// Execute `ClassName::method(args)` — a static method call with no
