@@ -288,7 +288,6 @@ fn pin_class_struct_prop_whole_p() {
     );
 }
 
-#[ignore = "parameterized-class statics: %p in a static method, module writes to static struct / fixed array of structs, typedef alias of a specialization (§8.25)"]
 #[test]
 fn pin_spec_static_struct_misc() {
     assert_eq!(
@@ -322,3 +321,24 @@ fn class_struct_prop_dyn_member_siblings() {
     );
 }
 
+/// Siblings of `pin_spec_static_struct_misc`: string members of a static
+/// fixed array of structs and of a static struct written from the module,
+/// `%p` of the static struct in a static method, a scalar static and a
+/// struct-queue element through a typedef alias, another specialization's
+/// store, and a static struct member written through the alias.
+#[test]
+fn spec_static_struct_siblings() {
+    assert_eq!(
+        t_lines(include_str!("spec_static_struct_siblings.sv")),
+        [
+            "T|01 show='{'{s:\"a\", v:7}}",
+            "T|02 fa v=12 s=z",
+            "T|03 one v=13 s=o",
+            "T|03b '{s:\"o\", v:13}",
+            "T|04 alias v=16 s=t n=2",
+            "T|05 cnt=4 4",
+            "T|06 b=3 n=1",
+            "T|07 one=21",
+        ]
+    );
+}

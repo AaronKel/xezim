@@ -63483,7 +63483,10 @@ impl Simulator {
                     {
                         format!("this.{}", member.name)
                     }
-                    _ => self.flat_member_name(expr)?,
+                    _ => match self.class_scoped_elem_store(expr) {
+                        Some(k) => k,
+                        None => self.flat_member_name(expr)?,
+                    },
                 };
                 // §7.10.1: `$` names the last element of the queue indexed.
                 let iv = if Self::expr_contains_dollar(index) {
@@ -63528,11 +63531,16 @@ impl Simulator {
             // specialization, whose store is keyed per specialization
             // (`C#args::m`, the key a static method of the class uses), so
             // `C#(int)::q[0].f` reaches the element members the class wrote.
+            // A static FIXED array keeps one store per declaring class
+            // (`C::m`), the one its methods use.
             ExprKind::MemberAccess { expr, member }
                 if matches!(expr.kind, ExprKind::Specialization { .. }) =>
             {
                 let spec = self
                     .resolve_call_spec_params(Self::extract_call_spec(expr), &self.current_spec)?;
+                if let Some(k) = self.static_fixed_key_in(&spec.0, &member.name) {
+                    return Some(k);
+                }
                 let saved = self.current_spec.replace(spec.clone());
                 let key = self.static_prop_key(&spec.0, &member.name);
                 self.current_spec = saved;
@@ -67440,6 +67448,20 @@ impl Simulator {
                         {
                             return true;
                         }
+                        // §8.25/§6.18: `alias_t::prop` through a typedef of a
+                        // specialization writes THAT specialization's cell,
+                        // the one its reads (and `C#(args)::prop`) name.
+                        if !self.module.classes.contains_key(&cls)
+                            && !self.signal_name_to_id.contains_key(cls.as_str())
+                            && let Some((base, sig)) = self.scope_prefix_spec(&cls)
+                        {
+                            let saved = self.current_spec.replace((base.clone(), sig));
+                            let ok = self.class_static_set(&base, &prop, val.clone());
+                            self.current_spec = saved;
+                            if ok {
+                                return true;
+                            }
+                        }
                     }
                     // `ClassName::static_obj_handle.member...` (3+ segments):
                     // the head names a class whose STATIC property (segment 1)
@@ -69155,6 +69177,23 @@ impl Simulator {
                             && self.class_static_set(&cls, &member.name, val.clone())
                         {
                             return true;
+                        }
+                        // §8.25/§6.18: through a typedef of a specialization.
+                        if !self.module.classes.contains_key(&cls)
+                            && !self
+                                .local_stack
+                                .last()
+                                .is_some_and(|m| m.contains_key(&cls))
+                            && !self.signal_name_to_id.contains_key(cls.as_str())
+                            && !self.signals.contains_key(&cls)
+                            && let Some((base, sig)) = self.scope_prefix_spec(&cls)
+                        {
+                            let saved = self.current_spec.replace((base.clone(), sig));
+                            let ok = self.class_static_set(&base, &member.name, val.clone());
+                            self.current_spec = saved;
+                            if ok {
+                                return true;
+                            }
                         }
                     }
                 }
@@ -90926,7 +90965,29 @@ impl Simulator {
                 _ => break false,
             }
         };
-        if !through_select {
+        // A member of a class-scoped static (`C#(int)::one.s`, `C::one.s`,
+        // `alias_t::one.s`) has no select but no other check knows it.
+        let class_rooted = || {
+            let mut cur = e;
+            loop {
+                match &cur.kind {
+                    ExprKind::MemberAccess { expr, .. } | ExprKind::Index { expr, .. } => {
+                        cur = expr
+                    }
+                    ExprKind::Paren(inner) => cur = inner,
+                    ExprKind::Specialization { .. } => return true,
+                    ExprKind::Ident(h) => {
+                        let n = h.path[0].name.name.as_str();
+                        return h.path.len() + usize::from(!std::ptr::eq(cur, e)) > 1
+                            && !self.local_stack.last().is_some_and(|l| l.contains_key(n))
+                            && (self.module.classes.contains_key(n)
+                                || self.class_member_names().scope_prefixes.contains(n));
+                    }
+                    _ => return false,
+                }
+            }
+        };
+        if !through_select && (self.module.classes.is_empty() || !class_rooted()) {
             return false;
         }
         // Steps outermost first: `Some(member)` or `None` for a select.
@@ -91030,6 +91091,14 @@ impl Simulator {
                             Ty::Dt(self.resolve_dt(dt))
                         } else if let Some(cn) = self.var_class_types.get(n) {
                             Ty::Class(cn.clone())
+                        } else if self.module.classes.contains_key(n) {
+                            // §8.9: `Cls::q[i].name`.
+                            Ty::Class(n.to_string())
+                        } else if self.class_member_names().scope_prefixes.contains(n)
+                            && let Some((base, _)) = self.resolve_class_scope_prefix(n)
+                        {
+                            // §8.25: `alias_t::q[i].name`.
+                            Ty::Class(base)
                         } else {
                             return false;
                         }
@@ -91923,6 +91992,36 @@ impl Simulator {
                                 // renders from the element's instance cells.
                                 if !self.no_class_objects()
                                     && let Some(s) = self.render_p_class_struct_elem(arg)
+                                {
+                                    result.push_str(&s);
+                                    continue;
+                                }
+                                // §8.9/§8.25: a static collection named bare in
+                                // a static method of a parameterized class is
+                                // the specialization's store (`P#int::q`).
+                                if let ExprKind::Ident(h) = &arg.kind
+                                    && h.path.len() == 1
+                                    && h.path[0].selects.is_empty()
+                                    && let Some(k) =
+                                        self.static_method_coll_key(&h.path[0].name.name)
+                                    && let Some(s) = self.render_p_var(&k)
+                                {
+                                    result.push_str(&s);
+                                    continue;
+                                }
+                                // §8.9: a static fixed array named bare in a
+                                // method of its class.
+                                if let ExprKind::Ident(h) = &arg.kind
+                                    && h.path.len() == 1
+                                    && h.path[0].selects.is_empty()
+                                    && !self
+                                        .local_stack
+                                        .last()
+                                        .is_some_and(|l| l.contains_key(&h.path[0].name.name))
+                                    && let Some(Some(ctx)) =
+                                        self.class_context_stack.last().cloned()
+                                    && let Some(s) =
+                                        self.render_p_static_fixed(&ctx, &h.path[0].name.name)
                                 {
                                     result.push_str(&s);
                                     continue;
@@ -100052,7 +100151,9 @@ impl Simulator {
     /// access.
     #[inline(always)]
     fn no_class_objects(&self) -> bool {
-        self.heap.len() <= 1
+        // §8.9: a static unpacked struct of a parameterized class gets its
+        // per-specialization holder object on first use, so it counts too.
+        self.heap.len() <= 1 && self.static_struct_names.is_empty()
     }
 
     /// Id-keyed write with the same bookkeeping as `fast_signal_write`'s
@@ -114720,6 +114821,14 @@ impl Simulator {
             let mut set: HashSet<String> = HashSet::default();
             for cd in self.module.classes.values() {
                 for (name, dt) in &cd.property_types {
+                    // A static of a class-local struct typedef (`typedef
+                    // struct {..} e_t; static e_t one;` in a parameterized
+                    // class) through the class chain first.
+                    let dt = if cd.static_properties.contains(name) {
+                        self.class_prop_decl_type(cd, name).unwrap_or(dt)
+                    } else {
+                        dt
+                    };
                     let dt = Self::resolve_type_ref(dt, &self.module.typedef_types);
                     if matches!(dt, DataType::Struct(_)) {
                         set.insert(name.clone());
@@ -114880,6 +114989,40 @@ impl Simulator {
             {
                 let cls = oh.path[0].name.name.clone();
                 return self.static_struct_holder(&cls, &prop).map(|h| (h, prop));
+            }
+            // §8.25/§8.9: `C#(args)::s` / `alias_t::s` (a typedef of a
+            // specialization) names THAT specialization's static struct.
+            if !self.static_struct_names.is_empty()
+                && self.static_struct_names.contains(prop.as_str())
+            {
+                let spec = match &obj.kind {
+                    ExprKind::Specialization { .. } => self.resolve_call_spec_params(
+                        Self::extract_call_spec(&obj),
+                        &self.current_spec,
+                    ),
+                    ExprKind::Ident(oh)
+                        if oh.path.len() == 1
+                            && oh.path[0].selects.is_empty()
+                            && !self.module.classes.contains_key(&oh.path[0].name.name)
+                            && !self
+                                .local_stack
+                                .last()
+                                .is_some_and(|l| l.contains_key(&oh.path[0].name.name))
+                            && self
+                                .class_member_names()
+                                .scope_prefixes
+                                .contains(&oh.path[0].name.name) =>
+                    {
+                        self.scope_prefix_spec(&oh.path[0].name.name)
+                    }
+                    _ => None,
+                };
+                if let Some((base, sig)) = spec {
+                    let saved = self.current_spec.replace((base.clone(), sig));
+                    let h = self.static_struct_holder(&base, &prop);
+                    self.current_spec = saved;
+                    return h.map(|h| (h, prop));
+                }
             }
             let h = self.eval_expr(&obj).to_u64()? as usize;
             if h == 0 || self.heap.get(h).and_then(|o| o.as_ref()).is_none() {
@@ -123076,8 +123219,18 @@ impl Simulator {
         if cd.static_properties.contains(prop) {
             // §8.9: a static fixed array has one store per declaring class.
             if cd.static_fixed_arrays.iter().any(|(n, ..)| n == prop) {
-                let key = self.static_fixed_key_in(&cd.name, prop)?;
-                return self.render_p_var(&key);
+                return self.render_p_static_fixed(&cd.name, prop);
+            }
+            // §8.9: a static unpacked struct renders member-wise from its
+            // shared holder (`handle` is the holder `class_prop_receiver`
+            // gave).
+            if !self.static_struct_names.is_empty()
+                && self.static_struct_names.contains(prop)
+                && let Some(su) = self
+                    .class_prop_struct(handle, prop)
+                    .filter(Self::spreads_member_wise)
+            {
+                return Some(self.render_p_class_prop_struct(handle, prop, &su));
             }
             return None;
         }
@@ -123118,6 +123271,25 @@ impl Simulator {
             return None;
         }
         Some(self.render_p_class_elems(handle, prop, "", &dims, &dt, su.as_ref()))
+    }
+
+    /// §8.9/§21.2.1.7: `%p` of the static fixed array `prop` reached from
+    /// class `cls`: its declaring class's store, an array of unpacked structs
+    /// member-wise from the `key[i].<m>` cells. None when no class of the
+    /// chain declares `prop` a static fixed array.
+    fn render_p_static_fixed(&mut self, cls: &str, prop: &str) -> Option<String> {
+        let key = self.static_fixed_key_in(cls, prop)?;
+        let decl = key.strip_suffix(prop)?.strip_suffix("::")?;
+        let cd = self.module.classes.get(decl)?.clone();
+        let &(_, lo, hi, _) = cd.static_fixed_arrays.iter().find(|(n, ..)| n == prop)?;
+        if let Some(dt) = self.class_prop_decl_type(&cd, prop).cloned()
+            && matches!(self.resolve_dt(&dt), DataType::Struct(su) if Self::spreads_member_wise(&su))
+            && hi >= lo
+            && hi - lo < 4096
+        {
+            return Some(self.render_p_dims(&key, &[(lo, hi)], &dt));
+        }
+        self.render_p_var(&key)
     }
 
     /// `%p` of an element of a fixed-array class property of unpacked structs
@@ -139994,6 +140166,70 @@ impl Simulator {
     /// expression is not a pure name chain. Unlike
     /// [`Self::named_cast_key`] there is NO suffix fallback — used where a
     /// partial match would capture a same-named local.
+    /// §8.9/§8.25: the store of a class-scoped static array receiver of an
+    /// element select — `Cls::fa` (a static fixed array: its declaring
+    /// class's `Cls::fa`) or `alias_t::q` through a typedef of a
+    /// specialization (that specialization's store, `C#int::q`). None for
+    /// any other receiver.
+    fn class_scoped_elem_store(&mut self, e: &Expression) -> Option<String> {
+        if self.class_member_names().static_or_param.is_empty() {
+            return None;
+        }
+        let (head, member) = match &e.kind {
+            ExprKind::Ident(h)
+                if h.path.len() == 2
+                    && h.root.is_none()
+                    && h.path.iter().all(|s| s.selects.is_empty()) =>
+            {
+                (h.path[0].name.name.as_str(), h.path[1].name.name.as_str())
+            }
+            ExprKind::MemberAccess { expr, member } => match &expr.kind {
+                ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
+                    (h.path[0].name.name.as_str(), member.name.as_str())
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if !self.class_member_names().static_or_param.contains(member)
+            || self
+                .local_stack
+                .last()
+                .is_some_and(|l| l.contains_key(head))
+            || self.signal_name_to_id.contains_key(head)
+        {
+            return None;
+        }
+        if self.module.classes.contains_key(head) {
+            return self.static_fixed_key_in(head, member);
+        }
+        let (base, sig) = self.scope_prefix_spec(head)?;
+        if let Some(k) = self.static_fixed_key_in(&base, member) {
+            return Some(k);
+        }
+        if !self.member_is_static_coll(&base, member) {
+            return None;
+        }
+        let saved = self.current_spec.replace((base.clone(), sig));
+        let key = self.static_prop_key(&base, member);
+        self.current_spec = saved;
+        key
+    }
+
+    /// §8.25/§8.25.1: the specialization a class-scope prefix that is not a
+    /// class name denotes — a type parameter or a typedef of a
+    /// specialization (`alias_t::m`; see `resolve_class_scope_prefix`).
+    /// None for any other name, after a one-probe name prefilter.
+    fn scope_prefix_spec(&self, head: &str) -> Option<(String, String)> {
+        if !self.class_member_names().scope_prefixes.contains(head) {
+            return None;
+        }
+        match self.resolve_class_scope_prefix(head)? {
+            (base, Some(sig)) => Some((base, sig)),
+            _ => None,
+        }
+    }
+
     /// The root name of a `a.b.c` / `a::b::c` member chain.
     fn member_chain_root(mut e: &Expression) -> Option<&str> {
         loop {
