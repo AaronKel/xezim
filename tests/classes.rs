@@ -740,3 +740,5 @@ mod struct_class_prop_patterns;
 mod class_in_module_instance;
 #[path = "classes/static_task_bare_call.rs"]
 mod static_task_bare_call;
+#[path = "classes/static_class_event.rs"]
+mod static_class_event;

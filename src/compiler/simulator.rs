@@ -53851,6 +53851,61 @@ impl Simulator {
                                 return;
                             }
                         }
+                        // §15.5: `@ev` / `@(C::ev)` on a STATIC class event.
+                        let static_ev = if self.class_member_names().static_or_param.is_empty() {
+                            None
+                        } else {
+                            match event {
+                                EventControl::Identifier(id) => self
+                                    .class_context_stack
+                                    .last()
+                                    .cloned()
+                                    .flatten()
+                                    .filter(|_| self.resolve_this_event_field(&id.name).is_none())
+                                    .and_then(|c| self.static_class_event_key_named(&c, &id.name)),
+                                _ => {
+                                    // Only a name some class declares static
+                                    // can be one; look before copying the term.
+                                    let leaf = match event {
+                                        EventControl::HierIdentifier(e) => Some(e),
+                                        EventControl::EventExpr(t)
+                                            if t.len() == 1 && t[0].edge.is_none() =>
+                                        {
+                                            Some(&t[0].expr)
+                                        }
+                                        _ => None,
+                                    }
+                                    .and_then(|e| {
+                                        match &e.kind {
+                                            ExprKind::Ident(h) => {
+                                                h.path.last().map(|s| s.name.name.as_str())
+                                            }
+                                            ExprKind::MemberAccess { member, .. } => {
+                                                Some(member.name.as_str())
+                                            }
+                                            _ => None,
+                                        }
+                                    });
+                                    if leaf.is_some_and(|n| {
+                                        self.class_member_names().static_or_param.contains(n)
+                                    }) {
+                                        Self::event_control_single_expr(event)
+                                            .and_then(|e| self.static_class_event_key(&e))
+                                    } else {
+                                        None
+                                    }
+                                }
+                            }
+                        };
+                        if let Some(key) = static_ev {
+                            let cont = pc.pushed(vec![*body.clone()], pc.start + i + 1);
+                            self.instance_event_waiters.push(InstanceEventWaiter {
+                                key,
+                                pid,
+                                continuation: cont,
+                            });
+                            return;
+                        }
                         // `@prop` / `@(h.prop)` on a NON-event class property:
                         // a value-change wait, resumed by an ordinary write
                         // of the property (never by `->`).
@@ -88274,6 +88329,10 @@ impl Simulator {
                     // live); the NBA drain cannot reconstruct it later.
                     if let Some(key) = self.resolve_this_event_field(&name.name) {
                         self.pending_nba_instance_triggers.push(key);
+                    } else if let Some(key) =
+                        self.static_class_event_trigger_key(&name.name, target.as_deref())
+                    {
+                        self.pending_nba_instance_triggers.push(key);
                     } else if let Some(key) = target
                         .as_ref()
                         .and_then(|t| self.expr_instance_event_field_general(t))
@@ -88289,6 +88348,12 @@ impl Simulator {
                     return;
                 }
                 if let Some(key) = self.resolve_this_event_field(&name.name) {
+                    self.fire_instance_event(key);
+                    return;
+                }
+                if let Some(key) =
+                    self.static_class_event_trigger_key(&name.name, target.as_deref())
+                {
                     self.fire_instance_event(key);
                     return;
                 }
@@ -88847,6 +88912,11 @@ impl Simulator {
             }
             keys.push(stamp);
         }
+        // `ev.triggered` / `C::ev.triggered` on a static class event.
+        if let Some(k) = self.static_class_event_key(e) {
+            let stamp = Self::instance_event_stamp_key(&k);
+            return Some(self.event_triggered_time.get(stamp.as_str()) == Some(&now));
+        }
         if keys.is_empty() {
             return None;
         }
@@ -88884,6 +88954,87 @@ impl Simulator {
             Some((handle, name.to_string()))
         } else {
             None
+        }
+    }
+
+    /// §8.9, §15.5: a STATIC class property declared `event` — `ev` inside a
+    /// method of its class, or `C::ev` anywhere. It is one object shared by
+    /// every instance, so it is keyed like an instance event with handle 0
+    /// and the property's static cell name. It has no backing signal: a wait
+    /// on it fell through to the NBA-region yield and woke at once.
+    fn static_class_event_key(&self, e: &Expression) -> Option<(usize, String)> {
+        let (cls, field): (String, &str) = match &e.kind {
+            ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                match h.path.as_slice() {
+                    [one] => (
+                        self.class_context_stack.last().cloned().flatten()?,
+                        one.name.name.as_str(),
+                    ),
+                    [c, f] => (c.name.name.clone(), f.name.name.as_str()),
+                    _ => return None,
+                }
+            }
+            ExprKind::MemberAccess { expr, member } => match &expr.kind {
+                ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
+                    (h.path[0].name.name.clone(), member.name.as_str())
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.static_class_event_key_named(&cls, field)
+    }
+
+    fn static_class_event_key_named(&self, cls: &str, field: &str) -> Option<(usize, String)> {
+        if !self.class_member_names().static_or_param.contains(field) {
+            return None;
+        }
+        let mut cur = Some(cls.to_string());
+        let mut seen: HashSet<String> = HashSet::default();
+        while let Some(cn) = cur {
+            if !seen.insert(cn.clone()) {
+                break;
+            }
+            let cd = self.module.classes.get(&cn)?;
+            if let Some(dt) = cd.property_types.get(field) {
+                if !cd.static_properties.contains(field)
+                    || !matches!(
+                        dt,
+                        DataType::Simple {
+                            kind: crate::ast::types::SimpleType::Event,
+                            ..
+                        }
+                    )
+                {
+                    return None;
+                }
+                return self.static_prop_key(cls, field).map(|k| (0, k));
+            }
+            cur = cd.extends.clone();
+        }
+        None
+    }
+
+    /// The static class event a `->` names, from its flattened name
+    /// (`ev`, `C::ev`) or its target expression.
+    fn static_class_event_trigger_key(
+        &self,
+        name: &str,
+        target: Option<&Expression>,
+    ) -> Option<(usize, String)> {
+        if let Some(k) = target.and_then(|t| self.static_class_event_key(t)) {
+            return Some(k);
+        }
+        match name.rsplit_once("::") {
+            Some((c, f)) => self.static_class_event_key_named(c, f).or_else(|| {
+                let leaf = c.rsplit("::").next()?;
+                self.static_class_event_key_named(leaf, f)
+            }),
+            None if !name.contains('.') => {
+                let cls = self.class_context_stack.last().cloned().flatten()?;
+                self.static_class_event_key_named(&cls, name)
+            }
+            None => None,
         }
     }
 
