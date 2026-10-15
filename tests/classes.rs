@@ -567,6 +567,8 @@ mod cls_agg_members_in_struct;
 mod cls_agg_members_matrix;
 #[path = "classes/class_scope_call_implicit_this.rs"]
 mod class_scope_call_implicit_this;
+#[path = "classes/class_scope_specialization_members.rs"]
+mod class_scope_specialization_members;
 #[path = "classes/compiled_task_suspension_analysis.rs"]
 mod compiled_task_suspension_analysis;
 #[path = "classes/compiled_method_admission_regression.rs"]
