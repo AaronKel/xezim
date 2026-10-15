@@ -569,6 +569,8 @@ mod compiled_method_admission_regression;
 mod compiled_task_and_free_fn_chain;
 #[path = "classes/compiled_collection_return_store.rs"]
 mod compiled_collection_return_store;
+#[path = "classes/compiled_string_local_byte.rs"]
+mod compiled_string_local_byte;
 #[path = "classes/compiled_member_redeclared.rs"]
 mod compiled_member_redeclared;
 #[path = "classes/int_property_named_like_struct_property.rs"]
