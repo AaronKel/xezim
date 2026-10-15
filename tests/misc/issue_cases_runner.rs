@@ -260,3 +260,100 @@ fn issue_262_fscanf_percent_c() {
     assert!(!msgs.iter().any(|m| m.starts_with("FAIL")), "{:#?}", msgs);
     assert!(msgs.iter().any(|m| m == "TEST_PASS"), "{:#?}", msgs);
 }
+
+/// Issue #312: `foreach` over an associative array declared through a package
+/// typedef of unpacked-struct elements, run verbatim (§12.7.3, §7.8).
+#[test]
+fn issue_312_foreach_typedef_assoc_of_structs() {
+    let msgs = outputs(
+        include_str!("../issue_cases/foreach_aa_typedef_312.sv"),
+        100_000,
+    );
+    assert!(!msgs.iter().any(|m| m.starts_with("FAIL")), "{:#?}", msgs);
+    assert!(msgs.iter().any(|m| m == "TEST_PASS"), "{:#?}", msgs);
+}
+
+/// Issue #313: a static task calling another static task of its class by bare
+/// name must block like any task call, so `mailbox.get()` waits for the
+/// puts at 10 and 20 (§8.10, §13.3, §15.4), run verbatim.
+#[test]
+#[ignore = "#313: a bare static-to-static task call runs on the synchronous path; blocking statements in it return at once"]
+fn issue_313_static_task_calls_block() {
+    let msgs = outputs(
+        include_str!("../issue_cases/static_task_blocking_313.sv"),
+        100_000,
+    );
+    assert_eq!(
+        msgs.iter()
+            .filter(|m| m.starts_with("[t=") || m.starts_with("TEST"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            "[t=10] execute_phase(42)",
+            "[t=20] execute_phase(43)",
+            "[t=20] phase runner finished",
+            "TEST PASSED",
+        ],
+        "{:#?}",
+        msgs
+    );
+}
+
+/// Issue #316: an unpacked dimension sized by a class-scoped localparam
+/// (`a[2 * model_c::BEATS]`) gets all 146 elements (§8.23, §7.4.2), run
+/// verbatim.
+#[test]
+fn issue_316_class_scoped_dimension() {
+    let msgs = outputs(
+        include_str!("../issue_cases/class_scoped_dimension_316.sv"),
+        100_000,
+    );
+    assert!(!msgs.iter().any(|m| m.contains("FAIL")), "{:#?}", msgs);
+    assert!(msgs.iter().any(|m| m == "PASS"), "{:#?}", msgs);
+}
+
+/// Issue #317: `@(cb iff cb.sig ...)` judges its guard on the clockvars
+/// sampled at that clocking event, so the monitor wakes at 25 on the first
+/// beat (§14.13), run verbatim.
+#[test]
+fn issue_317_clocking_iff_sees_this_edge() {
+    let msgs = outputs(
+        include_str!("../issue_cases/clocking_iff_sample_317.sv"),
+        100_000,
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m == "[25] woke: cb.cs_n=0 cb.data=0xf000"),
+        "{:#?}",
+        msgs
+    );
+    assert!(msgs.iter().any(|m| m == "PASS"), "{:#?}", msgs);
+}
+
+/// Issue #312 follow-up (reporter's survey, 41 cases): `foreach` and the
+/// collection methods over typedef'd associative arrays, dynamic arrays and
+/// queues at package, module, class, interface and block scope, every case
+/// in its own top module, run verbatim. The reference passes all 41.
+#[test]
+#[ignore = "#312 survey: 48 checks fail (chained/cross-package typedefs, class AA properties, 2-D AAs, typedef'd formals and returns)"]
+fn issue_312_survey_multi_module() {
+    let msgs = outputs(
+        include_str!("../issue_cases/foreach_typedef_312_multi_module.sv"),
+        100_000,
+    );
+    assert!(!msgs.iter().any(|m| m.starts_with("FAIL")), "{:#?}", msgs);
+    assert!(msgs.iter().any(|m| m == "TEST_PASS"), "{:#?}", msgs);
+}
+
+/// The same 41-case survey with every case in one module, run verbatim. The
+/// reference passes all 41.
+#[test]
+#[ignore = "#312 survey: 66 checks fail when the cases share one module, including the no-typedef controls"]
+fn issue_312_survey_single_module() {
+    let msgs = outputs(
+        include_str!("../issue_cases/foreach_typedef_312_single_module.sv"),
+        100_000,
+    );
+    assert!(!msgs.iter().any(|m| m.starts_with("FAIL")), "{:#?}", msgs);
+    assert!(msgs.iter().any(|m| m == "TEST_PASS"), "{:#?}", msgs);
+}
