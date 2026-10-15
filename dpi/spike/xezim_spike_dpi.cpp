@@ -37,9 +37,11 @@ struct Shim {
     std::string priv          = "M";
     std::string elf;
 
+    // Steps taken since init, in both modes.
+    uint64_t    step_cnt       = 0;
+
     // Stub-mode bookkeeping for testing without a real CPU.
     uint64_t    stub_pc        = 0x80000000;
-    uint64_t    stub_step_cnt  = 0;
 
 #if defined(XEZIM_SPIKE_REAL)
     std::unique_ptr<cfg_t>    cfg;
@@ -147,6 +149,7 @@ int xezim_spike_init(const char* elf_path, const char* isa, const char* priv) {
             }
         }
 
+        s->step_cnt    = 0;
         s->initialised = true;
         return 0;
     } catch (const std::exception& e) {
@@ -157,7 +160,7 @@ int xezim_spike_init(const char* elf_path, const char* isa, const char* priv) {
 #else
     s->initialised   = true;
     s->stub_pc       = 0x80000000;
-    s->stub_step_cnt = 0;
+    s->step_cnt      = 0;
     return 0;
 #endif
 }
@@ -176,6 +179,7 @@ int xezim_spike_step(uint64_t* retired_pc,
     const auto* state_before = s->proc->get_state();
     const uint64_t pc_before = state_before->pc;
     s->proc->step(1);
+    ++s->step_cnt;
     const auto* state_after  = s->proc->get_state();
     if (retired_pc)   *retired_pc   = pc_before;
     if (retired_insn) *retired_insn = 0; // optional: re-fetch via MMU
@@ -199,7 +203,7 @@ int xezim_spike_step(uint64_t* retired_pc,
     if (retired_pc)   *retired_pc   = s->stub_pc;
     if (retired_insn) *retired_insn = 0x00100093u; // addi x1, x0, 1
     if (rd)           *rd           = 1;
-    if (rd_val)       *rd_val       = ++s->stub_step_cnt;
+    if (rd_val)       *rd_val       = ++s->step_cnt;
     s->stub_pc += 4;
     return 1;
 #endif
@@ -214,7 +218,7 @@ uint64_t xezim_spike_get_reg(int idx) {
     if (idx < 0 || idx >= NXPR) return 0;
     return static_cast<uint64_t>(s->proc->get_state()->XPR[idx]);
 #else
-    return (idx == 1) ? s->stub_step_cnt : 0;
+    return (idx == 1) ? s->step_cnt : 0;
 #endif
 }
 
@@ -234,7 +238,7 @@ void xezim_spike_finish(void) {
     if (!s->initialised) return;
     std::fprintf(stderr,
                  "[xezim_spike_dpi] finish (steps=%llu)\n",
-                 (unsigned long long)s->stub_step_cnt);
+                 (unsigned long long)s->step_cnt);
 #if defined(XEZIM_SPIKE_REAL)
     s->sim.reset();
     s->cfg.reset();
