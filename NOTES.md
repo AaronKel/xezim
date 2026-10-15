@@ -399,6 +399,14 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * `find with (item.field …)` on queues of packed structs, `delete(key)` on
   associative arrays of structs, and string keys on associative members of
   struct class properties work (§7.12, §7.9.2, §7.8.1).
+* A class declared inside a module reads and writes the variables,
+  parameters, collections, tasks, events and interface instances of the
+  instance that created the object, not the top module's or the first
+  instance's (§8, §23.9).
+* Block-local arrays, queues, dynamic and associative arrays no longer
+  overwrite a module item of the same name, locals of a module's processes are
+  no longer shared between its instances, and a `for` loop over a block local
+  that shadows a module variable terminates (§6.21, §9.3.4).
 
 **Performance**
 
