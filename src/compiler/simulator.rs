@@ -128690,7 +128690,24 @@ impl Simulator {
                     ),
                     None => (None, None, None),
                 };
-                if sig_val.is_some() {
+                // §8.25: a parameter or localparam of the ACTIVE
+                // specialization (`vp#(5)::W` with `W = N * 2`, read by a
+                // compiled static method) takes that specialization's
+                // value; its per-spec cell must not be seeded from the
+                // elaborated default.
+                let spec_param = if pd_expr.is_some()
+                    && self
+                        .current_spec
+                        .as_ref()
+                        .is_some_and(|(b, _)| self.class_origin(b) == decl_class)
+                {
+                    self.resolve_value_param_in_current(prop)
+                } else {
+                    None
+                };
+                if spec_param.is_some() {
+                    spec_param
+                } else if sig_val.is_some() {
                     // §8.25: a parameterized class's static initializer may
                     // reference the class's VALUE parameters (`const static
                     // string type_name = Tname;` — every uvm_object_registry).
