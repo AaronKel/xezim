@@ -138847,7 +138847,15 @@ impl Simulator {
             return Value::zero(width.max(1));
         }
         // `f64::round` is already ties-away-from-zero.
-        Value::from_u64(f.round() as i64 as u64, width.max(1))
+        let r = f.round();
+        // A value in [2^63, 2^64) fits an unsigned 64-bit target; the i64
+        // cast would saturate it (`longint unsigned` 1.0e19).
+        let bits = if (9.223_372_036_854_775_808e18..1.844_674_407_370_955_161_6e19).contains(&r) {
+            r as u64
+        } else {
+            r as i64 as u64
+        };
+        Value::from_u64(bits, width.max(1))
     }
 
     /// The full `a::b::c` join of a pure `::`-chain expression (nested
