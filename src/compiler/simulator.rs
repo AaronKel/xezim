@@ -8965,6 +8965,12 @@ pub struct Simulator {
     /// path -> bare names), for the rename frame a module-class method gets
     /// (see `modclass_depth`).
     modclass_colls: RefCell<HashMap<String, std::rc::Rc<Vec<String>>>>,
+    /// Per class declared inside a (non-top) module with SEVERAL instances:
+    /// those instances' paths (§8, §23.9: each holds its own class, with its
+    /// own statics); None for every other class. See `modclass_static_inst`.
+    modclass_insts: RefCell<HashMap<String, Option<std::rc::Rc<Vec<String>>>>>,
+    /// Whether any such class exists (see `any_multi_modclass`).
+    multi_modclass: std::cell::OnceCell<bool>,
     /// Whether any class is declared inside a module other than the top
     /// (computed on first use): without one, `modclass_instance` is None.
     has_modclass: std::cell::Cell<Option<bool>>,
@@ -13601,6 +13607,8 @@ impl Simulator {
             activation_scope: RefCell::new(None),
             modclass_depth: std::cell::Cell::new(0),
             modclass_colls: RefCell::new(HashMap::default()),
+            modclass_insts: RefCell::new(HashMap::default()),
+            multi_modclass: std::cell::OnceCell::new(),
             has_modclass: std::cell::Cell::new(None),
             assoc_static_keys_cache: RefCell::new(HashMap::default()),
             sampled_watches: Vec::new(),
@@ -95352,6 +95360,95 @@ impl Simulator {
             .map(str::to_string)
     }
 
+    /// §8/§23.9: the instance whose copy of class `cname` runs here, when
+    /// `cname` is declared inside a (non-top) module with several instances:
+    /// the instance a module-class method runs in, else the one holding the
+    /// executing process. None otherwise (one shared class).
+    #[cold]
+    #[inline(never)]
+    fn modclass_static_inst(&self, cname: &str) -> Option<String> {
+        let cached = self.modclass_insts.borrow().get(cname).cloned();
+        let insts = match cached {
+            Some(v) => v,
+            None => {
+                let top = self.module.name.as_str();
+                let paths = self
+                    .module
+                    .classes
+                    .get(cname)
+                    .and_then(|cd| cd.declaring_module.as_deref())
+                    .filter(|m| *m != top)
+                    .map(|enc| {
+                        self.module
+                            .instances
+                            .iter()
+                            .filter(|i| i.def_name == enc)
+                            .map(|i| i.path.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|p| p.len() > 1)
+                    .map(std::rc::Rc::new);
+                self.modclass_insts
+                    .borrow_mut()
+                    .insert(cname.to_string(), paths.clone());
+                paths
+            }
+        }?;
+        let scope = {
+            let a = self.activation_scope.borrow();
+            match a.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => s.to_string(),
+                None => self.name_resolve_hint.borrow().clone().unwrap_or_default(),
+            }
+        };
+        let scope = self.instance_relative_scope(&scope);
+        insts
+            .iter()
+            .filter(|p| {
+                scope == **p
+                    || scope
+                        .strip_prefix(p.as_str())
+                        .is_some_and(|r| r.starts_with('.'))
+            })
+            .max_by_key(|p| p.len())
+            .cloned()
+    }
+
+    /// Is any class declared inside a module with several instances
+    /// (computed once)? Only then do statics key per instance.
+    #[inline]
+    fn any_multi_modclass(&self) -> bool {
+        if !self.any_modclass() {
+            return false;
+        }
+        *self.multi_modclass.get_or_init(|| {
+            let top = self.module.name.as_str();
+            self.module.classes.values().any(|c| {
+                c.declaring_module.as_deref().is_some_and(|m| {
+                    m != top
+                        && self
+                            .module
+                            .instances
+                            .iter()
+                            .filter(|i| i.def_name == m)
+                            .nth(1)
+                            .is_some()
+                })
+            })
+        })
+    }
+
+    /// `C::p` / `C#sig::p` -> the instance `inst`'s own cell (`C#@inst::p`,
+    /// `C#sig@inst::p`); the head before `#` still names the class.
+    fn per_instance_static_key(key: &str, prop: &str, inst: &str) -> String {
+        let head = key
+            .strip_suffix(prop)
+            .and_then(|h| h.strip_suffix("::"))
+            .unwrap_or(key);
+        let sep = if head.contains('#') { "@" } else { "#@" };
+        format!("{}{}{}::{}", head, sep, inst, prop)
+    }
+
     /// `inst.name` while a method of a class declared inside a module runs
     /// in instance `inst` (see `modclass_depth`); None otherwise.
     fn modclass_scoped(&self, name: &str) -> Option<String> {
@@ -128634,6 +128731,13 @@ impl Simulator {
                         }
                         _ => Self::spec_member_key(&cname, None, prop),
                     };
+                    // §8/§23.9: each instance of a module holds its own class
+                    // declared there, so its statics are per instance.
+                    if self.any_multi_modclass()
+                        && let Some(inst) = self.modclass_static_inst(&cname)
+                    {
+                        return Some(Self::per_instance_static_key(&key, prop, &inst));
+                    }
                     return Some(key);
                 }
                 // §8.23: a NESTED class sees its lexically enclosing class's

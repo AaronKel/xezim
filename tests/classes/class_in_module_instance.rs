@@ -303,10 +303,9 @@ endmodule
     assert_eq!(t_lines(src), expected);
 }
 
-/// Pinned: each instance's class is its own type, so a static member is
+/// Each instance's class is its own type, so a static member is
 /// per instance.
 #[test]
-#[ignore = "a class declared in a module is one type shared by all instances; its statics are shared"]
 fn module_class_static_member_per_instance() {
     let src = r#"module kid;
   class helper;
@@ -358,3 +357,53 @@ endmodule
     let expected = ["T|rd=5", "T|b=77"];
     assert_eq!(t_lines(src), expected);
 }
+
+/// Siblings: a static with an initializer, a static method, a static read
+/// through a handle, and a parameterized class declared in a module — each
+/// instance has its own statics.
+#[test]
+fn module_class_statics_per_instance_siblings() {
+    let src = r#"module kid;
+  class helper;
+    static int scount;
+    static int sinit = 5;
+    int inst_n;
+    function void run(); scount++; sinit++; endfunction
+    static function int get(); return scount; endfunction
+  endclass
+  helper h;
+  initial begin
+    h = new;
+    #1 h.run();
+    #1 $display("T|%m sc=%0d si=%0d get=%0d hsc=%0d", helper::scount, helper::sinit, helper::get(), h.scount);
+  end
+endmodule
+module kid2;
+  class pc #(int P = 1);
+    static int c;
+  endclass
+  initial begin
+    #1 pc#(2)::c++;
+    #2 $display("T|%m pc=%0d", pc#(2)::c);
+  end
+endmodule
+module top;
+  kid a();
+  kid b();
+  kid2 x();
+  kid2 y();
+endmodule
+"#;
+    // Time-0 order across instances is not specified (§4.7): compare sorted.
+    let mut got = t_lines(src);
+    got.sort();
+    // Expected values from the reference simulator.
+    let expected = [
+        "T|top.a sc=1 si=6 get=1 hsc=1",
+        "T|top.b sc=1 si=6 get=1 hsc=1",
+        "T|top.x pc=1",
+        "T|top.y pc=1",
+    ];
+    assert_eq!(got, expected);
+}
+
