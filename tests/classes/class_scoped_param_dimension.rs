@@ -382,7 +382,7 @@ fn class_scoped_constant_sibling_shapes_2() {
 
 /// Run-time reads of a specialization's or a nested class's constant.
 #[test]
-#[ignore = "run-time read of cls#(args)::N uses the default specialization; nested class constant reads X"]
+#[ignore = "a nested class constant (outer_c::inner_c::I) reads X: nested classes are not elaborated as class scopes"]
 fn class_scoped_constant_runtime_reads() {
     assert_eq!(t_lines(SRC_RUNTIME), EXPECT_RUNTIME);
 }
