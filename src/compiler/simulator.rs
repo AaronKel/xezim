@@ -17033,7 +17033,20 @@ impl Simulator {
                     }
                 }
                 DpiArgKind::OpenArrayIn(elem) | DpiArgKind::OpenArrayOut(elem) => {
-                    let (values, shape) = self.dpi_collect_open_array(args.get(i));
+                    let (mut values, shape) = self.dpi_collect_open_array(args.get(i));
+                    // §35.5.6.1: C must not rely on an output formal's entry
+                    // value. The reference simulator hands an output array a
+                    // zeroed buffer and copies all of it back, so elements C
+                    // leaves unwritten come back 0. inout keeps the actual.
+                    let out_only = match &spec.proto {
+                        crate::ast::decl::DPIProto::Function(fd) => fd.ports.get(i),
+                        crate::ast::decl::DPIProto::Task(td) => td.ports.get(i),
+                    }
+                    .is_some_and(|pt| matches!(pt.direction, PortDirection::Output));
+                    if out_only {
+                        let zero = Value::zero(elem.width());
+                        values.iter_mut().for_each(|v| *v = zero.clone());
+                    }
                     let mut oa = DpiOpenArrayArg::new(*elem, &values, &shape);
                     let p = Box::new(oa.handle());
                     open_arrays.push(oa);

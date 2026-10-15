@@ -183,6 +183,18 @@ fn dpi_scalar_types_test() {
 }
 
 #[test]
+fn dpi_output_array_zero_init_test() {
+    // §35.5.6.1: an output array formal (fixed, open, 2-D, dynamic; function
+    // or task) starts as a zeroed buffer and is copied back whole, so
+    // elements C leaves unwritten read 0; an inout array keeps the actual.
+    assert_dpi_pass(
+        "tests/dpi/output_array_zero_init.c",
+        "output_array_zero_init",
+        "tests/dpi/output_array_zero_init_test.sv",
+    );
+}
+
+#[test]
 fn dpi_type_mappings_test() {
     // Import type-mapping coverage: atoms, real, out/inout, packed 2-state
     // (svBitVecVal*) and 4-state (svLogicVecVal*, incl. x/z), string.
