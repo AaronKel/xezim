@@ -183,6 +183,20 @@ fn dpi_scalar_types_test() {
 }
 
 #[test]
+fn dpi_scalar_logic_enum_test() {
+    // §35.5.5/§35.5.6/H.7: 1-bit 4-state ports carry the svLogic cell
+    // (2=z, 3=x) on every direction — output writeback, return, inout
+    // entry; enum-typed prototypes map to their base C type (incl. the
+    // byte-based return truncation); open arrays of scalar logic use
+    // 1-byte svLogic cells.
+    assert_dpi_pass(
+        "tests/dpi/scalar_logic_enum.c",
+        "scalar_logic_enum",
+        "tests/dpi/scalar_logic_enum_test.sv",
+    );
+}
+
+#[test]
 fn dpi_output_array_zero_init_test() {
     // §35.5.6.1: an output array formal (fixed, open, 2-D, dynamic; function
     // or task) starts as a zeroed buffer and is copied back whole, so
