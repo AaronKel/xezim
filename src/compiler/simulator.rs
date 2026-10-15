@@ -116379,6 +116379,32 @@ impl Simulator {
         for m in &su.members {
             for md in &m.declarators {
                 let mname = md.name.name.as_str();
+                // §7.2.1: a dynamic member copies as a whole collection from
+                // the property's `<handle>#<prop>.<m>` store.
+                let coll_dims = if !md.dimensions.is_empty() {
+                    Some(md.dimensions.clone())
+                } else if let DataType::TypeReference {
+                    name, dimensions, ..
+                } = &m.data_type
+                    && dimensions.is_empty()
+                    && !name.has_scope()
+                {
+                    self.class_chain_typedef_dims(handle, &name.name.name)
+                } else {
+                    None
+                };
+                if let Some(kind) = coll_dims.as_deref().and_then(Self::coll_kind_of) {
+                    let lhs_f = Self::append_member_expr(lvalue, mname);
+                    let rhs_f = Self::append_member_expr(rvalue, mname);
+                    if let (Some(dst), Some(src)) = (
+                        self.expr_assoc_name(&lhs_f),
+                        self.class_struct_coll_name(&rhs_f),
+                    ) {
+                        self.clear_coll(&dst, kind);
+                        self.copy_coll(&dst, &src, kind);
+                        continue;
+                    }
+                }
                 if let Some(tups) = self.member_elem_indices(&md.dimensions) {
                     for tup in tups {
                         let lhs_f = Self::append_elem_path(lvalue, mname, &tup);
@@ -120282,6 +120308,119 @@ impl Simulator {
         }
     }
 
+    /// §7.2.1: copy the unpacked struct class property `key` of object `h`
+    /// (`prop`, or a nested `prop.inner`) onto the flat struct storage `dst`
+    /// member by member: a leaf from the object's cell, each element of a
+    /// fixed member array, and a dynamic member (declared so or through a
+    /// collection typedef) as a whole collection from `<h>#<key>.<m>`.
+    fn copy_class_struct_prop_to(
+        &mut self,
+        dst: &str,
+        h: usize,
+        key: &str,
+        su: &crate::ast::types::StructUnionType,
+    ) {
+        for m in &su.members {
+            for md in &m.declarators {
+                let d = format!("{}.{}", dst, md.name.name);
+                let k = format!("{}.{}", key, md.name.name);
+                let coll_dims = if !md.dimensions.is_empty() {
+                    Some(md.dimensions.clone())
+                } else if let DataType::TypeReference {
+                    name, dimensions, ..
+                } = &m.data_type
+                    && dimensions.is_empty()
+                    && !name.has_scope()
+                {
+                    self.class_chain_typedef_dims(h, &name.name.name)
+                } else {
+                    None
+                };
+                if let Some(cd) = coll_dims.as_deref()
+                    && let Some(kind) = Self::coll_kind_of(cd)
+                {
+                    let string_key = self.string_keyed_dim(&cd[0]);
+                    let ew = resolve_type_width(
+                        &m.data_type,
+                        Some(&self.module.parameters),
+                        Some(&self.module.typedefs),
+                    )
+                    .max(1);
+                    self.register_struct_coll(h, &k, kind, ew, string_key);
+                    if !self.ensure_struct_member_coll(&d) {
+                        self.register_struct_member_coll_as(&d, kind, &m.data_type, string_key);
+                    }
+                    self.clear_coll(&d, kind);
+                    self.copy_coll(&d, &format!("{}#{}", h, k), kind);
+                    continue;
+                }
+                if md.dimensions.is_empty() {
+                    if let DataType::Struct(inner) = self.resolve_dt(&m.data_type)
+                        && Self::spreads_member_wise(&inner)
+                    {
+                        self.copy_class_struct_prop_to(&d, h, &k, &inner);
+                        continue;
+                    }
+                    let v = self
+                        .heap
+                        .get(h)
+                        .and_then(|o| o.as_ref())
+                        .and_then(|i| i.properties.get(&k))
+                        .cloned();
+                    if let Some(v) = v {
+                        self.write_leaf_by_name(&d, v);
+                    }
+                } else if let Some(tups) = self.member_elem_indices(&md.dimensions) {
+                    let inner = self.unpacked_struct_of(&m.data_type);
+                    for t in tups {
+                        let sfx = Self::index_suffix(&t);
+                        let (de, ke) = (format!("{}{}", d, sfx), format!("{}{}", k, sfx));
+                        match &inner {
+                            Some(inner) if Self::spreads_member_wise(inner) => {
+                                self.copy_class_struct_prop_to(&de, h, &ke, inner)
+                            }
+                            _ => {
+                                let v = self
+                                    .heap
+                                    .get(h)
+                                    .and_then(|o| o.as_ref())
+                                    .and_then(|i| i.properties.get(&ke))
+                                    .cloned();
+                                if let Some(v) = v {
+                                    self.write_leaf_by_name(&de, v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The unpacked dimensions of typedef `name` as object `h`'s class chain
+    /// sees it: a class-local typedef first, then the design's.
+    fn class_chain_typedef_dims(
+        &self,
+        h: usize,
+        name: &str,
+    ) -> Option<Vec<crate::ast::types::UnpackedDimension>> {
+        let mut cur = self
+            .heap
+            .get(h)
+            .and_then(|o| o.as_ref())
+            .map(|i| i.class_name.as_str());
+        let mut hops = 0;
+        while let Some(cn) = cur {
+            hops += 1;
+            let cd = self.module.classes.get(cn).filter(|_| hops < 64)?;
+            if let Some(d) = cd.typedef_unpacked_dims.get(name) {
+                return Some(d.clone());
+            }
+            cur = cd.extends.as_deref();
+        }
+        self.typedef_unpacked_dims_of(name).cloned()
+    }
+
     /// Move queue element `from` to `to` within one queue.
     fn queue_move_elem(&mut self, obj_name: &str, from: u64, to: u64) {
         self.queue_copy_elem(obj_name, from, obj_name, to);
@@ -121208,6 +121347,20 @@ impl Simulator {
                         self.assign_pattern_into_struct(elem, &su, items);
                         return;
                     }
+                }
+                // §7.10.2/§7.2.1: a struct CLASS PROPERTY (`sq.push_back(s)`
+                // in a method, `q.push_back(o.s)`) keeps its members in the
+                // object: its cells, and `<handle>#s.<m>` for a dynamic one.
+                if !self.no_class_objects()
+                    && Self::receiver_prop_name(arg)
+                        .is_some_and(|p| self.struct_prop_name_possible(p))
+                    && let Some((h, prop)) = self.class_prop_receiver(arg)
+                    && self
+                        .class_prop_struct(h, &prop)
+                        .is_some_and(|p| Self::spreads_member_wise(&p))
+                {
+                    self.copy_class_struct_prop_to(elem, h, &prop, &su);
+                    return;
                 }
                 if let Some(src) = self.flat_member_name(arg) {
                     self.copy_unpacked_struct(elem, &src, &su.clone());
@@ -161487,7 +161640,12 @@ impl Simulator {
     /// from the object's class chain. `None` for any other name.
     fn class_member_coll_type(&self, name: &str) -> Option<&DataType> {
         // A static member's store `Cls::member` (`Cls#<spec>::member`).
+        // A member of an element (`q[0].m`) is no collection of this
+        // property's element type.
         if let Some((cls, member)) = name.split_once("::") {
+            if member.contains('.') {
+                return None;
+            }
             let cls = cls.split('#').next()?;
             let member = member.split('[').next()?;
             let cd = self.module.classes.get(cls)?;
@@ -161495,8 +161653,11 @@ impl Simulator {
         }
         let (h, member) = name.split_once('#')?;
         let handle: usize = h.parse().ok()?;
+        if member.contains('.') {
+            return None;
+        }
         let member = member.split('[').next()?;
-        if member.is_empty() || member.contains('.') {
+        if member.is_empty() {
             return None;
         }
         let mut cur = self

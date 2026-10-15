@@ -261,7 +261,6 @@ fn class_struct_prop_string_keyed_member() {
     assert_eq!(got, ["T|01 '{1} '{\"x\":3 }", "T|03 '{4}",]);
 }
 
-#[ignore = "push_back of a struct class property with a dynamic member into a class queue does not copy the member (§7.10.2, §7.2.1)"]
 #[test]
 fn pin_class_queue_push_struct_with_dyn_member() {
     assert_eq!(
