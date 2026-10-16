@@ -85314,14 +85314,10 @@ impl Simulator {
                             )
                         });
                         // Drop any stale elements left by a prior frame's
-                        // same-named local before this fresh declaration.
+                        // same-named local before this fresh declaration —
+                        // struct-element member leaves (`m[k].x`) included.
                         let pre = format!("{}[", name);
-                        let stale: Vec<String> = self
-                            .signals
-                            .keys_with_elem_prefix(&pre)
-                            .into_iter()
-                            .filter(|k| k.ends_with(']'))
-                            .collect();
+                        let stale: Vec<String> = self.signals.keys_with_elem_prefix(&pre);
                         for k in stale {
                             self.signals.remove(&k);
                         }
@@ -120109,16 +120105,16 @@ impl Simulator {
     /// exactly `src`'s entries.
     fn copy_assoc_entries(&mut self, dst: &str, src: &str) {
         self.eval_builtin_method(dst, "delete", &[]);
+        // §7.9.9: every element, including the member leaves of an
+        // unpacked-struct element (`src[k].x`), which do not end in `]`.
         let prefix = format!("{}[", src);
         let entries: Vec<(String, Value)> = self
             .signals
             .keys_with_elem_prefix(&prefix)
             .into_iter()
-            .filter(|k| k.ends_with(']'))
             .filter_map(|k| {
                 let v = self.signals.get(&k)?.clone();
-                let key = &k[prefix.len()..k.len() - 1];
-                Some((format!("{}[{}]", dst, key), v))
+                Some((format!("{}{}", dst, &k[src.len()..]), v))
             })
             .collect();
         let any = !entries.is_empty();
@@ -141413,7 +141409,15 @@ impl Simulator {
             let concrete = self
                 .resolve_type_param_binding(tn)
                 .unwrap_or_else(|| tn.clone());
-            if let Some(dims) = self.module.typedef_unpacked_dims.get(&concrete) {
+            // A class type is never an associative array.
+            if name.scopes.is_empty() && self.module.classes.contains_key(&concrete) {
+                return false;
+            }
+            let scoped = (!name.scopes.is_empty())
+                .then(|| self.module.typedef_unpacked_dims.get(&name.qualified()))
+                .flatten();
+            if let Some(dims) = scoped.or_else(|| self.module.typedef_unpacked_dims.get(&concrete))
+            {
                 return dims.iter().any(|d| matches!(d, UD::Associative { .. }));
             }
             // CLASS-LOCAL typedef (`typedef bit edges_t[Node];` inside the
@@ -142571,16 +142575,16 @@ impl Simulator {
         }
         let key = self.formal_dyn_key(&param, &port.data_type);
         if !matches!(port.direction, PortDirection::Output) {
+            // §13.5.1: copy every element in, including unpacked-struct
+            // member leaves (`caller[k].x`).
             let prefix = format!("{}[", caller);
             let entries: Vec<(String, Value)> = self
                 .signals
                 .keys_with_elem_prefix(&prefix)
                 .into_iter()
-                .filter(|k| k.ends_with(']'))
                 .filter_map(|k| {
                     let v = self.signals.get(&k)?.clone();
-                    let sub = &k[prefix.len()..k.len() - 1];
-                    Some((format!("{}[{}]", key, sub), v))
+                    Some((format!("{}{}", key, &k[caller.len()..]), v))
                 })
                 .collect();
             for (k, v) in entries {
@@ -142643,7 +142647,6 @@ impl Simulator {
             .signals
             .keys_with_elem_prefix(&pre)
             .into_iter()
-            .filter(|k| k.ends_with(']'))
             .filter_map(|k| {
                 let v = self.signals.get(&k)?.clone();
                 let nk = format!("{}{}", tmp, &k[param.len()..]);
@@ -142708,11 +142711,9 @@ impl Simulator {
             .signals
             .keys_with_elem_prefix(&pprefix)
             .into_iter()
-            .filter(|k| k.ends_with(']'))
             .filter_map(|k| {
                 let v = self.signals.get(&k)?.clone();
-                let key = &k[pprefix.len()..k.len() - 1];
-                Some((format!("{}[{}]", caller, key), v))
+                Some((format!("{}{}", caller, &k[param.len()..]), v))
             })
             .collect();
         for (k, v) in entries {
@@ -145263,6 +145264,21 @@ impl Simulator {
                         .insert(port.name.name.clone(), type_name.clone());
                 }
             }
+            // §13.5, §6.18: an associative formal declared through a typedef
+            // (`output aa_t a`) is one too — as for functions. Checked first: the
+            // struct and queue binders below would claim a typedef of struct
+            // elements.
+            let is_assoc = self.port_is_assoc_array(port);
+            if is_assoc && i < args.len() {
+                let assoc_is_out = matches!(
+                    port.direction,
+                    PortDirection::Output | PortDirection::Inout | PortDirection::Ref
+                );
+                if let Some((param_name, caller_name, _)) = self.bind_assoc_param(port, &args[i]) {
+                    assoc_params.push((param_name, caller_name, assoc_is_out));
+                }
+                continue;
+            }
             // Unpacked array formal (`int a[2:0]` or `int a[3]`): copy the
             // caller's elements in, and copy them back for an out/inout/ref.
             if i < args.len() {
@@ -145340,20 +145356,6 @@ impl Simulator {
                     queue_writebacks.append(&mut self.pending_struct_coll_wb);
                     continue;
                 }
-            }
-            let is_assoc = port
-                .dimensions
-                .iter()
-                .any(|d| matches!(d, crate::ast::types::UnpackedDimension::Associative { .. }));
-            if is_assoc && i < args.len() {
-                let assoc_is_out = matches!(
-                    port.direction,
-                    PortDirection::Output | PortDirection::Inout | PortDirection::Ref
-                );
-                if let Some((param_name, caller_name, _)) = self.bind_assoc_param(port, &args[i]) {
-                    assoc_params.push((param_name, caller_name, assoc_is_out));
-                }
-                continue;
             }
             match port.direction {
                 PortDirection::Output | PortDirection::Inout => {

@@ -163,3 +163,5 @@ mod compiled_string_queue_element_compare;
 mod package_refs_in_subroutines;
 #[path = "collections/nested_assoc_foreach.rs"]
 mod nested_assoc_foreach;
+#[path = "collections/assoc_formal_struct_elems.rs"]
+mod assoc_formal_struct_elems;
