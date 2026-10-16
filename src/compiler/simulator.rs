@@ -49930,6 +49930,29 @@ impl Simulator {
     /// values of automatic `for`-loop variables (`auto_loop_vars`) by value into
     /// the child's context so each fork child sees the loop index at fork time
     /// (LRM §9.3.2). Used when spawning fork children.
+    /// §21.2.1.7 / §9.3.5: a fork child runs inside the forking process's
+    /// named blocks and inside the fork block itself, named or not, so its
+    /// `%m` chain starts with the parent's chain (plus the fork's label).
+    fn inherit_fork_m_scope(
+        &mut self,
+        child: usize,
+        parent: usize,
+        fork_name: Option<&crate::ast::Identifier>,
+    ) {
+        if let Some(l) = self.process_m_label.get(&parent) {
+            let l = l.clone();
+            self.process_m_label.insert(child, l);
+        }
+        if self.m_scope_stack.is_empty() && fork_name.is_none() {
+            return;
+        }
+        let mut chain = self.m_scope_stack.clone();
+        if let Some(f) = fork_name {
+            chain.push(f.name.clone());
+        }
+        self.process_m_scope.insert(child, chain);
+    }
+
     fn inherit_fork_child_context(&mut self, pid: usize) {
         let mut ctx = self.snapshot_process_context();
         // The parent's open block scopes close in the parent's stream, never
@@ -52521,6 +52544,12 @@ impl Simulator {
                         None => self.blocking_cont_frame(pid, stmt.span, 0, inner),
                         Some(n) => self.named_block_frame(pid, stmt, inner, &n.name),
                     };
+                    // §21.2.1.7: a NAMED block adds its name to the `%m`
+                    // hierarchy while the process runs (and parks) in it;
+                    // the frame's end pops it (see the frame-exhausted arm).
+                    if let Some(n) = name {
+                        self.m_scope_stack.push(n.name.clone());
+                    }
                     if let Some(mut sv) = scope {
                         sv.frame_key = Self::frame_key(&frame);
                         self.block_scope_saves.push(sv);
@@ -54331,6 +54360,7 @@ impl Simulator {
                         self.disable_labels.insert(n.name.clone(), pid_child);
                     }
                     self.inherit_fork_child_context(pid_child);
+                    self.inherit_fork_m_scope(pid_child, pid, block_name.as_ref());
                     // §9.4.5: a child that IS an intra-assignment delay
                     // (`fork lhs = #d rhs; join_none`) captures its RHS at the
                     // fork point — a join_none parent keeps running and may
@@ -54751,6 +54781,14 @@ impl Simulator {
         // bounds it. What changed is that a level costs a pointer instead of a
         // copy of everything the caller had left.
         if !self.finished {
+            // §21.2.1.7: leaving a flattened named block drops its `%m` name.
+            if !self.named_block_frames.is_empty() {
+                if let Some(n) = self.named_block_frames.get(&Self::frame_key(&pc.stmts)) {
+                    if self.m_scope_stack.last() == Some(n) {
+                        self.m_scope_stack.pop();
+                    }
+                }
+            }
             // §9.6.2: a `disable` of THIS named block ends here.
             if self.break_flag
                 && self.disable_target.is_some()
@@ -86906,6 +86944,7 @@ impl Simulator {
                     }
                     self.process_origin.insert(pid, (s.span, "fork child"));
                     self.inherit_fork_child_context(pid);
+                    self.inherit_fork_m_scope(pid, self.current_pid, block_name.as_ref());
                     self.event_queue
                         .schedule(self.time, pid, vec![s.clone()].into());
                     child_set.insert(pid);
@@ -103181,6 +103220,14 @@ impl Simulator {
 
     fn child_finished(&mut self, child_pid: usize) {
         self.finished_pids.insert(child_pid);
+        // A fork child's inherited `%m` chain (`inherit_fork_m_scope`) is
+        // never unwound by its own statements.
+        if !self.process_m_scope.is_empty() {
+            self.process_m_scope.remove(&child_pid);
+        }
+        if !self.process_m_label.is_empty() && self.process_parents.contains_key(&child_pid) {
+            self.process_m_label.remove(&child_pid);
+        }
         self.suspended_loop_frames.remove(&child_pid);
         // §9.7: wake any process awaiting this one's termination.
         let mut terminated = HashSet::default();

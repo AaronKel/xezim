@@ -127,10 +127,10 @@ endmodule
     assert_eq!(t_lines(src), expected);
 }
 
-/// Pinned: `%m` inside a nested named block or a named fork block of an
-/// instance, and inside a named fork block of the top.
+/// §21.2.1.7 / §9.3.5: `%m` inside a nested named block or a named fork
+/// block of an instance, and inside a named fork block of the top. A block
+/// the process waits in kept its name only while it ran straight through.
 #[test]
-#[ignore = "%m drops nested named-block and named-fork labels"]
 fn percent_m_in_nested_named_blocks() {
     let src = r#"// %m inside nested named blocks and named fork blocks of an instance.
 module leaf;
@@ -161,4 +161,101 @@ endmodule
     // Expected values from the reference simulator.
     let expected = ["T|top.a.nb.deep", "T|top.a.fk.fb", "T|top.tnb.tfk.tfb"];
     assert_eq!(t_lines(src), expected);
+}
+
+/// Neighbours: a named block nested in one the process waits in, an
+/// unnamed block inside a named one, named and unnamed fork children, a
+/// named fork inside a task's named block, an edge block and a function.
+#[test]
+fn percent_m_named_block_and_fork_shapes() {
+    let src = r#"module leaf;
+  reg x = 0;
+  initial begin : nb
+    $display("T|a0 %m");
+    begin : deep
+      #1 $display("T|a1 %m");
+      begin : deeper
+        $display("T|a2 %m");
+      end
+    end
+    begin
+      $display("T|a3 %m");
+    end
+  end
+  initial begin
+    fork : fk
+      begin : fb
+        #2 $display("T|b1 %m");
+      end
+      begin
+        #2 $display("T|b2 %m");
+      end
+    join
+    fork
+      begin : fb2
+        #1 $display("T|b3 %m");
+      end
+    join
+  end
+  task automatic t1;
+    begin : tb
+      $display("T|c1 %m");
+      fork : tf
+        begin : tfb
+          $display("T|c2 %m");
+        end
+      join
+    end
+  endtask
+  initial #5 t1();
+  always @(posedge x) begin : ab
+    begin : ab2
+      $display("T|d1 %m");
+    end
+  end
+  initial #6 x = 1;
+  function void f1;
+    begin : fb
+      $display("T|e1 %m");
+    end
+  endfunction
+  initial #7 f1();
+endmodule
+module top;
+  leaf a();
+  initial begin : tnb
+    fork : tfk
+      begin : tfb
+        #3 $display("T|t1 %m");
+      end
+    join
+  end
+  initial begin
+    fork : tfk2
+      #4 $display("T|t2 %m");
+    join_none
+  end
+endmodule
+"#;
+    // Expected values from the reference simulator.
+    let expected = [
+        "T|a0 top.a.nb",
+        "T|a1 top.a.nb.deep",
+        "T|a2 top.a.nb.deep.deeper",
+        "T|a3 top.a.nb",
+        "T|b1 top.a.fk.fb",
+        "T|b2 top.a.fk",
+        "T|t1 top.tnb.tfk.tfb",
+        "T|b3 top.a.fb2",
+        "T|t2 top.tfk2",
+        "T|c1 top.a.t1.tb",
+        "T|c2 top.a.t1.tb.tf.tfb",
+        "T|d1 top.a.ab.ab2",
+        "T|e1 top.a.f1.fb",
+    ];
+    let mut got = t_lines(src);
+    let mut want: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
 }
