@@ -272,9 +272,16 @@ fn join_any_bare_clocking_iff_item() {
 /// the slot's clocking event, so `@(posedge clk); @(cb);` in a program
 /// waits for the NEXT clocking event (a module process sees this one).
 #[test]
-#[ignore = "program-block processes resume in the Active region"]
 fn program_clocking_wait_after_raw_edge() {
     assert_eq!(sorted_t_lines(SRC_PROGRAM), EXPECT_PROGRAM);
+}
+
+/// §24.3 / §4.4 neighbours: a program process resumed by an edge reads
+/// the slot's NBA results, a `#1` / `#0` / `wait` / `@(cb iff)` in a
+/// program, and a program output port driving a module `always`.
+#[test]
+fn program_reactive_region_shapes() {
+    assert_eq!(sorted_t_lines(SRC_PROGRAM2), EXPECT_PROGRAM2);
 }
 
 /// §14.13: `@(bus.cb.sig)` of an interface's clocking block, armed after
@@ -504,6 +511,68 @@ endmodule
 "#;
 
 const EXPECT_PROGRAM: [&str; 3] = ["T| mod_plain t=5", "T| prog_iff t=35", "T| prog_plain t=15"];
+
+const SRC_PROGRAM2: &str = r#"`timescale 1ns/1ns
+interface bus_if (input logic clk);
+  logic cs_n;
+  clocking cb @(posedge clk);
+    default input #1step;
+    input cs_n;
+  endclocking
+endinterface
+program automatic prg(bus_if b, input logic [7:0] q, output logic [7:0] d, output logic pr);
+  initial begin
+    @(posedge b.clk);
+    $display("T| p1 t=%0t q=%0d", $time, q);
+    @(b.cb);
+    $display("T| p2 t=%0t q=%0d", $time, q);
+    d = 8'd7;
+    #1 $display("T| p3 t=%0t q=%0d", $time, q);
+    @(posedge b.clk);
+    $display("T| p4 t=%0t q=%0d", $time, q);
+    pr = 1;
+    #0 $display("T| p5 t=%0t q=%0d", $time, q);
+    @(b.cb iff (b.cb.cs_n === 1'b1));
+    $display("T| p6 t=%0t", $time);
+    wait (q == 8'd7);
+    $display("T| p7 t=%0t", $time);
+    #50;
+  end
+endprogram
+module top;
+  logic clk = 0;
+  always #5 clk = ~clk;
+  bus_if bus (clk);
+  logic [7:0] q = 0, cnt = 0; logic [7:0] d;
+  logic pr;
+  always @(posedge clk) begin cnt <= cnt + 1; q <= cnt + 1; end
+  always @(posedge pr) $display("T| m_pr t=%0t", $time);
+  prg p (bus, q, d, pr);
+  initial bus.cs_n = 1;
+  initial begin
+    @(posedge clk);
+    $display("T| m1 t=%0t q=%0d", $time, q);
+    @(bus.cb);
+    $display("T| m2 t=%0t q=%0d", $time, q);
+    #1 $display("T| m3 t=%0t d=%0d", $time, d);
+  end
+endmodule
+"#;
+
+const EXPECT_PROGRAM2: [&str; 11] = [
+    "T| m1 t=5 q=0",
+    "T| m2 t=5 q=1",
+    "T| m3 t=6 d=x",
+    "T| m_pr t=25",
+    "T| p1 t=5 q=1",
+    "T| p2 t=15 q=2",
+    "T| p3 t=16 q=2",
+    "T| p4 t=25 q=3",
+    "T| p5 t=25 q=3",
+    "T| p6 t=35",
+    "T| p7 t=65",
+];
+
 const SRC_IFACE_CBVAR: &str = r#"`timescale 1ns/1ns
 interface bus_if (input logic clk);
   logic [15:0] data;

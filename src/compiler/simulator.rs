@@ -6370,6 +6370,15 @@ pub struct Simulator {
     /// Each entry is one program `initial` block: its statements and its
     /// instance scope (`""` for a top-level program).
     pending_reactive: Vec<(Vec<crate::ast::stmt::Statement>, String)>,
+    /// §24.3 / §4.4: the processes of `program` blocks (their initial
+    /// blocks and every fork child they spawn). They resume in the Reactive
+    /// region, after the slot's NBA updates and clocking events.
+    program_pids: HashSet<usize>,
+    /// §24.3: program-process continuations woken in the Active region (an
+    /// edge, a delay, a join), held for this slot's Reactive region.
+    reactive_conts: Vec<(usize, ProcCont)>,
+    /// Set while `drain_reactive_region` runs program processes.
+    in_reactive_drain: bool,
     /// §7.9.11: the `default:` value of a class associative-array member
     /// (`<handle>#<member>`) that an assignment pattern gave it, read for
     /// every key the array does not hold.
@@ -12791,6 +12800,9 @@ impl Simulator {
             deferred_clocking_conts: Vec::new(),
             deferred_clocking_guarded: Vec::new(),
             pending_reactive: Vec::new(),
+            program_pids: HashSet::default(),
+            reactive_conts: Vec::new(),
+            in_reactive_drain: false,
             class_assoc_defaults: HashMap::default(),
             mixed_packed_vars: HashSet::default(),
             static_struct_holders: HashMap::default(),
@@ -47917,7 +47929,7 @@ impl Simulator {
             let has_timed = !self.event_queue.is_empty();
             let has_waiters = !self.event_waiters.is_empty();
             let has_clocks = !self.clock_generators.is_empty();
-            let has_reactive = !self.pending_reactive.is_empty();
+            let has_reactive = !self.pending_reactive.is_empty() || !self.reactive_conts.is_empty();
 
             if !has_timed
                 && !has_waiters
@@ -49959,6 +49971,10 @@ impl Simulator {
         parent: usize,
         fork_name: Option<&crate::ast::Identifier>,
     ) {
+        // §24.3: a fork child of a program process is a program process.
+        if !self.program_pids.is_empty() && self.program_pids.contains(&parent) {
+            self.program_pids.insert(child);
+        }
         if let Some(l) = self.process_m_label.get(&parent) {
             let l = l.clone();
             self.process_m_label.insert(child, l);
@@ -50639,6 +50655,16 @@ impl Simulator {
     /// keeps a triggered `always @(*)` from running in the middle of another
     /// process's statement sequence.
     fn run_scheduled_process(&mut self, pid: usize, stmts: &ProcCont) {
+        // §24.3 / §4.4: a program process woken outside the Reactive region
+        // resumes there, after this slot's NBA updates and clocking events.
+        if !self.program_pids.is_empty()
+            && !self.in_reactive_drain
+            && self.program_pids.contains(&pid)
+        {
+            self.reactive_conts.push((pid, stmts.clone()));
+            self.late_resume_epoch += 1;
+            return;
+        }
         // §21.2.1.7: swap in THIS process's lexical `%m` chain for the run and
         // park it again on the way out. The single entry/exit here is why the
         // save/restore lives in the outer wrapper — `_inner` has several early
@@ -92771,6 +92797,9 @@ impl Simulator {
     /// Today's behavior: drains and runs whatever's queued. With no
     /// producer wired yet, the queue is empty and this is a cheap no-op.
     fn drain_reactive_region(&mut self) {
+        if !self.reactive_conts.is_empty() {
+            self.drain_reactive_conts();
+        }
         if self.pending_reactive.is_empty() {
             return;
         }
@@ -92799,7 +92828,38 @@ impl Simulator {
             if !scope.is_empty() {
                 self.process_scope_hint.insert(pid, scope);
             }
+            self.program_pids.insert(pid);
             self.run_process_stmts(pid, &ProcCont::from_vec(stmts));
+        }
+    }
+
+    /// §24.3 / §4.4: run the program-process continuations woken this slot
+    /// (`reactive_conts`) in the Reactive region.
+    #[cold]
+    #[inline(never)]
+    fn drain_reactive_conts(&mut self) {
+        let mut guard = 0u32;
+        while !self.reactive_conts.is_empty() && !self.finished {
+            let conts = std::mem::take(&mut self.reactive_conts);
+            self.late_resume_epoch += conts.len() as u64;
+            let saved = std::mem::replace(&mut self.in_reactive_drain, true);
+            for (pid, cont) in conts {
+                if self.finished {
+                    break;
+                }
+                self.run_scheduled_process(pid, &cont);
+                if !self.is_pid_suspended(pid) {
+                    self.child_finished(pid);
+                }
+                self.break_flag = false;
+                self.continue_flag = false;
+                self.return_flag = false;
+            }
+            self.in_reactive_drain = saved;
+            guard += 1;
+            if guard > 10_000 {
+                break;
+            }
         }
     }
 
@@ -102845,6 +102905,9 @@ impl Simulator {
         if self.nba_region_waiters.iter().any(|(p, _)| *p == pid) {
             return true;
         }
+        if self.reactive_conts.iter().any(|(p, _)| *p == pid) {
+            return true;
+        }
         // A process blocked on `fork...join`/`join_any` is the PARENT of a
         // join_waiter — also suspended. Without this it was treated as finished,
         // so its process context (this_stack, locals) was dropped and the
@@ -103244,6 +103307,9 @@ impl Simulator {
         // never unwound by its own statements.
         if !self.process_m_scope.is_empty() {
             self.process_m_scope.remove(&child_pid);
+        }
+        if !self.program_pids.is_empty() {
+            self.program_pids.remove(&child_pid);
         }
         if !self.process_m_label.is_empty() && self.process_parents.contains_key(&child_pid) {
             self.process_m_label.remove(&child_pid);
