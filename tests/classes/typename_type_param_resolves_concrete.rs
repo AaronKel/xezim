@@ -7,8 +7,8 @@
 //! `do_it()`; pre-fix every specialization reported `logic` regardless of `T`.
 //!
 //! (2) Per IEEE 1800-2017 §20.6.1 the vector RANGE is preserved: a typedef'd
-//! or declared `logic signed [15:0]` reports `logic signed [15:0]`, not a
-//! bare `logic`.
+//! or declared `logic signed [15:0]` reports `reg signed[15:0]` (the
+//! reference simulator's spelling of a 4-state vector), not a bare `logic`.
 use std::process::Command;
 
 fn xezim() -> String {
@@ -62,8 +62,8 @@ fn typename_type_param_resolves_concrete_binding() {
 {out}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("T=logic signed [15:0]")),
-        "a typedef'd vector type param must keep the base `logic signed [15:0]`, not a bare `logic`:
+        lines.iter().any(|l| l.contains("T=reg signed[15:0]")),
+        "a typedef'd vector type param must keep the base `reg signed[15:0]`, not a bare `logic`:
 {out}"
     );
     assert!(
@@ -73,15 +73,15 @@ fn typename_type_param_resolves_concrete_binding() {
 {out}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("td=logic signed [15:0]"))
-            && lines.iter().any(|l| l.contains("tdbit=bit [7:0]")),
-        "direct `$typename(typedef)` must preserve range/base (logic signed [15:0], bit [7:0]):\n{out}"
+        lines.iter().any(|l| l.contains("td=reg signed[15:0]"))
+            && lines.iter().any(|l| l.contains("tdbit=bit[7:0]")),
+        "direct `$typename(typedef)` must preserve range/base (reg signed[15:0], bit[7:0]):\n{out}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("sig=logic [9:0]"))
+        lines.iter().any(|l| l.contains("sig=reg[9:0]"))
             && lines
                 .iter()
-                .any(|l| l.contains("if-local=logic signed [15:0]")),
-        "vector signals and block-local vars must report their range (logic [9:0], logic signed [15:0]):\n{out}"
+                .any(|l| l.contains("if-local=reg signed[15:0]")),
+        "vector signals and block-local vars must report their range (reg[9:0], reg signed[15:0]):\n{out}"
     );
 }

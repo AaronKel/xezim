@@ -2499,6 +2499,7 @@ mod sv_file;
 mod task_suspend;
 mod timing_checks;
 mod ts_x;
+mod typename;
 mod uvm_dpi;
 mod vpi_api;
 mod vpi_cb;
@@ -72884,6 +72885,28 @@ impl Simulator {
                     {
                         return Value::from_string("real");
                     }
+                    // §20.6.1 / §11.6 / §11.8.1: an integral EXPRESSION names
+                    // its self-determined type — the operand's own type
+                    // when the result keeps its width, signedness and state
+                    // (`i + 1` is `int`), else `bit`/`reg [signed][w-1:0]`.
+                    // A selected variable, property or member (`a[1]`,
+                    // `s.m`, `o.q[0]`) names its declared type.
+                    if !matches!(&arg.kind, ExprKind::Ident(h)
+                        if h.path.last().is_some_and(|sg| sg.selects.is_empty()))
+                    {
+                        if matches!(
+                            &arg.kind,
+                            ExprKind::Ident(_)
+                                | ExprKind::MemberAccess { .. }
+                                | ExprKind::Index { .. }
+                        ) && let Some(t) = self.typename_operand_text(arg)
+                        {
+                            return Value::from_string(&t);
+                        }
+                        if let Some(t) = self.typename_integral_expr(arg) {
+                            return Value::from_string(&t.render());
+                        }
+                    }
                     // §20.6.1 / §25.9: a virtual-interface variable or class
                     // property (spelled out or through a typedef) names
                     // its interface type, `virtual bus_if[.mp] [#(...)]`.
@@ -72928,6 +72951,9 @@ impl Simulator {
                             }
                         }
                     }
+                    if let Some(t) = self.typename_scoped_type(arg) {
+                        return Value::from_string(&t);
+                    }
                     // A bare `data_type` argument that names a TYPEDEF
                     // (`$typename(my_bits_t)`): per §20.6.1a the typedef
                     // resolves back to its built-in base, so "logic
@@ -72950,8 +72976,8 @@ impl Simulator {
                             if self.module.typedef_types.contains_key(tdn)
                                 || self.lookup_typedef_target(tdn).is_some()
                             {
-                                if let Some(target) = self.lookup_typedef_target(tdn) {
-                                    return Value::from_string(&self.typename_of_dt(&target));
+                                if let Some(t) = self.typename_of_typedef_name(tdn) {
+                                    return Value::from_string(&t);
                                 }
                             }
                         }
@@ -72971,14 +72997,14 @@ impl Simulator {
                         // type: render it, so `logic [15:0] v` reports
                         // "logic [15:0]" (§20.6.1g preserves the range)
                         // instead of a bare "logic".
-                        if let Some(dt) = self.module.var_decl_types.get(leaf).cloned() {
-                            return Value::from_string(&self.typename_of_dt(&dt));
+                        if let Some(t) = self.typename_operand_text(arg) {
+                            return Value::from_string(&t);
                         }
                         // A var declared with a TYPEDEF'd type
                         // (`my_bits_t v1;`): render the typedef's base.
                         if let Some(tn) = self.var_typedef_types.get(leaf).cloned() {
-                            if let Some(target) = self.lookup_typedef_target(&tn) {
-                                return Value::from_string(&self.typename_of_dt(&target));
+                            if let Some(t) = self.typename_of_typedef_name(&tn) {
+                                return Value::from_string(&t);
                             }
                         }
                         let name = self.resolve_hier_name(hier);
@@ -114770,130 +114796,6 @@ impl Simulator {
             break;
         }
         cur
-    }
-
-    /// IEEE 1800-2017 §20.6.1 `$typename` string for a resolved (builtin)
-    /// `DataType`: the built-in keyword, then non-default signing, then the
-    /// packed-vector range (bounds as unsized decimals). A typedef /
-    /// `TypeReference` is resolved back to its built-in base type (§20.6.1a),
-    /// the default signing is removed (§20.6.1b), and vector/array ranges are
-    /// preserved (§20.6.1g).
-    fn typename_of_dt(&self, dt: &DataType) -> String {
-        use crate::ast::types::{
-            DataType, IntegerAtomType, IntegerVectorType, PackedDimension, RealType, Signing,
-            SimpleType,
-        };
-        let cur = self.resolve_dt(dt);
-        match &cur {
-            DataType::IntegerVector {
-                kind,
-                signing,
-                dimensions,
-                ..
-            } => {
-                let kw = match kind {
-                    IntegerVectorType::Bit => "bit",
-                    IntegerVectorType::Logic => "logic",
-                    IntegerVectorType::Reg => "reg",
-                };
-                // Vector types default to UNsigned, so only the explicit
-                // `signed` survives default-signing removal.
-                let sign = matches!(signing, Some(Signing::Signed))
-                    .then_some(" signed")
-                    .unwrap_or("");
-                let mut s = format!("{}{}", kw, sign);
-                for d in dimensions {
-                    match d {
-                        PackedDimension::Range { left, right, .. } => {
-                            let l = crate::elaborate::const_eval_i64_with_params(left, None);
-                            let r = crate::elaborate::const_eval_i64_with_params(right, None);
-                            match (l, r) {
-                                (Some(l), Some(r)) => s.push_str(&format!(" [{}:{}]", l, r)),
-                                // Unresolvable bound: drop the range but keep
-                                // the base keyword.
-                                _ => return kw.to_string(),
-                            }
-                        }
-                        PackedDimension::Unsized(_) => {}
-                    }
-                }
-                s
-            }
-            DataType::IntegerAtom { kind, signing, .. } => {
-                let kw = match kind {
-                    IntegerAtomType::Byte => "byte",
-                    IntegerAtomType::ShortInt => "shortint",
-                    IntegerAtomType::Int => "int",
-                    IntegerAtomType::LongInt => "longint",
-                    IntegerAtomType::Integer => "integer",
-                    IntegerAtomType::Time => "time",
-                };
-                // Integer atoms default to signed; drop it, keep explicit
-                // `unsigned`.
-                if matches!(signing, Some(Signing::Unsigned)) {
-                    format!("{} unsigned", kw)
-                } else {
-                    kw.to_string()
-                }
-            }
-            DataType::Real { kind, .. } => match kind {
-                RealType::Real => "real".to_string(),
-                RealType::ShortReal => "shortreal".to_string(),
-                // §6.12: `realtime` is a synonym for `real`; the reference
-                // simulator's $typename reports it as such.
-                RealType::RealTime => "real".to_string(),
-            },
-            DataType::Simple { kind, .. } => match kind {
-                SimpleType::String => "string".to_string(),
-                SimpleType::Chandle => "chandle".to_string(),
-                SimpleType::Event => "event".to_string(),
-            },
-            DataType::Implicit { .. } => "logic".to_string(),
-            // §25.9: a virtual interface renders as it is declared, the
-            // modport before the parameter values (`virtual pbus_if.m
-            // #(16)`), as the reference simulator prints it. Positional
-            // values are evaluated; a named one keeps its `.NAME(...)`.
-            DataType::Interface {
-                name,
-                modport,
-                type_args,
-                ..
-            } => {
-                let mut s = format!("virtual {}", name.name);
-                if let Some(mp) = modport {
-                    s.push('.');
-                    s.push_str(&mp.name);
-                }
-                if !type_args.is_empty() {
-                    let params = &self.module.parameters;
-                    let render = |e: &Expression| {
-                        crate::elaborate::const_eval_i64_with_params(e, Some(params))
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| "?".to_string())
-                    };
-                    let parts: Vec<String> = type_args
-                        .iter()
-                        .map(|a| match &a.kind {
-                            ExprKind::NamedArg { name, expr } => format!(
-                                ".{}({})",
-                                name.name,
-                                expr.as_deref().map(render).unwrap_or_default()
-                            ),
-                            _ => render(a),
-                        })
-                        .collect();
-                    s.push_str(&format!(" #({})", parts.join(", ")));
-                }
-                s
-            }
-            DataType::TypeReference { name, .. }
-                if self.module.interfaces.contains(&name.name.name) =>
-            {
-                format!("virtual {}", name.name.name)
-            }
-            // Aggregates / classes are out of the scalar path's scope.
-            _ => "logic".to_string(),
-        }
     }
 
     /// §20.6.1 `$typename` of a virtual-interface operand: a variable (module
