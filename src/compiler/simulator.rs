@@ -92464,6 +92464,17 @@ impl Simulator {
                             if ai < args.len() {
                                 let arg = &args[ai];
                                 ai += 1;
+                                // §8.9: a static fixed array spelled `Cls::S`
+                                // or `C#(T)::S`, or one element of it,
+                                // `Cls::S[i]`.
+                                if matches!(
+                                    arg.kind,
+                                    ExprKind::MemberAccess { .. } | ExprKind::Index { .. }
+                                ) && let Some(s) = self.render_p_static_fixed_operand(arg)
+                                {
+                                    result.push_str(&s);
+                                    continue;
+                                }
                                 // §21.2.1.7: a SUBROUTINE-local scalar variable
                                 // (`int x; string s; T _t;` inside a task/
                                 // function) does not live in the module `signals`
@@ -115781,12 +115792,18 @@ impl Simulator {
             self.static_struct_holders.insert(key, usize::MAX);
             return None;
         };
+        // §8.25: a specialization's holder (`P#int::one`) remembers its
+        // specialization, so its type-parameter members resolve.
+        let spec = key
+            .split_once("::")
+            .and_then(|(head, _)| head.split_once('#'))
+            .map(|(b, sig)| (b.to_string(), sig.to_string()));
         let h = self.heap.len();
         self.heap.push(Some(ClassInstance {
             class_name: decl,
             properties: PropMap::default(),
             type_bindings: HashMap::default(),
-            spec: None,
+            spec,
             creation_scope: String::new(),
         }));
         self.seed_class_struct_cells(h, prop, &su);
@@ -123723,16 +123740,139 @@ impl Simulator {
                 .get_signal_value_by_name(name)
                 .map(|v| format!("\"{}\"", v.to_sv_string()))
                 .unwrap_or_else(|| "\"\"".into()),
-            _ => self
-                .get_signal_value_by_name(name)
-                .map(|v| {
-                    if v.is_real {
-                        format!("{}", v.to_f64())
-                    } else {
-                        v.to_dec_string()
+            _ => match self.get_signal_value_by_name(name) {
+                Some(v) if v.is_real => format!("{}", v.to_f64()),
+                Some(v) => v.to_dec_string(),
+                None => self.p_unwritten_leaf(name, dt),
+            },
+        }
+    }
+
+    /// §8.9 / §21.2.1.7: `%p` of a static fixed array reached through its
+    /// class scope — `Cls::S`, `C#(int)::S` — or of one element of it,
+    /// `Cls::S[i]`, rendered from the declared element type. A
+    /// specialization's scope is the context its type parameters resolve
+    /// in (the store itself is shared by the class's specializations).
+    fn render_p_static_fixed_operand(&mut self, arg: &Expression) -> Option<String> {
+        let (base, index) = match &arg.kind {
+            ExprKind::Index { expr, index } => (&**expr, Some(&**index)),
+            _ => (arg, None),
+        };
+        let class_scope = |c: &str| {
+            self.module.classes.contains_key(c)
+                && !self.local_stack.last().is_some_and(|l| l.contains_key(c))
+        };
+        // (class, its specialization, member)
+        let (cls, spec, member) = match &base.kind {
+            ExprKind::MemberAccess {
+                expr: scope,
+                member,
+            } => match &scope.kind {
+                ExprKind::Ident(h)
+                    if h.path.len() == 1
+                        && h.path[0].selects.is_empty()
+                        && class_scope(&h.path[0].name.name) =>
+                {
+                    (h.path[0].name.name.clone(), None, member.name.clone())
+                }
+                ExprKind::Specialization { .. } => {
+                    let spec = self.resolve_call_spec_params(
+                        Self::extract_call_spec(scope),
+                        &self.current_spec,
+                    )?;
+                    (spec.0.clone(), Some(spec), member.name.clone())
+                }
+                _ => return None,
+            },
+            // The elaborated spelling of `Cls::S`: one two-segment name.
+            ExprKind::Ident(h)
+                if index.is_some()
+                    && h.path.len() == 2
+                    && h.path.iter().all(|s| s.selects.is_empty())
+                    && class_scope(&h.path[0].name.name) =>
+            {
+                (
+                    h.path[0].name.name.clone(),
+                    None,
+                    h.path[1].name.name.clone(),
+                )
+            }
+            _ => return None,
+        };
+        let key = self.static_fixed_key_in(&cls, &member)?;
+        let saved = spec.map(|sp| std::mem::replace(&mut self.current_spec, Some(sp)));
+        let out = match index {
+            None => self.render_p_static_fixed(&cls, &member),
+            Some(ix) => {
+                let decl = key
+                    .strip_suffix(member.as_str())
+                    .and_then(|k| k.strip_suffix("::"))
+                    .and_then(|d| self.module.classes.get(d))
+                    .cloned();
+                let dt = decl
+                    .and_then(|cd| self.class_prop_decl_type(&cd, &member).cloned())
+                    .or_else(|| self.class_member_coll_type(&key).cloned())
+                    .or_else(|| self.flat_path_type(&key).map(|(d, _)| d));
+                let i = self.eval_expr(ix).to_i64();
+                match (dt, i) {
+                    (Some(dt), Some(i)) => {
+                        let elem = format!("{}[{}]", key, i);
+                        Some(self.render_p_typed(&elem, &dt))
                     }
+                    _ => None,
+                }
+            }
+        };
+        if let Some(prev) = saved {
+            self.current_spec = prev;
+        }
+        out
+    }
+
+    /// §6.8 / §21.2.1.7: an UNWRITTEN member leaf (no store yet — an element
+    /// of a static fixed array of structs) holds its type's default: 0 for
+    /// a 2-state type, x otherwise. A type parameter (`T v`) resolves through
+    /// the active specialization, else the one the store key names
+    /// (`P#int::fa[0].v`).
+    #[cold]
+    fn p_unwritten_leaf(&self, name: &str, dt: &DataType) -> String {
+        self.p_unwritten_leaf_of(None, name, dt)
+    }
+
+    /// [`p_unwritten_leaf`] for a cell of object (or static holder)
+    /// `owner`, whose own bindings resolve a type parameter first.
+    #[cold]
+    fn p_unwritten_leaf_of(&self, owner: Option<usize>, name: &str, dt: &DataType) -> String {
+        let mut dt = dt.clone();
+        if let DataType::TypeReference { name: tn, .. } = &dt
+            && tn.scopes.is_empty()
+            && !self.module.typedef_types.contains_key(&tn.name.name)
+        {
+            let t = tn.name.name.clone();
+            let inst = owner.and_then(|h| self.heap.get(h)?.as_ref());
+            let keyed = name
+                .split_once("::")
+                .and_then(|(h, _)| h.split_once('#'))
+                .map(|(b, sig)| (b.to_string(), sig.to_string()));
+            let bound = inst
+                .and_then(|i| i.type_bindings.get(&t).cloned())
+                .or_else(|| {
+                    let spec = inst.and_then(|i| i.spec.clone())?;
+                    self.resolve_type_param_with(&t, &Some(spec))
                 })
-                .unwrap_or_else(|| "x".into()),
+                .or_else(|| self.resolve_type_param_binding(&t))
+                .or_else(|| keyed.and_then(|k| self.resolve_type_param_with(&t, &Some(k))));
+            if let Some(d) = bound
+                .filter(|b| *b != t)
+                .and_then(|b| self.bound_type_dt(&b))
+            {
+                dt = d;
+            }
+        }
+        if super::elaborate::is_type_two_state_resolved(&dt, &self.module.typedef_types) {
+            "0".into()
+        } else {
+            "x".into()
         }
     }
 
@@ -123926,7 +124066,8 @@ impl Simulator {
             {
                 "\"\"".into()
             }
-            None => "x".into(),
+            // §6.8: an unwritten member of a 2-state type is 0.
+            None => self.p_unwritten_leaf_of(Some(handle), key, dt),
         }
     }
 

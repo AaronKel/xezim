@@ -342,3 +342,25 @@ fn spec_static_struct_siblings() {
         ]
     );
 }
+
+/// §6.8, §21.2.1.7, §8.9: `%p` of a static fixed array of unpacked structs
+/// prints an unwritten member at its type's default — 0 for `int` and for a
+/// type parameter bound to `int`, x for `logic` — from a static method, from
+/// the module through `C#(int)::fa`, for one element `N::fa[1]`, for a
+/// static struct and for an instance array of a specialization.
+#[test]
+fn static_struct_array_p_defaults() {
+    assert_eq!(
+        t_lines(include_str!("static_struct_array_p_defaults.sv")),
+        [
+            "T|00 '{'{s:\"\", v:0}, '{s:\"\", v:0}} | '{s:\"\", v:0}",
+            "T|01 '{'{s:\"\", v:0}, '{s:\"\", v:12}}",
+            "T|02 '{'{s:\"\", v:0}, '{s:\"\", v:12}}",
+            "T|03 '{'{s:\"\", v:0, l:x}, '{s:\"\", v:0, l:x}}",
+            "T|04 '{'{s:\"\", v:5, l:x}, '{s:\"\", v:0, l:x}} '{s:\"\", v:0, l:x}",
+            "T|05 '{'{v:0, b:0}, '{v:0, b:0}} '{'{v:0, b:0}, '{v:0, b:0}}",
+            "T|06 '{'{v:x, b:0}, '{v:x, b:0}} '{'{v:x, b:0}, '{v:x, b:0}}",
+            "T|07 '{'{v:0, b:3}, '{v:0, b:0}} 0",
+        ]
+    );
+}
