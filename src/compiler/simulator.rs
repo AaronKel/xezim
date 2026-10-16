@@ -9524,6 +9524,7 @@ impl Simulator {
         &self,
         cname: &str,
         body: &[Statement],
+        strings: &mut HashSet<String>,
     ) -> HashMap<String, Vec<crate::ast::types::UnpackedDimension>> {
         let mut out = HashMap::default();
         let mut stack: Vec<&Statement> = body.iter().collect();
@@ -9542,6 +9543,24 @@ impl Simulator {
                         Self::typedef_dims_via_tables(&self.module, start, &tn.name.name)
                             .filter(|d| !d.is_empty())
                     {
+                        // §6.16: a collection of `string` elements
+                        // (`typedef string q_t[$]`) reads strings.
+                        let elem = Self::typedef_elem_via_tables(&self.module, start, tn);
+                        let elem = match elem {
+                            Some(DataType::TypeReference { name, .. }) => {
+                                self.module.typedef_types.get(&name.name.name).cloned()
+                            }
+                            e => e,
+                        };
+                        if matches!(
+                            elem,
+                            Some(DataType::Simple {
+                                kind: crate::ast::types::SimpleType::String,
+                                ..
+                            })
+                        ) {
+                            strings.insert(key.clone());
+                        }
                         out.insert(key, d);
                     }
                 }
@@ -166975,7 +166994,11 @@ impl Simulator {
                     compiler.method_admission = Some(admission);
                     // issue-301 plan fact: multi-dim packed coll elements.
                     compiler.coll_elem_packed_dims = (*pre.coll_elem_packed_dims).clone();
-                    compiler.typedef_coll_dims = self.local_typedef_coll_dims(cname, body);
+                    compiler.typedef_coll_dims = self.local_typedef_coll_dims(
+                        cname,
+                        body,
+                        &mut compiler.typedef_coll_strings,
+                    );
                     compiler.set_dpi_import_fds(dpi_fds);
                     if method_trace_enabled() {
                         compiler.scope_hint = Some(format!("{}.{}", cname, method_name));

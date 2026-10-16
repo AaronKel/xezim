@@ -1739,6 +1739,9 @@ pub struct BytecodeCompiler<'a> {
     /// (`p::q_t`). The declarator itself carries no dims, so without this a
     /// typedef'd collection local lowered as a scalar register.
     pub typedef_coll_dims: HashMap<String, Vec<crate::ast::types::UnpackedDimension>>,
+    /// The `typedef_coll_dims` keys whose ELEMENT type is `string`
+    /// (`typedef string q_t[$]`): such locals join `local_coll_strings`.
+    pub typedef_coll_strings: HashSet<String>,
     /// class-perf Step 9c: names whose `$cast` destination may take the
     /// register route — formals, the result cell, and TOP-LEVEL body
     /// locals. A nested-block local is register-backed too, but its
@@ -2042,6 +2045,7 @@ impl<'a> BytecodeCompiler<'a> {
             coll_elem_member_names: HashSet::default(),
             coll_elem_packed_dims: HashMap::default(),
             typedef_coll_dims: HashMap::default(),
+            typedef_coll_strings: HashSet::default(),
             cast_reg_ok_locals: HashSet::default(),
             method_ret_jumps: Vec::new(),
             decl_local_regs: std::collections::HashSet::default(),
@@ -10729,7 +10733,9 @@ impl<'a> BytecodeCompiler<'a> {
                                 Arc::from("VarDecl_local_coll"),
                             ))));
                             self.local_coll_names.insert(decl.name.name.clone());
-                            if Self::dt_is_string(data_type) {
+                            // §6.16: `typedef string q_t[$]` elements are
+                            // strings, as a `string q[$]` local's are.
+                            if self.typedef_coll_strings.contains(&type_name_key(tn)) {
                                 self.local_coll_strings.insert(decl.name.name.clone());
                             } else {
                                 self.local_coll_strings.remove(&decl.name.name);
