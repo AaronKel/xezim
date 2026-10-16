@@ -552,28 +552,6 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   (§20.5, §6.12.2).
 * `vpi_user.h` declares the `s_vpi_vecval` words `PLI_UINT32`, as the
   standard's header does (§38.15).
-
-**Performance**
-
-* Measured against 0.11.1 on the README workloads (cold cache, plain release
-  build): C906 CoreMark ×1 runs 8.6% fewer host instructions (376.7 G against
-  412.0 G, 82 s); the C910 memcpy ×200 compiles 20% faster (9.1 s against
-  11.3 s, 106 s whole run); the AXI4 AVIP runs about 5% more cycles (7.0 s),
-  the cost of this release's correctness fixes.
-
-* More class methods and package functions run as bytecode: those that read
-  a member off an element of a class-handle collection (`m[k].val`,
-  `q[i].name`), package functions that call a static method of a class
-  (`Srv::get()`), and bodies that store a returned queue or dynamic array in
-  a local (`q = f(..)`). Element member reads run 62% fewer instructions
-  and a package function calling a singleton getter 15% fewer. (from PR
-  #294 by Thomas Burg, with follow-ups)
-* Wait-free class tasks and package and module functions run as bytecode once
-  they cross the same call threshold as class functions (`XEZIM_METHOD_TIER`,
-  default 1000 calls), and compiled code calls compiled package functions
-  directly. A class-heavy benchmark (400,000 calls of a wait-free task that
-  makes a virtual call and two package-function calls) runs 16% fewer
-  instructions; the axi4 AVIP runs 0.4% more. (from PR #265 by Thomas Burg)
 * Imported DPI tasks run on their own stack on x86_64 and aarch64, for Linux
   (glibc and musl) and macOS, so a `wait` in an exported task behaves the
   same everywhere. `XEZIM_DPI_FIBERS=0` selects the nested-scheduler
@@ -621,6 +599,30 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   `randomize()` that fails now prints a warning naming the class and its
   constraint blocks (first 3 failures per class; `XEZIM_RAND_WARN=0`
   silences it). (#301, reported by Ganesh-TNL)
+* `a.size() == n + m` compares at 32 bits, since `size()` and `num()` return
+  an `int`; narrower operands used to wrap. A field write to an element of a
+  class array of packed structs (`beats[i].last = 1`) is no longer dropped.
+
+**Performance**
+
+* Measured against 0.11.1 on the README workloads (cold cache, plain release
+  build): C906 CoreMark ×1 runs 8.6% fewer host instructions (376.7 G against
+  412.0 G, 82 s); the C910 memcpy ×200 compiles 20% faster (9.1 s against
+  11.3 s, 106 s whole run); the AXI4 AVIP runs about 5% more cycles (7.0 s),
+  the cost of this release's correctness fixes.
+* More class methods and package functions run as bytecode: those that read
+  a member off an element of a class-handle collection (`m[k].val`,
+  `q[i].name`), package functions that call a static method of a class
+  (`Srv::get()`), and bodies that store a returned queue or dynamic array in
+  a local (`q = f(..)`). Element member reads run 62% fewer instructions
+  and a package function calling a singleton getter 15% fewer. (from PR
+  #294 by Thomas Burg, with follow-ups)
+* Wait-free class tasks and package and module functions run as bytecode once
+  they cross the same call threshold as class functions (`XEZIM_METHOD_TIER`,
+  default 1000 calls), and compiled code calls compiled package functions
+  directly. A class-heavy benchmark (400,000 calls of a wait-free task that
+  makes a virtual call and two package-function calls) runs 16% fewer
+  instructions; the axi4 AVIP runs 0.4% more. (from PR #265 by Thomas Burg)
 * Edges on bits of a vector driven by one replicate assign
   (`assign clk_v[7:0] = {8{gclk}}`) share one internal edge alias instead of
   one per bit, so the flops they clock wake once per edge. The c906
@@ -629,9 +631,6 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * With the `jit` feature and `XEZIM_TS_JIT=1`, a native two-state stream
   that reads an x re-runs on the two-state executor's x path instead of the
   four-state interpreter (20x fewer such re-runs on c906).
-* `a.size() == n + m` compares at 32 bits, since `size()` and `num()` return
-  an `int`; narrower operands used to wrap. A field write to an element of a
-  class array of packed structs (`beats[i].last = 1`) is no longer dropped.
 
 **Usability**
 

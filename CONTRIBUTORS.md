@@ -14,8 +14,10 @@ Thank you to everyone who has improved xezim through pull requests:
   and package functions, character writes into strings through every
   receiver shape, block-local scoping in tasks and methods, per-invocation
   task-local arrays and array formals that write back to class properties,
-  `@(... iff g)` guards evaluated in the waiting process, and fork children
-  waking a parked parent.
+  `@(... iff g)` guards evaluated in the waiting process, fork children
+  waking a parked parent, scalar `bit` DPI formals that carry one bit, and
+  DPI regression tests for real actuals and returns, scalar `svLogic` cells
+  and enum prototypes.
 - **Vrajesh Prakhya** — real-number modelling: Verilog-AMS `wreal` nets
   resolved by summing, user-defined nettypes across the hierarchy and in
   packages (§6.6.7, §6.6.8), real-ness of members projected from call results,
@@ -66,7 +68,8 @@ work. Thank you in particular to
 [overcookedlobster](https://github.com/overcookedlobster),
 [rharikrishna25](https://github.com/rharikrishna25),
 [soronpo](https://github.com/soronpo),
-[taichi-ishitani](https://github.com/taichi-ishitani) and
+[taichi-ishitani](https://github.com/taichi-ishitani),
+[urbanij](https://github.com/urbanij) and
 [vrajeshprakhya](https://github.com/vrajeshprakhya).
 
 New contributors are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
