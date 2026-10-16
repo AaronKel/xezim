@@ -10421,6 +10421,226 @@ impl<'a> BytecodeCompiler<'a> {
         Some(r)
     }
 
+    /// §6.21: does a process block declare a static local whose value can
+    /// carry from one activation to the next (see `static_local_carries`)?
+    fn block_has_carried_static(stmts: &[Statement]) -> bool {
+        stmts.iter().enumerate().any(|(i, s)| match &s.kind {
+            StatementKind::VarDecl {
+                lifetime,
+                declarators,
+                ..
+            } if !matches!(lifetime, Some(crate::ast::types::Lifetime::Automatic)) => {
+                // An initializer without an explicit `static` runs at every
+                // entry (see the interpreter's VarDecl).
+                let explicit = matches!(lifetime, Some(crate::ast::types::Lifetime::Static));
+                declarators.iter().any(|d| match &d.init {
+                    Some(_) => explicit,
+                    None => Self::static_local_carries(&d.name.name, &stmts[i + 1..]),
+                })
+            }
+            _ => false,
+        })
+    }
+
+    /// §6.21: can a STATIC variable `name`, declared just before `rest`,
+    /// carry a value from one execution of its declaration to the next?
+    /// Not when every path writes it whole (`t = e`, `for (t = e; ...)`,
+    /// both arms of an `if`, every arm of a `case` with a default) before
+    /// anything reads it — a loop body or a branch that writes it first
+    /// only may write it — giving it a fresh value on every entry is then
+    /// unobservable. Conservative: any other first use carries.
+    pub(crate) fn static_local_carries(name: &str, rest: &[Statement]) -> bool {
+        fn names(name: &str, f: &dyn Fn(&mut super::fb_scan::FbScan)) -> bool {
+            let mut sc = super::fb_scan::FbScan::new(None);
+            f(&mut sc);
+            sc.bad.is_some() || sc.names.iter().any(|(n, _)| n == name)
+        }
+        fn whole(name: &str, lv: &Expression) -> bool {
+            matches!(&lv.kind, ExprKind::Ident(h)
+                if h.root.is_none()
+                    && h.path.len() == 1
+                    && h.path[0].selects.is_empty()
+                    && h.path[0].name.name == name)
+        }
+        /// How a statement first uses the variable.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Use {
+            /// Not at all.
+            None,
+            /// Writes it whole before anything reads it.
+            Write,
+            /// May write it (a loop body, one branch), never reads it first.
+            Maybe,
+            /// May read it (or write part of it) first.
+            Read,
+        }
+        fn branches(us: &[Use], all_paths: bool) -> Use {
+            if us.contains(&Use::Read) {
+                Use::Read
+            } else if all_paths && us.iter().all(|u| *u == Use::Write) {
+                Use::Write
+            } else if us.iter().all(|u| *u == Use::None) {
+                Use::None
+            } else {
+                Use::Maybe
+            }
+        }
+        /// A loop body, run zero or more times after `control` is read.
+        fn looped(name: &str, control_reads: bool, body: &Statement) -> Use {
+            if control_reads {
+                return Use::Read;
+            }
+            match first_use(name, body) {
+                Use::Read => Use::Read,
+                _ => Use::Maybe,
+            }
+        }
+        fn first_use(name: &str, s: &Statement) -> Use {
+            let reads = |e: &Expression| names(name, &|sc| sc.expr(e));
+            // Control transfers the scan refuses on their own.
+            match &s.kind {
+                StatementKind::Break | StatementKind::Continue | StatementKind::Return(None) => {
+                    return Use::None;
+                }
+                StatementKind::Return(Some(e)) => {
+                    return if reads(e) { Use::Read } else { Use::None };
+                }
+                _ => {}
+            }
+            // A wait (refused by the scan, as it suspends): its control,
+            // then its statement.
+            let control_reads = |c: &crate::ast::stmt::TimingControl| -> bool {
+                use crate::ast::stmt::{EventControl as EC, TimingControl as TC};
+                match c {
+                    TC::Delay(e) => reads(e),
+                    TC::Event(EC::Star | EC::ParenStar) => true,
+                    TC::Event(EC::Identifier(id)) => id.name == name,
+                    TC::Event(EC::HierIdentifier(e)) => reads(e),
+                    TC::Event(EC::EventExpr(es)) => es
+                        .iter()
+                        .any(|ee| reads(&ee.expr) || ee.iff.as_ref().is_some_and(|i| reads(i))),
+                }
+            };
+            match &s.kind {
+                StatementKind::TimingControl { control, stmt } => {
+                    return if control_reads(control) {
+                        Use::Read
+                    } else {
+                        first_use(name, stmt)
+                    };
+                }
+                StatementKind::Wait { condition, stmt } => {
+                    return if reads(condition) {
+                        Use::Read
+                    } else {
+                        first_use(name, stmt)
+                    };
+                }
+                StatementKind::Null => return Use::None,
+                _ => {}
+            }
+            if !names(name, &|sc| sc.stmt(s)) {
+                return Use::None;
+            }
+            match &s.kind {
+                StatementKind::BlockingAssign { lvalue, rvalue } => {
+                    if whole(name, lvalue) && !reads(rvalue) {
+                        Use::Write
+                    } else {
+                        Use::Read
+                    }
+                }
+                StatementKind::SeqBlock { stmts, .. } => {
+                    // A block redeclaring the name is another variable:
+                    // judge conservatively.
+                    let redeclares = stmts.iter().any(|c| {
+                        matches!(&c.kind, StatementKind::VarDecl { declarators, .. }
+                            if declarators.iter().any(|d| d.name.name == name))
+                    });
+                    if redeclares {
+                        Use::Read
+                    } else {
+                        seq(name, stmts)
+                    }
+                }
+                StatementKind::If {
+                    condition,
+                    then_stmt,
+                    else_stmt,
+                    ..
+                } => {
+                    if reads(condition) {
+                        return Use::Read;
+                    }
+                    let t = first_use(name, then_stmt);
+                    match else_stmt {
+                        Some(el) => branches(&[t, first_use(name, el)], true),
+                        None => branches(&[t, Use::None], false),
+                    }
+                }
+                StatementKind::Case { expr, items, .. } => {
+                    if reads(expr)
+                        || items
+                            .iter()
+                            .any(|it| it.pattern.is_some() || it.patterns.iter().any(|p| reads(p)))
+                    {
+                        return Use::Read;
+                    }
+                    let us: Vec<Use> = items.iter().map(|it| first_use(name, &it.stmt)).collect();
+                    branches(&us, items.iter().any(|it| it.is_default))
+                }
+                StatementKind::For {
+                    init,
+                    condition,
+                    step,
+                    body,
+                } => {
+                    if let Some(crate::ast::stmt::ForInit::Assign { lvalue, rvalue }) = init.first()
+                        && whole(name, lvalue)
+                    {
+                        return if reads(rvalue) { Use::Read } else { Use::Write };
+                    }
+                    let control = init.iter().any(|fi| match fi {
+                        crate::ast::stmt::ForInit::Assign { lvalue, rvalue } => {
+                            reads(lvalue) || reads(rvalue)
+                        }
+                        crate::ast::stmt::ForInit::VarDecl { name: n, init, .. } => {
+                            n.name == name || reads(init)
+                        }
+                    }) || condition.as_ref().is_some_and(|c| reads(c))
+                        || step.iter().any(|e| reads(e));
+                    looped(name, control, body)
+                }
+                StatementKind::While { condition, body } => looped(name, reads(condition), body),
+                StatementKind::Repeat { count, body } => looped(name, reads(count), body),
+                StatementKind::Foreach { array, vars, body } => looped(
+                    name,
+                    reads(array) || vars.iter().flatten().any(|v| v.name == name),
+                    body,
+                ),
+                StatementKind::DoWhile { body, condition } => match first_use(name, body) {
+                    Use::Write => Use::Write,
+                    Use::Read => Use::Read,
+                    _ if reads(condition) => Use::Read,
+                    _ => Use::Maybe,
+                },
+                _ => Use::Read,
+            }
+        }
+        fn seq(name: &str, stmts: &[Statement]) -> Use {
+            let mut acc = Use::None;
+            for s in stmts {
+                match first_use(name, s) {
+                    Use::None => {}
+                    Use::Maybe => acc = Use::Maybe,
+                    u => return u,
+                }
+            }
+            acc
+        }
+        seq(name, rest) == Use::Read
+    }
+
     pub fn compile_stmt(&mut self, stmt: &Statement) -> bool {
         // §6.21: a block-local declaration that SHADOWS a module signal needs
         // the whole enclosing block interpreted as one unit — the AST path
@@ -11329,6 +11549,17 @@ impl<'a> BytecodeCompiler<'a> {
                 self.emit_fallback(stmt)
             }
             StatementKind::SeqBlock { name, stmts } => {
+                // §6.21: a static local of a process block keeps its value
+                // between activations, which a register seeded at the
+                // declaration cannot do. Leave the block to the interpreter
+                // when such a local can be observed doing so.
+                if !self.method_mode
+                    && self.inlining_stack.is_empty()
+                    && Self::block_has_carried_static(stmts)
+                {
+                    self.bail("static_block_local");
+                    return false;
+                }
                 let saved_locals = self.local_var_regs.clone();
                 let saved_decl_locals = self.decl_local_regs.clone();
                 // A block's declarations re-type their names only inside it.

@@ -1792,7 +1792,7 @@ struct LazyAlways {
 impl LazyAlways {
     /// The always block exactly as the eager pipeline would have held it.
     fn materialize(&self) -> AlwaysBlock {
-        let mut ab = self.src.clone().materialize();
+        let mut ab = Simulator::materialize_pending_always(self.src.clone());
         if !self.patches.is_empty() {
             if let StatementKind::TimingControl {
                 control: TimingControl::Event(EventControl::EventExpr(exprs)),
@@ -8965,6 +8965,15 @@ pub struct Simulator {
     /// `$q_full`/`$q_exam`.
     queues: HashMap<i64, StochasticQueue>,
     static_task_init: HashSet<String>,
+    /// §6.21: the static locals of `initial`/`always`/`final` blocks whose
+    /// declaration already ran, by (declarator span, storage name). Such a
+    /// variable is created and initialized once; its block's later
+    /// activations (and loop iterations) keep its value.
+    static_block_decls: HashMap<(usize, usize), Vec<String>>,
+    /// Generations of the frames a `for`/`foreach` loop pushes for its
+    /// loop variables when its process has no call frame: a block local
+    /// declared under one is still a process-block local (§6.21).
+    loop_frame_gens: HashSet<u64>,
     current_static_task: Option<String>,
     /// Name of the enclosing subroutine when it is declared `automatic`
     /// (or a class method — automatic by default, §8.6). Mirrors
@@ -10322,7 +10331,7 @@ impl Simulator {
                     continue;
                 }
             }
-            deferred.push(DeferredAlways::Eager(p.materialize()));
+            deferred.push(DeferredAlways::Eager(Self::materialize_pending_always(p)));
         }
         let params = &module.parameters;
         let headers = always
@@ -10996,6 +11005,33 @@ impl Simulator {
                 for (k, st) in renamed {
                     *bodies[k] = st;
                 }
+                // §6.21: a process's static block variables are created once
+                // (see `exec_stmt_var_decl`), so two blocks of one process
+                // declaring the same name — `begin int a; ... end begin int
+                // unsigned a; ... end` — need storage (and a declared type)
+                // of their own: rename the nested ones.
+                for b in bodies.iter_mut() {
+                    let mut counts: HashMap<&str, usize> = HashMap::default();
+                    Self::for_each_decl_name(b, &mut |nm, _| *counts.entry(nm).or_insert(0) += 1);
+                    let dups: HashSet<String> = counts
+                        .into_iter()
+                        .filter(|&(_, c)| c >= 2)
+                        .map(|(nm, _)| nm.to_string())
+                        .collect();
+                    if dups.is_empty() {
+                        continue;
+                    }
+                    Self::rename_nested_shadowed(
+                        b,
+                        &|nm| dups.contains(nm),
+                        &mut Vec::new(),
+                        &mut n,
+                        "pb",
+                        0,
+                        "",
+                        &mut Vec::new(),
+                    );
+                }
                 drop(bodies);
                 let wrap = |items: &[Statement], span| Statement {
                     kind: StatementKind::SeqBlock {
@@ -11004,6 +11040,34 @@ impl Simulator {
                     },
                     span,
                 };
+                // §6.21: the variables of a static task or function keep
+                // their values between calls.
+                // (A class method, here when defined out of its class, is
+                // automatic, §8.6.)
+                for td in module.tasks.values_mut() {
+                    if td.lifetime != Some(crate::ast::types::Lifetime::Automatic)
+                        && td.name.scopes.is_empty()
+                    {
+                        Self::mark_static_locals(&mut td.items);
+                    }
+                }
+                let fkeys: Vec<String> = module
+                    .functions
+                    .iter()
+                    .filter(|(_, fd)| {
+                        fd.lifetime != Some(crate::ast::types::Lifetime::Automatic)
+                            && fd.name.scopes.is_empty()
+                            && Self::static_locals_to_mark(&fd.items)
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in fkeys {
+                    if let Some(fd) = module.functions.get(&key) {
+                        let mut fd = fd.clone();
+                        Self::mark_static_locals(&mut fd.items);
+                        module.functions.insert(key, fd);
+                    }
+                }
                 let mut tdone = Vec::new();
                 for (key, td) in module.tasks.iter() {
                     if !td
@@ -13689,6 +13753,8 @@ impl Simulator {
             ungetc_buf: HashMap::default(),
             queues: HashMap::default(),
             static_task_init: HashSet::default(),
+            static_block_decls: HashMap::default(),
+            loop_frame_gens: HashSet::default(),
             current_static_task: None,
             current_auto_task: None,
             name_resolve_hint: RefCell::new(None),
@@ -19295,29 +19361,6 @@ impl Simulator {
         }
         let pending_initial = std::mem::take(&mut self.module.pending_initial);
         let initial_blocks = std::mem::take(&mut self.module.initial_blocks);
-        // Static/package-global initializers must run before any `initial`
-        // block (and the lazy-prefix pending ones) so package globals are
-        // populated before user code reads them. Schedule them first so they
-        // receive the lowest pids (the time-0 queue runs lower pids first).
-        for ib in std::mem::take(&mut self.module.static_init_blocks) {
-            let span = ib.stmt.span;
-            let stmts = match ib.stmt.kind {
-                StatementKind::SeqBlock { stmts, .. } => stmts,
-                other => vec![Statement::new(other, span)],
-            };
-            let pid = self.next_pid;
-            self.next_pid += 1;
-            // §6.21: an instance-scoped static initializer (deferred by
-            // `defer_static_syscall_inits`) needs the same name-resolution
-            // hint initial blocks get, so bare names, module-level function
-            // calls and `%m` resolve in the DECLARING instance's scope.
-            if !ib.scope.is_empty() {
-                self.process_scope_hint.insert(pid, ib.scope);
-            }
-            self.process_origin
-                .insert(pid, (span, "static initializer"));
-            self.event_queue.schedule(0, pid, stmts.into());
-        }
         if std::env::var("XEZIM_TRACE_INIT").ok().as_deref() == Some("1") {
             eprintln!(
                 "[xezim] {} initial blocks to schedule ({} from pending lazy-prefix)",
@@ -19362,23 +19405,68 @@ impl Simulator {
                 .collect()
         };
         let claims = |nm: &str| claim_set.contains(nm);
-        for ib in pending_initial
+        let mut rename_pending = |p: super::elaborate::PendingInitial| {
+            let mut ib = p.materialize();
+            let scope = ib.scope.clone();
+            Self::rename_nested_shadowed(
+                &mut ib.stmt,
+                &claims,
+                &mut Vec::new(),
+                &mut shadow_n,
+                "p",
+                1,
+                &scope,
+                &mut Vec::new(),
+            );
+            ib
+        };
+        // §6.21: the static variables of every process block are created
+        // and initialized before any process starts. An instance's initial
+        // block is renamed for its instance first, so materialize the pending
+        // ones up front when one of them declares such a variable (otherwise
+        // they stream as before).
+        let hoist_pending = pending_initial
+            .iter()
+            .any(|p| Self::stmt_has_static_decl(&p.source));
+        let mut early: Vec<super::elaborate::InitialBlock> = Vec::new();
+        let pending_initial = if hoist_pending {
+            early = pending_initial
+                .into_iter()
+                .map(&mut rename_pending)
+                .collect();
+            Vec::new()
+        } else {
+            pending_initial
+        };
+        for ib in early.iter().chain(initial_blocks.iter()) {
+            self.hoist_static_decls(&ib.stmt, &ib.scope);
+        }
+        // Static/package-global initializers must run before any `initial`
+        // block (and the lazy-prefix pending ones) so package globals are
+        // populated before user code reads them. Schedule them first so they
+        // receive the lowest pids (the time-0 queue runs lower pids first).
+        for ib in std::mem::take(&mut self.module.static_init_blocks) {
+            let span = ib.stmt.span;
+            let stmts = match ib.stmt.kind {
+                StatementKind::SeqBlock { stmts, .. } => stmts,
+                other => vec![Statement::new(other, span)],
+            };
+            let pid = self.next_pid;
+            self.next_pid += 1;
+            // §6.21: an instance-scoped static initializer (deferred by
+            // `defer_static_syscall_inits`) needs the same name-resolution
+            // hint initial blocks get, so bare names, module-level function
+            // calls and `%m` resolve in the DECLARING instance's scope.
+            if !ib.scope.is_empty() {
+                self.process_scope_hint.insert(pid, ib.scope);
+            }
+            self.process_origin
+                .insert(pid, (span, "static initializer"));
+            self.event_queue.schedule(0, pid, stmts.into());
+        }
+        for ib in early
             .into_iter()
-            .map(|p| {
-                let mut ib = p.materialize();
-                let scope = ib.scope.clone();
-                Self::rename_nested_shadowed(
-                    &mut ib.stmt,
-                    &claims,
-                    &mut Vec::new(),
-                    &mut shadow_n,
-                    "p",
-                    1,
-                    &scope,
-                    &mut Vec::new(),
-                );
-                ib
-            })
+            .chain(pending_initial.into_iter().map(&mut rename_pending))
             .chain(initial_blocks)
         {
             let ib = self.cov_initial(ib);
@@ -22824,6 +22912,7 @@ impl Simulator {
         let pending = std::mem::take(&mut self.module.pending_always);
         let mut remaining = Vec::new();
         for ab in blocks.into_iter() {
+            self.hoist_static_decls(&ab.stmt, &ab.scope);
             if let Some(rest) = self.classify_one_always_block(ab, None) {
                 remaining.push(rest);
             }
@@ -22833,12 +22922,14 @@ impl Simulator {
                 DeferredAlways::Eager(ab) => (ab, None),
                 DeferredAlways::Lazy { lazy, .. } => (lazy.materialize(), Some(lazy)),
             };
+            self.hoist_static_decls(&ab.stmt, &ab.scope);
             if let Some(rest) = self.classify_one_always_block(ab, lazy) {
                 remaining.push(rest);
             }
         }
         for p in pending {
-            let ab = p.materialize();
+            let ab = Self::materialize_pending_always(p);
+            self.hoist_static_decls(&ab.stmt, &ab.scope);
             if let Some(rest) = self.classify_one_always_block(ab, None) {
                 remaining.push(rest);
             }
@@ -50195,7 +50286,11 @@ impl Simulator {
                     }
                 } else {
                     ctx.local_stack.push(caps);
-                    ctx.local_gen_stack.push(self.next_frame_gen());
+                    // A capture frame, not a call frame (see
+                    // `in_process_block_scope`).
+                    let g = self.next_frame_gen();
+                    self.loop_frame_gens.insert(g);
+                    ctx.local_gen_stack.push(g);
                 }
             }
         }
@@ -54494,6 +54589,11 @@ impl Simulator {
                                     let mut f: HashMap<String, Value> = HashMap::default();
                                     f.insert(name.name.clone(), rv);
                                     self.push_local_frame(f);
+                                    // Not a call frame: the process's block
+                                    // locals stay static (§6.21).
+                                    if let Some(&g) = self.local_gen_stack.last() {
+                                        self.loop_frame_gens.insert(g);
+                                    }
                                 }
                             }
                             ForInit::Assign { lvalue, rvalue } => {
@@ -55470,6 +55570,330 @@ impl Simulator {
         hit
     }
 
+    /// §6.21/§13.3/§13.4: a variable declared in a STATIC task or function
+    /// (one neither declared nor defaulted `automatic`) is allocated once and
+    /// keeps its value from one call to the next. Mark each such declaration
+    /// whose value can carry over (`static_local_carries`) explicitly
+    /// `static`, which gives it the subroutine's persistent store; the
+    /// others behave the same either way and stay as they are, so their
+    /// subroutine still compiles and inlines.
+    fn mark_static_locals(items: &mut [Statement]) {
+        for i in 0..items.len() {
+            let (head, rest) = items.split_at_mut(i + 1);
+            let s = &mut head[i];
+            match &mut s.kind {
+                StatementKind::VarDecl {
+                    lifetime,
+                    declarators,
+                    data_type,
+                } => {
+                    // Integral and real scalars: what the static-local store
+                    // keeps exactly (an aggregate keeps its per-call storage).
+                    if lifetime.is_none()
+                        && matches!(
+                            data_type,
+                            DataType::IntegerAtom { .. }
+                                | DataType::IntegerVector { .. }
+                                | DataType::Real { .. }
+                        )
+                        && declarators.iter().any(|d| {
+                            d.dimensions.is_empty()
+                                && d.init.is_none()
+                                && super::bytecode::BytecodeCompiler::static_local_carries(
+                                    &d.name.name,
+                                    rest,
+                                )
+                        })
+                    {
+                        *lifetime = Some(crate::ast::types::Lifetime::Static);
+                    }
+                }
+                StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                    Self::mark_static_locals(stmts)
+                }
+                StatementKind::If {
+                    then_stmt,
+                    else_stmt,
+                    ..
+                } => {
+                    Self::mark_static_locals(std::slice::from_mut(&mut **then_stmt));
+                    if let Some(e) = else_stmt {
+                        Self::mark_static_locals(std::slice::from_mut(&mut **e));
+                    }
+                }
+                StatementKind::Case { items, .. } => {
+                    for it in items.iter_mut() {
+                        Self::mark_static_locals(std::slice::from_mut(&mut it.stmt));
+                    }
+                }
+                StatementKind::For { body, .. }
+                | StatementKind::While { body, .. }
+                | StatementKind::DoWhile { body, .. }
+                | StatementKind::Repeat { body, .. }
+                | StatementKind::Forever { body }
+                | StatementKind::Foreach { body, .. }
+                | StatementKind::TimingControl { stmt: body, .. }
+                | StatementKind::Wait { stmt: body, .. } => {
+                    Self::mark_static_locals(std::slice::from_mut(&mut **body))
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Would `mark_static_locals` mark anything in `items` (read-only, so a
+    /// subroutine with nothing to mark is not cloned)?
+    fn static_locals_to_mark(items: &[Statement]) -> bool {
+        let mut probe = items.to_vec();
+        Self::mark_static_locals(&mut probe);
+        probe.iter().zip(items).any(|(a, b)| {
+            let mut na = 0usize;
+            let mut nb = 0usize;
+            Self::count_static_decls(a, &mut na);
+            Self::count_static_decls(b, &mut nb);
+            na != nb
+        })
+    }
+
+    fn count_static_decls(s: &Statement, n: &mut usize) {
+        if let StatementKind::VarDecl {
+            lifetime: Some(crate::ast::types::Lifetime::Static),
+            ..
+        } = &s.kind
+        {
+            *n += 1;
+        }
+        let mut walk = |c: &Statement| Self::count_static_decls(c, n);
+        match &s.kind {
+            StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                stmts.iter().for_each(&mut walk)
+            }
+            StatementKind::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                walk(then_stmt);
+                if let Some(e) = else_stmt {
+                    walk(e);
+                }
+            }
+            StatementKind::Case { items, .. } => items.iter().for_each(|it| walk(&it.stmt)),
+            StatementKind::For { body, .. }
+            | StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Repeat { body, .. }
+            | StatementKind::Forever { body }
+            | StatementKind::Foreach { body, .. }
+            | StatementKind::TimingControl { stmt: body, .. }
+            | StatementKind::Wait { stmt: body, .. } => walk(body),
+            _ => {}
+        }
+    }
+
+    /// Does `stmt` declare a variable that is not `automatic`?
+    fn stmt_has_static_decl(stmt: &Statement) -> bool {
+        let mut decls = Vec::new();
+        Self::collect_static_decls(stmt, &mut decls);
+        !decls.is_empty()
+    }
+
+    /// Is `e` built from literals and variable reads alone (no call)?
+    fn init_is_plain(e: &Expression) -> bool {
+        match &e.kind {
+            ExprKind::Number(_) | ExprKind::StringLiteral(_) => true,
+            ExprKind::Ident(h) => h
+                .path
+                .iter()
+                .all(|seg| seg.selects.iter().all(Self::init_is_plain)),
+            ExprKind::Paren(x) | ExprKind::Unary { operand: x, .. } => Self::init_is_plain(x),
+            ExprKind::Binary { left, right, .. } => {
+                Self::init_is_plain(left) && Self::init_is_plain(right)
+            }
+            ExprKind::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                Self::init_is_plain(condition)
+                    && Self::init_is_plain(then_expr)
+                    && Self::init_is_plain(else_expr)
+            }
+            ExprKind::Concatenation(xs) => xs.iter().all(Self::init_is_plain),
+            _ => false,
+        }
+    }
+
+    /// Does `stmt` declare a typedef in one of its blocks?
+    fn stmt_has_local_typedef(stmt: &Statement) -> bool {
+        match &stmt.kind {
+            StatementKind::Typedef(_) => true,
+            StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                stmts.iter().any(Self::stmt_has_local_typedef)
+            }
+            StatementKind::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                Self::stmt_has_local_typedef(then_stmt)
+                    || else_stmt
+                        .as_deref()
+                        .is_some_and(Self::stmt_has_local_typedef)
+            }
+            StatementKind::Case { items, .. } => items
+                .iter()
+                .any(|it| Self::stmt_has_local_typedef(&it.stmt)),
+            StatementKind::For { body, .. }
+            | StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Repeat { body, .. }
+            | StatementKind::Forever { body }
+            | StatementKind::Foreach { body, .. }
+            | StatementKind::TimingControl { stmt: body, .. }
+            | StatementKind::Wait { stmt: body, .. } => Self::stmt_has_local_typedef(body),
+            _ => false,
+        }
+    }
+
+    /// The declarations of `stmt`'s static block variables (§6.21: any
+    /// block variable of a process not declared `automatic`), in order.
+    fn collect_static_decls(stmt: &Statement, out: &mut Vec<Statement>) {
+        let mut walk = |c: &Statement| Self::collect_static_decls(c, out);
+        match &stmt.kind {
+            StatementKind::VarDecl {
+                lifetime,
+                declarators,
+                data_type,
+            } => {
+                // See `exec_stmt_var_decl`: an initializer needs an explicit
+                // `static`.
+                let explicit = matches!(lifetime, Some(crate::ast::types::Lifetime::Static));
+                if !matches!(lifetime, Some(crate::ast::types::Lifetime::Automatic)) {
+                    // An initializer that calls something (`process::self()`,
+                    // `new`) runs where the block first reaches it.
+                    let ds: Vec<VarDeclarator> = declarators
+                        .iter()
+                        .filter(|d| match &d.init {
+                            None => true,
+                            Some(e) => explicit && Self::init_is_plain(e),
+                        })
+                        .cloned()
+                        .collect();
+                    if !ds.is_empty() {
+                        out.push(Statement::new(
+                            StatementKind::VarDecl {
+                                lifetime: lifetime.clone(),
+                                declarators: ds,
+                                data_type: data_type.clone(),
+                            },
+                            stmt.span,
+                        ));
+                    }
+                }
+            }
+            StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                stmts.iter().for_each(walk)
+            }
+            StatementKind::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                walk(then_stmt);
+                if let Some(e) = else_stmt {
+                    walk(e);
+                }
+            }
+            StatementKind::Case { items, .. } => items.iter().for_each(|it| walk(&it.stmt)),
+            StatementKind::For { body, .. }
+            | StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Repeat { body, .. }
+            | StatementKind::Forever { body }
+            | StatementKind::Foreach { body, .. }
+            | StatementKind::TimingControl { stmt: body, .. }
+            | StatementKind::Wait { stmt: body, .. } => walk(body),
+            _ => {}
+        }
+    }
+
+    /// §6.21: a static block variable is created, and its initializer run,
+    /// once before any process starts — not when its block is first entered:
+    /// `blk.v` reads its initial value at time 0 even while the block waits
+    /// on its first event. Run a process body's static declarations in a
+    /// static-initializer process of its scope; the block's own declaration
+    /// then finds them done (`static_block_decls`).
+    fn hoist_static_decls(&mut self, stmt: &Statement, scope: &str) {
+        let mut decls = Vec::new();
+        Self::collect_static_decls(stmt, &mut decls);
+        // A declaration typed by a typedef local to the process exists only
+        // once the block has run that typedef: leave the process alone.
+        if decls.is_empty() || Self::stmt_has_local_typedef(stmt) {
+            return;
+        }
+        let span = stmt.span;
+        self.module
+            .static_init_blocks
+            .push(super::elaborate::InitialBlock {
+                stmt: Statement::new(
+                    StatementKind::SeqBlock {
+                        name: None,
+                        stmts: decls,
+                    },
+                    span,
+                ),
+                scope: scope.to_string(),
+            });
+    }
+
+    /// An instance's always block, rewritten for its instance, with its
+    /// block locals given storage of their own (`rename_instance_locals`).
+    fn materialize_pending_always(p: super::elaborate::PendingAlways) -> AlwaysBlock {
+        let mut ab = p.materialize();
+        Self::rename_instance_locals(&mut ab.stmt, &ab.scope);
+        ab
+    }
+
+    /// §6.21/§23.6: a process of a module INSTANCE (`scope` its path) keeps
+    /// its block locals' bare names while the module's items carry the
+    /// instance path, so every instance of the module — and every
+    /// generate-loop copy — shared one variable per local. A static local
+    /// keeps its value between activations, so the instances then saw each
+    /// other's values. Store each local of the block, at any depth, under a
+    /// name of its own instance: a named block's under its hierarchical name
+    /// (`scope.blk.v`), an unnamed block's salted with the scope. The names
+    /// depend only on the block and its scope, so materializing the same
+    /// block again gives the same storage.
+    fn rename_instance_locals(stmt: &mut Statement, scope: &str) {
+        if scope.is_empty() {
+            return;
+        }
+        let mut declares = false;
+        Self::for_each_decl_name(stmt, &mut |_, _| declares = true);
+        if !declares {
+            return;
+        }
+        let mut tag = String::with_capacity(scope.len() + 2);
+        tag.push('p');
+        tag.extend(
+            scope
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }),
+        );
+        tag.push('_');
+        Self::rename_nested_shadowed(
+            stmt,
+            &|_| true,
+            &mut Vec::new(),
+            &mut 0,
+            &tag,
+            1,
+            scope,
+            &mut Vec::new(),
+        );
+    }
+
     /// §6.21/§9.3.4: alpha-rename, innermost first, the collection locals
     /// (declarators with unpacked dimensions) of every block below `depth`
     /// 0 of `stmt` that shadow a name `claims` (a module item) or a local of
@@ -55490,7 +55914,7 @@ impl Simulator {
         scope: &str,
         labels: &mut Vec<String>,
     ) -> bool {
-        let unlabeled = tag == "p";
+        let unlabeled = tag.starts_with('p');
         let mut any = false;
         let mut walk =
             |s: &mut Statement, enc: &mut Vec<String>, labels: &mut Vec<String>, any: &mut bool| {
@@ -65104,12 +65528,14 @@ impl Simulator {
             if self.fb_frame_depths.last().copied() == Some(self.local_stack.len() - 1) {
                 return false;
             }
-        } else if !self.local_stack.is_empty()
+        } else if !self.in_process_block_scope()
             || self.signal_name_to_id.contains_key(name)
             || !(self.signals.contains_key(name) || self.module.arrays.contains_key(name))
         {
             // Inside a subroutine every local is in its frame: a name
-            // outside it is a class property or a module variable.
+            // outside it is a class property or a module variable. (A
+            // process block's static locals stay in the signal table under
+            // a loop's variable frame, §6.21.)
             return false;
         }
         self.module.var_decl_types.get(name).is_some_and(|dt| {
@@ -84735,7 +85161,33 @@ impl Simulator {
         } else {
             Value::new(w)
         };
+        // §6.21: a local of an `initial`/`always`/`final` block is static
+        // unless declared `automatic` — one variable, initialized once (its
+        // initializer is not re-run when the block is entered again). Such a
+        // block has no call frame; a subroutine or class method has one.
+        let static_block = !matches!(lifetime, Some(crate::ast::types::Lifetime::Automatic))
+            && !self.in_const_param_eval
+            && self.current_static_task.is_none()
+            && self.current_auto_task.is_none()
+            && !matches!(self.class_context_stack.last(), Some(Some(_)))
+            && self.in_process_block_scope();
+        // An initializer without an explicit `static` is an error (the
+        // variable is implicitly static, §6.21); such a declaration keeps
+        // running each time, as an automatic one would.
+        let explicit_static = matches!(lifetime, Some(crate::ast::types::Lifetime::Static));
         for d in declarators {
+            if static_block && (explicit_static || d.init.is_none()) {
+                // Done already? (Allocation-free once it is: the activation
+                // after the first.)
+                let names = self
+                    .static_block_decls
+                    .entry((d.name.span.start, d.name.span.end))
+                    .or_default();
+                if names.iter().any(|n| *n == d.name.name) {
+                    continue;
+                }
+                names.push(d.name.name.clone());
+            }
             // Every metadata key this declaration writes is its name or
             // `name.member` (or a `@` per-call key, never a formal's name).
             self.meta_note(&d.name.name);
@@ -85942,7 +86394,10 @@ impl Simulator {
                 // back and its own writes vanished. Seeding also makes
                 // each call's local FRESH, as `automatic` requires.
                 let mut unpacked_struct_local = false;
-                if !self.local_stack.is_empty() && d.dimensions.is_empty() && !plain {
+                // A static process-block local lives in the signal table even
+                // under a loop's variable frame, which its block outlives.
+                let in_frame = !self.local_stack.is_empty() && !static_block;
+                if in_frame && d.dimensions.is_empty() && !plain {
                     if let crate::ast::types::DataType::Struct(su) = self.resolve_dt(data_type) {
                         if Self::spreads_member_wise(&su) {
                             unpacked_struct_local = true;
@@ -85997,7 +86452,7 @@ impl Simulator {
                     if let Some(init_expr) = d.init.clone() {
                         self.init_unpacked_struct_local(d, data_type, &init_expr);
                     }
-                } else if let Some(frame) = self.local_stack.last_mut() {
+                } else if let Some(frame) = self.local_stack.last_mut().filter(|_| in_frame) {
                     frame.insert(d.name.name.clone(), v);
                 } else {
                     self.signals.insert(d.name.name.clone(), v);
@@ -86971,7 +87426,7 @@ impl Simulator {
                 let shadow_frame = self.local_stack.last().is_none()
                     && init.iter().any(|fi| matches!(fi, ForInit::VarDecl { .. }));
                 if shadow_frame {
-                    self.push_local_frame(HashMap::default());
+                    self.push_loop_frame();
                 }
                 // Init-declared loop vars are automatic. With the frame push
                 // above they always live in a local frame, never in the bare
@@ -87097,7 +87552,7 @@ impl Simulator {
                 }
                 self.loop_scope_close(body, body_scope);
                 if shadow_frame {
-                    self.pop_local_frame();
+                    self.pop_loop_frame();
                 }
                 self.restore_loop_vars(&fv_saved);
             }
@@ -87114,9 +87569,9 @@ impl Simulator {
             StatementKind::Foreach { vars, .. }
                 if self.local_stack.last().is_none() && vars.iter().any(|v| v.is_some()) =>
             {
-                self.push_local_frame(HashMap::default());
+                self.push_loop_frame();
                 self.exec_statement(stmt);
-                self.pop_local_frame();
+                self.pop_loop_frame();
             }
             StatementKind::Foreach { array, vars, body } => {
                 let names: Vec<String> = vars
@@ -114343,6 +114798,41 @@ impl Simulator {
     fn push_local_frame(&mut self, f: HashMap<String, Value>) {
         let types = self.take_pooled_types();
         self.push_local_frame_typed(f, types);
+    }
+
+    /// The frame a loop pushes for its loop variables in a process that has
+    /// no call frame (see `loop_frame_gens`).
+    fn push_loop_frame(&mut self) {
+        self.push_local_frame(HashMap::default());
+        if let Some(&g) = self.local_gen_stack.last() {
+            self.loop_frame_gens.insert(g);
+        }
+    }
+
+    fn pop_loop_frame(&mut self) {
+        if let Some(g) = self.local_gen_stack.last() {
+            self.loop_frame_gens.remove(g);
+        }
+        self.pop_local_frame();
+    }
+
+    /// §6.21: is a declaration executed here a local of an `initial` /
+    /// `always` / `final` block — no call frame, only loop-variable frames?
+    fn in_process_block_scope(&self) -> bool {
+        // A call frame is far more common than a loop frame: test the
+        // innermost frame first, and skip the lookups when no loop frame is
+        // open at all.
+        match self.local_gen_stack.last() {
+            None => true,
+            Some(_) if self.loop_frame_gens.is_empty() => false,
+            Some(g) => {
+                self.loop_frame_gens.contains(g)
+                    && self
+                        .local_gen_stack
+                        .iter()
+                        .all(|g| self.loop_frame_gens.contains(g))
+            }
+        }
     }
 
     /// Push a local frame together with its type overlay (the declared

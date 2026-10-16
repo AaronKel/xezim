@@ -335,10 +335,9 @@ endmodule
     assert_eq!(t_lines(src), expected);
 }
 
-/// Pinned: a static local of an `always` block keeps its value between
-/// activations (§6.21).
+/// A static local of an `always` block keeps its value between
+/// activations, per instance (§6.21).
 #[test]
-#[ignore = "a static always-block local is re-initialized on every activation"]
 fn always_block_local_keeps_its_value() {
     let src = r#"// Locals of an instance's always block / task, two instances.
 module kid #(parameter int B = 0);
@@ -370,5 +369,178 @@ endmodule
 "#;
     // Expected values from the reference simulator.
     let expected = ["T|top.a seen=3000 r=1000", "T|top.b seen=6000 r=2000"];
+    assert_eq!(t_lines(src), expected);
+}
+
+/// §6.21/§23.6: static locals of process blocks are created and initialized
+/// once, before any process starts: in loop bodies, fork arms, named blocks
+/// (read hierarchically, also before the block first runs), always_ff and
+/// generate copies, per instance.
+#[test]
+fn static_block_locals_across_shapes() {
+    let src = r#"// Static locals of process blocks: loops, forks, named blocks read
+// hierarchically (also before their block first runs), generate copies.
+module kid #(parameter int B = 0);
+  logic clk = 0, idle = 0;
+  int m = 9;
+  int seen [2];
+  int r1, r2;
+  always #1 clk = ~clk;
+  always @(posedge idle) begin : nb
+    static int u = 5;
+    static int v = m + 1;
+    u++;
+  end
+  for (genvar g = 0; g < 2; g++) begin : gl
+    always @(posedge clk) begin
+      int c;
+      c = c + g + 1 + B;
+      seen[g] = c;
+    end
+  end
+  always_ff @(posedge clk) begin
+    int ff;
+    ff = ff + 1;
+    r1 <= ff;
+  end
+  always @(posedge clk) begin
+    for (int i = 0; i < 2; i++) begin
+      int z;
+      z = z + 1;
+      r2 = z;
+    end
+  end
+  initial begin
+    #1 $display("T|%m nb.u=%0d nb.v=%0d", nb.u, nb.v);
+    #5 $display("T|%m seen=%0d,%0d r1=%0d r2=%0d", seen[0], seen[1], r1, r2);
+  end
+endmodule
+module top;
+  kid #(10) a();
+  kid #(20) b();
+  int q;
+  initial begin
+    for (int i = 0; i < 3; i++) begin
+      int x;
+      static int y = 10;
+      x = x + 1; y = y + 1;
+      q = x * 100 + y;
+    end
+    $display("T|loop q=%0d", q);
+    for (int i = 0; i < 2; i++) begin
+      int w;
+      fork
+        begin w = w + 1; q = w; end
+      join
+    end
+    $display("T|fork w=%0d", q);
+    repeat (2) begin
+      static int sx = 4;
+      automatic int ax = 4;
+      sx++; ax++;
+      q = sx * 100 + ax;
+    end
+    $display("T|mix q=%0d", q);
+    #8 $display("T|top a.nb.u=%0d b.nb.v=%0d", a.nb.u, b.nb.v);
+  end
+endmodule
+"#;
+    // Expected values from the reference simulator.
+    let expected = [
+        "T|loop q=313",
+        "T|fork w=2",
+        "T|mix q=605",
+        "T|top.a nb.u=5 nb.v=10",
+        "T|top.b nb.u=5 nb.v=10",
+        "T|top.a seen=33,36 r1=3 r2=6",
+        "T|top.b seen=63,66 r1=3 r2=6",
+        "T|top a.nb.u=5 b.nb.v=10",
+    ];
+    assert_eq!(t_lines(src), expected);
+}
+
+/// §6.21/§13.3/§13.4: the variables of a static task or function keep their
+/// values between calls; an automatic one's (an automatic module's
+/// included) start afresh.
+#[test]
+fn static_subroutine_locals_keep_their_values() {
+    let src = r#"// Variables of static tasks and functions keep their values between calls;
+// those of automatic ones (and of an automatic module's) start afresh.
+module helper;
+  task tk(output int o);
+    int c;
+    c = c + 1;
+    o = c;
+  endtask
+  function int fn();
+    int c;
+    c = c + 3;
+    return c;
+  endfunction
+endmodule
+module automatic amod;
+  task tk(output int o);
+    int c;
+    c = c + 1;
+    o = c;
+  endtask
+  initial begin
+    int q;
+    #1 tk(q); tk(q);
+    $display("T|automatic module task c=%0d", q);
+  end
+endmodule
+module top;
+  helper h();
+  amod am();
+  task static tks(output int o);
+    int c;
+    c = c + 1;
+    o = c;
+  endtask
+  task automatic tka(output int o);
+    int c;
+    static int s;
+    c = c + 1; s = s + 1;
+    o = c * 10 + s;
+  endtask
+  function automatic int fna();
+    int c;
+    c = c + 3;
+    return c;
+  endfunction
+  function int fns(int x);
+    static int acc = 100;
+    acc = acc + x;
+    return acc;
+  endfunction
+  function int fnw(int x);
+    int t;
+    t = x * 2;
+    return t;
+  endfunction
+  initial begin
+    int q;
+    tks(q); tks(q); $display("T|task static c=%0d", q);
+    h.tk(q); h.tk(q); $display("T|default task c=%0d", q);
+    q = h.fn(); q = h.fn(); $display("T|default function c=%0d", q);
+    tka(q); tka(q); $display("T|automatic task q=%0d", q);
+    q = fna(); q = fna(); $display("T|automatic function c=%0d", q);
+    q = fns(1); q = fns(2); $display("T|static acc=%0d", q);
+    q = fnw(3) + fnw(4); $display("T|written-first t=%0d", q);
+  end
+endmodule
+"#;
+    // Expected values from the reference simulator.
+    let expected = [
+        "T|task static c=2",
+        "T|default task c=2",
+        "T|default function c=6",
+        "T|automatic task q=12",
+        "T|automatic function c=3",
+        "T|static acc=103",
+        "T|written-first t=14",
+        "T|automatic module task c=1",
+    ];
     assert_eq!(t_lines(src), expected);
 }
