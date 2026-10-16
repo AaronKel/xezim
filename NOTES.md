@@ -524,6 +524,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * `%p` prints an unwritten member of a static struct array at its type's
   default (0 for 2-state types and for `T` bound to `int`), including
   `C#(int)::fa` and `N::fa[1]` (§6.8, §21.2.1.7).
+* Variables declared in `initial` and `always` blocks and in static tasks and
+  functions keep their values between activations and calls, per instance and
+  per generate copy. They are initialized once before time 0, and `blk.v`
+  can be read inside an instance (§6.21).
+* `inside` and `case` operands are sized to the widest operand, in procedural
+  code and in constraints (§11.4.13, §12.5).
+* Constraints on variables wider than 64 bits solve sums and differences with
+  constants, and signed wide variables take part in `std::randomize` (§18.5).
+* A failed `std::randomize` leaves its variables unchanged (§18.6.1).
 
 **Performance**
 
