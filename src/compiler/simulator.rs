@@ -63819,11 +63819,21 @@ impl Simulator {
                 } else {
                     self.eval_expr(index)
                 };
+                // §8.10: inside a method a bare property name is the
+                // object's store, keyed in ITS format, even when a package
+                // variable of the same name is registered under the bare name.
                 // §7.8: an ASSOC element key must use the canonical store
                 // format — a STRING key rendered via to_i64 collapsed to its
                 // byte value ("sa[k]" became "sa[107]"), so writes and the
                 // registered read paths disagreed on the element's name.
                 if self.is_associative_array(&base) {
+                    if self.this_stack.last().copied().flatten().is_some()
+                        && let Some(st) = self.instance_assoc_member(&base)
+                        && self.is_associative_array(&st)
+                    {
+                        let key = self.assoc_key_str(&st, &iv);
+                        return Some(format!("{}[{}]", base, key));
+                    }
                     let key = self.assoc_key_str(&base, &iv);
                     let mut out = String::with_capacity(base.len() + key.len() + 2);
                     out.push_str(&base);
@@ -73438,7 +73448,19 @@ impl Simulator {
             let base_flat = match base_flat.rfind('[') {
                 Some(cut) => {
                     let cont = base_flat[..cut].to_string();
-                    if !cont.is_empty()
+                    // §8.10: inside a method a bare property name is the
+                    // object's store even when a package variable of the
+                    // same name is registered under the bare name.
+                    let member_store = (!cont.is_empty()
+                        && (self.module.dynamic_arrays.contains(&cont)
+                            || self.module.arrays.contains_key(&cont)
+                            || self.module.associative_arrays.contains_key(&cont))
+                        && self.this_stack.last().copied().flatten().is_some())
+                    .then(|| self.instance_assoc_member(&cont))
+                    .flatten();
+                    if let Some(sc) = member_store {
+                        format!("{}{}", sc, &base_flat[cut..])
+                    } else if !cont.is_empty()
                         && !self.module.dynamic_arrays.contains(&cont)
                         && !self.module.arrays.contains_key(&cont)
                         && !self.module.associative_arrays.contains_key(&cont)
@@ -125286,7 +125308,16 @@ impl Simulator {
                 || s.module.dynamic_arrays.contains(n)
                 || s.is_associative_array(n)
         };
+        // §8.10: inside a method a bare name that is a collection property
+        // of `this` names the object's store, ahead of a module or package
+        // collection registered under the same bare name.
         if registered(self, name) {
+            if !name.contains('.')
+                && self.this_stack.last().copied().flatten().is_some()
+                && let Some(r) = self.instance_assoc_member(name)
+            {
+                return r;
+            }
             return name.to_string();
         }
         if !name.contains('.') {
