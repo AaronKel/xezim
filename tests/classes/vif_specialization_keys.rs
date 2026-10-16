@@ -261,3 +261,32 @@ fn static_vif_property_shapes() {
         expected
     );
 }
+
+/// §25.9/§25.10/§8.9: an ELEMENT of a vif queue, dynamic or fixed array —
+/// an instance property, a static array or a static queue — assigned to a
+/// `virtual` variable or returned from a static method binds the variable to
+/// that element's interface; `G#(virtual pif)::one.data` reads through the
+/// specialization's static vif. Each assignment used to leave the variable
+/// on its previous interface.
+#[test]
+fn vif_collection_element_shapes() {
+    let expected = [
+        "T|q0|1",
+        "T|q1|2",
+        "T|qf|3 3",
+        "T|qd|1 2",
+        "T|d1|2",
+        "T|f0|2 2",
+        "T|s1|1",
+        "T|s0|2 1 2",
+        "T|sh|1",
+        "T|sg|2",
+        "T|sq|2 2",
+        "T|g1|2",
+        "T|g2|3",
+    ];
+    assert_eq!(
+        t_lines(include_str!("vif_collection_element_shapes.sv")),
+        expected
+    );
+}

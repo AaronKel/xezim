@@ -6538,6 +6538,9 @@ pub struct Simulator {
     /// False once start-up found no such static (`vif_capable_statics`
     /// empty): the one-byte test every blocking assignment makes.
     may_bind_static_vif: bool,
+    /// The names of static fixed arrays of virtual interfaces some class
+    /// declares (§25.10, §8.9): the gate before `static_vif_array_elem`.
+    static_vif_array_names: HashSet<String>,
     /// §13.4/§8.5: the CALL in receiver position of a member/select chain
     /// being evaluated (`me()` in `me().o.x`, `q.pop_front()` in
     /// `q.pop_front().addr`), with its one value: `(node address, call-frame
@@ -12915,6 +12918,7 @@ impl Simulator {
             static_vif_names: HashSet::default(),
             vif_capable_statics: std::cell::OnceCell::new(),
             may_bind_static_vif: true,
+            static_vif_array_names: HashSet::default(),
             recv_call_memo: Vec::new(),
             vif_tokens_stored: false,
             tb_cache: task_suspend::CycleMemo::default(),
@@ -18018,7 +18022,9 @@ impl Simulator {
         self.has_method_cache.borrow_mut().clear();
         self.init_two_state_struct_members();
         self.init_static_struct_holders();
-        self.may_bind_static_vif = !self.vif_capable_static_set().is_empty();
+        self.static_vif_array_names = self.static_vif_array_name_set();
+        self.may_bind_static_vif =
+            !self.vif_capable_static_set().is_empty() || !self.static_vif_array_names.is_empty();
         // LRM §14.3 — populate clocking-block metadata: per-cb clock
         // signal + per-signal direction. `tick_clocking_blocks`
         // consumes this to maintain `clocking_snapshots`.
@@ -131061,6 +131067,98 @@ impl Simulator {
                     if dimensions.is_empty() && cd.type_param_names.contains(&name.name.name))
     }
 
+    /// Every static fixed array of virtual interfaces some class declares.
+    fn static_vif_array_name_set(&self) -> HashSet<String> {
+        self.module
+            .classes
+            .values()
+            .flat_map(|cd| {
+                cd.static_fixed_arrays
+                    .iter()
+                    .filter(|(n, ..)| cd.virtual_iface_properties.contains_key(n))
+                    .map(|(n, ..)| n.clone())
+            })
+            .collect()
+    }
+
+    /// The name an element select `a[i]` / `C::a[i]` / `o.a[i]` selects from.
+    fn selected_leaf(lv: &Expression) -> Option<&str> {
+        match &lv.kind {
+            ExprKind::Ident(h) => h
+                .path
+                .last()
+                .filter(|s| s.selects.len() == 1)
+                .map(|s| s.name.name.as_str()),
+            ExprKind::Index { expr, .. } => match &expr.kind {
+                ExprKind::Ident(h) => h.path.last().map(|s| s.name.name.as_str()),
+                ExprKind::MemberAccess { member, .. } => Some(member.name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Is `lv` one element of a static fixed array of virtual interfaces —
+    /// `Cls::pa[i]`, or `pa[i]` in a method of its class?
+    fn static_vif_array_elem(&self, lv: &Expression) -> bool {
+        // (class scope or None for a bare name, member, select count)
+        let (scope, member, nsel): (Option<&str>, &str, usize) = match &lv.kind {
+            ExprKind::Ident(h) => match h.path.as_slice() {
+                [c, seg] if c.selects.is_empty() => (
+                    Some(c.name.name.as_str()),
+                    seg.name.name.as_str(),
+                    seg.selects.len(),
+                ),
+                [seg] => (None, seg.name.name.as_str(), seg.selects.len()),
+                _ => return false,
+            },
+            ExprKind::Index { expr, .. } => match &expr.kind {
+                ExprKind::Ident(h) => match h.path.as_slice() {
+                    [c, seg] if c.selects.is_empty() && seg.selects.is_empty() => {
+                        (Some(c.name.name.as_str()), seg.name.name.as_str(), 1)
+                    }
+                    [seg] if seg.selects.is_empty() => (None, seg.name.name.as_str(), 1),
+                    _ => return false,
+                },
+                ExprKind::MemberAccess { expr: o, member } => match &o.kind {
+                    ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
+                        (Some(h.path[0].name.name.as_str()), member.name.as_str(), 1)
+                    }
+                    _ => return false,
+                },
+                _ => return false,
+            },
+            _ => return false,
+        };
+        if nsel != 1 {
+            return false;
+        }
+        let cls = match scope {
+            Some(c) if self.module.classes.contains_key(c) => c.to_string(),
+            Some(_) => return false,
+            None => {
+                if self
+                    .local_stack
+                    .last()
+                    .is_some_and(|l| l.contains_key(member))
+                {
+                    return false;
+                }
+                match self.class_context_stack.last() {
+                    Some(Some(c)) => c.clone(),
+                    _ => return false,
+                }
+            }
+        };
+        let Some((decl, _)) = self.class_vif_decl(&cls, member) else {
+            return false;
+        };
+        self.module
+            .classes
+            .get(decl)
+            .is_some_and(|cd| cd.static_fixed_arrays.iter().any(|(n, ..)| n == member))
+    }
+
     /// Could the assignment target `lv` be a static property holding a
     /// virtual interface (see `bind_static_vif`)? A name test only.
     fn static_vif_target_possible(&self, lv: &Expression) -> bool {
@@ -131088,6 +131186,17 @@ impl Simulator {
     #[cold]
     #[inline(never)]
     fn bind_static_vif_slow(&mut self, lvalue: &Expression, rvalue: &Expression) {
+        // §25.10/§8.9: an element of a STATIC fixed array of virtual
+        // interfaces (`S::pa[1] = bus`, `pa[i] = bus` in a static method)
+        // binds in its class cell; the value paths that store the element
+        // run first and never reach the binding.
+        if !self.static_vif_array_names.is_empty()
+            && Self::selected_leaf(lvalue).is_some_and(|n| self.static_vif_array_names.contains(n))
+            && self.static_vif_array_elem(lvalue)
+        {
+            let _ = self.try_bind_virtual_iface(lvalue, rvalue);
+            return;
+        }
         if self.vif_capable_static_set().is_empty() {
             return;
         }
@@ -131458,14 +131567,20 @@ impl Simulator {
                 if handle == 0 {
                     static_scope = self.class_context_stack.last().cloned().flatten();
                 }
-                (handle, h.path[0].name.name.clone())
+                let Some(k) = self.vif_elem_key(&h.path[0]) else {
+                    return false;
+                };
+                (handle, k)
             }
             // `c.vif = bus;` — `c` may be a local, a property of `this` (a
             // method writing `cfg.vif`, e.g. a config_db output actual) or a
-            // module variable.
-            ExprKind::Ident(h) if h.path.len() == 2 => {
+            // module variable. `C::va[i] = bus` / `c.va[i] = bus` bind one
+            // element of a vif array (§25.10).
+            ExprKind::Ident(h) if h.path.len() == 2 && h.path[0].selects.is_empty() => {
                 let obj = h.path[0].name.name.as_str();
-                let prop = h.path[1].name.name.clone();
+                let Some(prop) = self.vif_elem_key(&h.path[1]) else {
+                    return false;
+                };
                 let oh = self.vif_owner_handle(obj);
                 if oh == 0 && self.module.classes.contains_key(obj) {
                     static_scope = Some(obj.to_string());
@@ -131520,7 +131635,13 @@ impl Simulator {
                     } => {
                         let h = match &outer.kind {
                             ExprKind::Ident(h) if h.path.len() == 1 => {
-                                self.vif_owner_handle(&h.path[0].name.name)
+                                let obj = h.path[0].name.name.as_str();
+                                let oh = self.vif_owner_handle(obj);
+                                // §8.9: `Cls::va[i]` — a static vif array.
+                                if oh == 0 && self.module.classes.contains_key(obj) {
+                                    static_scope = Some(obj.to_string());
+                                }
+                                oh
                             }
                             // A nested owner (`a.cfg.vifs[i] = bus`).
                             _ => self.eval_handle_expr(outer).unwrap_or(0),
@@ -131528,18 +131649,26 @@ impl Simulator {
                         (h, member.name.clone())
                     }
                     // Bare `va[i] = bus;` inside a method — `va` is a class
-                    // vif-array property of the implicit `this`. The bare
+                    // vif-array property of the implicit `this` (or, in a
+                    // static method, a static one of the class). The bare
                     // spelling had no arm at all, so a driver binding its own
                     // array never recorded anything.
                     ExprKind::Ident(h) if h.path.len() == 1 => {
                         let hh = self.this_stack.last().copied().flatten().unwrap_or(0);
+                        if hh == 0 {
+                            static_scope = self.class_context_stack.last().cloned().flatten();
+                        }
                         (hh, h.path[0].name.name.clone())
                     }
                     // d.vif_arr in hier-Ident form: Ident([d, vif_arr])
                     ExprKind::Ident(h) if h.path.len() == 2 => {
                         let obj = h.path[0].name.name.as_str();
                         let prop = h.path[1].name.name.clone();
-                        (self.vif_owner_handle(obj), prop)
+                        let oh = self.vif_owner_handle(obj);
+                        if oh == 0 && self.module.classes.contains_key(obj) {
+                            static_scope = Some(obj.to_string());
+                        }
+                        (oh, prop)
                     }
                     // A nested owner in hier-Ident form: `d.cfg.vifs[i]`.
                     ExprKind::Ident(h) if h.path.len() >= 3 => {
@@ -131599,6 +131728,20 @@ impl Simulator {
         true
     }
 
+    /// The binding key of vif property segment `seg`: its name, or
+    /// `name[i]` for one element of a vif array (§25.10). `None` for a
+    /// multi-dimensional select.
+    fn vif_elem_key(&mut self, seg: &crate::ast::expr::HierPathSegment) -> Option<String> {
+        match seg.selects.as_slice() {
+            [] => Some(seg.name.name.clone()),
+            [ix] => {
+                let i = self.eval_expr(ix).to_i64()?;
+                Some(format!("{}[{}]", seg.name.name, i))
+            }
+            _ => None,
+        }
+    }
+
     /// Resolve a virtual-interface RHS expression to the bound interface
     /// instance name (LRM §25.9). A bare/member ident that is itself a bound
     /// virtual interface yields its current target (vif-to-vif copy); a plain
@@ -131607,6 +131750,16 @@ impl Simulator {
 
     fn resolve_vif_rhs_name(&self, rvalue: &Expression) -> Option<String> {
         if let Some(b) = self.static_vif_binding(rvalue) {
+            return Some(b);
+        }
+        // §25.9/§25.10: an ELEMENT of a vif array or collection held by an
+        // object, a class scope or a frame (`o.vq[0]`, `S::pa[1]`, `vq[i]`)
+        // names the instance that element is bound to. The arms below read
+        // such a name with its select dropped, so the element bound nothing
+        // and the target kept its previous interface.
+        if Self::member_chain_has_index(rvalue)
+            && let Some((b, _)) = self.vif_recv_target(rvalue)
+        {
             return Some(b);
         }
         match &rvalue.kind {
@@ -132479,6 +132632,11 @@ impl Simulator {
             self.class_vif_decl(cn, name).map(|_| (cn, th))
         });
         let (coll, modport) = match owner {
+            // §8.9: a static collection of a class scope (`S::pq[0]`).
+            Some((cn, 0)) => {
+                let (_, (_, mp)) = self.class_vif_decl(cn, name)?;
+                (self.spec_static_coll_key_in_class(name, cn), mp.clone())
+            }
             Some((cn, oh)) => {
                 let (_, (_, mp)) = self.class_vif_decl(cn, name)?;
                 (self.handle_collection_name(oh, name)?, mp.clone())
@@ -132513,6 +132671,13 @@ impl Simulator {
                 expr: owner,
                 member,
             } => {
+                // §8.25/§25.9: a static vif of a specialization,
+                // `G#(virtual pif)::one`, binds per specialization.
+                if matches!(owner.kind, ExprKind::Specialization { .. })
+                    && let Some(b) = self.static_vif_binding(recv)
+                {
+                    return Some((b, None));
+                }
                 if !self.vif_prop_name_possible(&member.name) {
                     return None;
                 }
@@ -132862,10 +133027,19 @@ impl Simulator {
                     || self.iface_path_parts().0.contains(member.name.as_str())
             }
             ExprKind::Index { expr: base, .. } => match &base.kind {
-                ExprKind::Ident(h) if h.path.len() == 1 => self
-                    .iface_path_parts()
-                    .1
-                    .contains(h.path[0].name.name.as_str()),
+                ExprKind::Ident(h) if h.path.len() == 1 => {
+                    let n = h.path[0].name.name.as_str();
+                    self.iface_path_parts().1.contains(n)
+                        // §25.10: an element of a vif array / collection
+                        // (`vq[i]`, `pa[i]`).
+                        || self.vif_prop_name_possible(n)
+                        || self.vif_local_names.contains(n)
+                }
+                ExprKind::Ident(h) => h
+                    .path
+                    .last()
+                    .is_some_and(|s| self.vif_prop_name_possible(&s.name.name)),
+                ExprKind::MemberAccess { member, .. } => self.vif_prop_name_possible(&member.name),
                 _ => false,
             },
             _ => false,
@@ -133159,12 +133333,26 @@ impl Simulator {
                         .and_then(|h| self.heap.get(h)?.as_ref())
                         .is_some_and(|i| self.class_vif_decl(&i.class_name, prop).is_some())
             }
-            None => self
-                .module
-                .var_decl_types
-                .get(coll)
-                .is_some_and(|dt| self.is_virtual_iface_type(dt)),
+            None => {
+                self.module
+                    .var_decl_types
+                    .get(coll)
+                    .is_some_and(|dt| self.is_virtual_iface_type(dt))
+                    || self.static_vif_collection(coll)
+            }
         }
+    }
+
+    /// §8.9/§25.9: is `coll` the store of a STATIC collection some class
+    /// declares with virtual-interface elements (`static virtual pif pq[$]`,
+    /// stored bare or as `Cls::pq`)?
+    fn static_vif_collection(&self, coll: &str) -> bool {
+        let leaf = coll.rsplit("::").next().unwrap_or(coll);
+        self.vif_prop_name_possible(leaf)
+            && self.module.classes.values().any(|cd| {
+                cd.virtual_iface_properties.contains_key(leaf)
+                    && cd.static_collections.iter().any(|(n, ..)| n == leaf)
+            })
     }
 
     /// §25.9: does `dt` denote a virtual-interface handle type — `virtual
