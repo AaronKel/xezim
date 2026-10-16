@@ -161,3 +161,5 @@ mod pattern_equality;
 mod compiled_string_queue_element_compare;
 #[path = "collections/package_refs_in_subroutines.rs"]
 mod package_refs_in_subroutines;
+#[path = "collections/nested_assoc_foreach.rs"]
+mod nested_assoc_foreach;

@@ -83661,6 +83661,19 @@ impl Simulator {
                         return;
                     }
                 }
+                // §7.8, §12.7.3: `foreach (m[i, j])` over an associative
+                // array of associative arrays (`int m[int][string]`) walks
+                // each level's own keys. The single-var key scan below
+                // visited the outer keys only and left `j` unset.
+                if vars.len() >= 2 && self.is_assoc_of_assoc(&an) {
+                    self.foreach_assoc_levels(&an, &an, vars, 0, body);
+                    self.auto_loop_vars.truncate(fe_auto_len);
+                    self.restore_loop_vars(&fe_saved);
+                    if !self.return_flag && self.disable_target.is_none() {
+                        self.break_flag = false;
+                    }
+                    return;
+                }
                 if let Some(var) = vars.first().and_then(|v| v.as_ref()) {
                     // A queue / dynamic array carries an authoritative
                     // `<name>.size` shadow and is DENSE: iterate the
@@ -83814,6 +83827,19 @@ impl Simulator {
                 } else if let Some(scoped) = self.instance_assoc_member(&name) {
                     name = std::borrow::Cow::Owned(scoped);
                 }
+            }
+            // §7.8, §12.7.3: a multi-variable `foreach` over an
+            // associative array of associative arrays (see the member arm).
+            if vars.len() >= 2 && self.is_associative_array(&name) && self.is_assoc_of_assoc(&name)
+            {
+                let an = name.into_owned();
+                self.foreach_assoc_levels(&an, &an, vars, 0, body);
+                self.auto_loop_vars.truncate(fe_auto_len);
+                self.restore_loop_vars(&fe_saved);
+                if !self.return_flag && self.disable_target.is_none() {
+                    self.break_flag = false;
+                }
+                return;
             }
             // `foreach (obj.member[i, j])` over a FIXED array
             // property: the hier name resolves under the VARIABLE
@@ -85302,6 +85328,9 @@ impl Simulator {
                         self.module
                             .associative_arrays
                             .insert(name.clone(), is_string_key);
+                        if let Some(lv) = super::elaborate::assoc_inner_string_levels(dims) {
+                            self.module.assoc_inner_string_keys.insert(name.clone(), lv);
+                        }
                         self.widths.insert(name.clone(), w);
                         // §7.8.2 / §7.9: the key's width and signedness, as
                         // elaboration records them for a module-scope array.
@@ -107565,6 +107594,146 @@ impl Simulator {
     /// index properly SHADOWS any same-named outer local or class member —
     /// otherwise a stale local (e.g. `i` left at its final value by a prior
     /// `for` loop) would mask the loop variable on every read.
+    /// Is `an` an associative array whose elements are themselves
+    /// associative arrays: entries `an[k1][k2]...` with no queue/dynamic
+    /// `.size` shadow on `an[k1]`.
+    fn is_assoc_of_assoc(&self, an: &str) -> bool {
+        let akeys = self.assoc_top_level_keys(an);
+        !akeys.is_empty()
+            && akeys.iter().all(|k| {
+                let inner = format!("{}[{}]", an, k);
+                !self.module.dynamic_arrays.contains(&inner)
+                    && !self.signals.contains_key(&format!("{}.size", inner))
+                    && !self.assoc_top_level_keys(&inner).is_empty()
+            })
+    }
+
+    /// One level of a multi-variable `foreach` over nested associative
+    /// arrays: bind `vars[level]` to each key of `prefix` and descend, or run
+    /// the body at the last variable (§12.7.3). The outer level takes the
+    /// declared index type; an inner level is string-keyed when any of its
+    /// keys is not a number. Returns false once the loop is broken.
+    fn foreach_assoc_levels(
+        &mut self,
+        root: &str,
+        prefix: &str,
+        vars: &[Option<crate::ast::Identifier>],
+        level: usize,
+        body: &Statement,
+    ) -> bool {
+        let keys = self.assoc_top_level_keys(prefix);
+        // An inner level's declared key type, when known: a string key
+        // stored by value is turned back into its text (§7.8.1).
+        let declared_str = (level > 0)
+            .then(|| {
+                let lv = self.module.assoc_inner_string_keys.get(root).or_else(|| {
+                    let leaf = root.rsplit("::").next()?;
+                    self.module.assoc_inner_string_keys.get(leaf)
+                })?;
+                lv.get(level - 1).copied()
+            })
+            .flatten();
+        let (is_str, kw, ksign) = if level == 0 {
+            let is_str = self
+                .module
+                .associative_arrays
+                .get(prefix)
+                .copied()
+                .unwrap_or(false)
+                || self.is_string_keyed_array(prefix);
+            let (kw, ks) = self.assoc_index_width_for(prefix).unwrap_or((32, true));
+            (is_str, kw, ks)
+        } else {
+            (
+                declared_str.unwrap_or_else(|| keys.iter().any(|k| k.parse::<i128>().is_err())),
+                32,
+                true,
+            )
+        };
+        // A string key variable renders as a string (§7.8.1).
+        let str_var = vars[level]
+            .as_ref()
+            .filter(|_| is_str)
+            .map(|v| v.name.clone())
+            .filter(|n| self.string_signals.insert(n.clone()));
+        let done =
+            self.foreach_assoc_level_keys(root, prefix, keys, vars, level, body, is_str, kw, ksign);
+        if let Some(n) = str_var {
+            self.string_signals.remove(&n);
+        }
+        done
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn foreach_assoc_level_keys(
+        &mut self,
+        root: &str,
+        prefix: &str,
+        keys: Vec<String>,
+        vars: &[Option<crate::ast::Identifier>],
+        level: usize,
+        body: &Statement,
+        is_str: bool,
+        kw: u32,
+        ksign: bool,
+    ) -> bool {
+        for key in keys {
+            if self.finished {
+                return false;
+            }
+            if let Some(v) = vars[level].as_ref() {
+                // An inner level's keys are stored the way its parent
+                // element is keyed: as text under a string-keyed parent
+                // (an int key 2 is the character 0x02), else by value (a
+                // string key "ab" is the number 0x6162).
+                let as_text = level > 0
+                    && (self.is_string_keyed_array(prefix)
+                        || self.is_string_keyed_array(root)
+                        || (!is_str && key.parse::<i128>().is_err()));
+                let kv = if is_str {
+                    match key.parse::<u128>() {
+                        Ok(n) if level > 0 && !as_text => {
+                            let b = n.to_be_bytes();
+                            let first = b.iter().position(|&c| c != 0).unwrap_or(b.len());
+                            Value::from_string(&String::from_utf8_lossy(&b[first..]))
+                        }
+                        _ => Value::from_string(&key),
+                    }
+                } else if as_text {
+                    let mut v = Value::from_string(&key).resize(kw);
+                    v.is_signed = ksign;
+                    v
+                } else if kw > 64 {
+                    Value::from_str_radix(&key, 16, kw)
+                } else {
+                    let mut v = Value::from_u64(key.parse::<i64>().unwrap_or(0) as u64, kw);
+                    v.is_signed = ksign;
+                    v
+                };
+                if is_str {
+                    self.widths.remove(&v.name);
+                } else {
+                    self.widths.insert(v.name.clone(), kw);
+                }
+                self.set_loop_var(&v.name, kv);
+            }
+            if level + 1 < vars.len() {
+                let inner = format!("{}[{}]", prefix, key);
+                if !self.foreach_assoc_levels(root, &inner, vars, level + 1, body) {
+                    return false;
+                }
+            } else {
+                self.continue_flag = false;
+                self.exec_statement(body);
+                if self.break_flag {
+                    return false;
+                }
+                self.continue_flag = false;
+            }
+        }
+        true
+    }
+
     fn set_loop_var(&mut self, name: &str, v: Value) {
         if let Some(frame) = self.local_stack.last_mut() {
             frame.insert(name.to_string(), v);
