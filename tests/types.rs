@@ -424,6 +424,8 @@ mod queue_literal_function_return;
 mod real_to_int_wraps;
 #[path = "types/real_to_integral_local.rs"]
 mod real_to_integral_local;
+#[path = "types/rtoi_out_of_range.rs"]
+mod rtoi_out_of_range;
 #[path = "types/ref_formal_element_write.rs"]
 mod ref_formal_element_write;
 #[path = "types/select_label_mapping.rs"]

@@ -72548,15 +72548,14 @@ impl Simulator {
                 Value::from_f64(v.to_i64().unwrap_or(0) as f64)
             }
             "$rtoi" => {
-                // §20.4: returns `integer` (a SIGNED 32-bit type). Mark the
-                // result signed so %d prints e.g. -3, not 4294967293.
+                // §20.5: returns `integer` (a SIGNED 32-bit type), so %d
+                // prints e.g. -3, not 4294967293; out of the 64-bit range it
+                // is 0 (see `Value::rtoi`).
                 let v = args
                     .first()
                     .map(|a| self.eval_expr(a))
                     .unwrap_or(Value::zero(64));
-                let mut r = Self::real_trunc_to_int(v.to_f64(), 32);
-                r.is_signed = true;
-                r
+                Value::rtoi(v.to_f64())
             }
             "$ceil" => {
                 let v = args
@@ -142836,14 +142835,6 @@ impl Simulator {
             Some(&self.module.parameters),
             Some(&self.module.typedefs),
         )
-    }
-
-    /// `$rtoi` TRUNCATES toward zero rather than rounding (§20.5).
-    fn real_trunc_to_int(f: f64, width: u32) -> Value {
-        if !f.is_finite() {
-            return Value::zero(width.max(1));
-        }
-        Value::from_u64(f.trunc() as i64 as u64, width.max(1))
     }
 
     /// Bind an ASSOCIATIVE-array actual to a formal: copy the caller's entries to
