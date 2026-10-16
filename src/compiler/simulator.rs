@@ -144762,6 +144762,7 @@ impl Simulator {
             self.vif_formals_enter(&vif_formals)
         };
         let mut array_writebacks: Vec<(String, String, i64, i64)> = Vec::new();
+        let mut array_inputs: Vec<(String, String, i64, i64)> = Vec::new();
         let mut assoc_params: Vec<(String, String, bool, Option<bool>)> = Vec::new();
         let mut queue_writebacks: Vec<(String, String)> = Vec::new();
         // `output`/`inout`/`ref` STRUCT formals are bound member-wise (locals
@@ -144852,9 +144853,18 @@ impl Simulator {
             // Unpacked ARRAY formal: functions never bound one, so the body read
             // X and a `ref` write never reached the caller (§13.5.2).
             if i < args.len() {
+                let prior = self.module.arrays.contains_key(&port.name.name)
+                    || self.module.arrays_2d.contains_key(&port.name.name)
+                    || self.module.arrays_nd.contains_key(&port.name.name);
                 if let Some(info) = self.bind_array_arg(port, &args[i]) {
                     if is_out {
                         array_writebacks.push(info);
+                    } else if !prior {
+                        // An INPUT array formal is dropped on return too: left
+                        // registered, a later call whose same-named formal
+                        // took the scalar path found it and behaved
+                        // differently (#327's "warming").
+                        array_inputs.push(info);
                     }
                     continue;
                 }
@@ -145454,6 +145464,7 @@ impl Simulator {
         }
         self.writeback_array_args(&array_writebacks);
         self.purge_array_formals(&array_writebacks);
+        self.purge_array_formals(&array_inputs);
         for (tmp, caller) in staged_wb {
             self.writeback_queue_param(&tmp, &caller);
             self.drop_staged_queue(&tmp);
@@ -164821,6 +164832,7 @@ impl Simulator {
                 };
                 let mut queue_writebacks: Vec<(String, String)> = Vec::new();
                 let mut array_writebacks: Vec<(String, String, i64, i64)> = Vec::new();
+                let mut array_inputs: Vec<(String, String, i64, i64)> = Vec::new();
                 let mut assoc_params: Vec<(String, String, bool, Option<bool>)> = Vec::new();
                 // Member-wise struct `output`/`inout`/`ref` formals bypass the
                 // whole-value `output_bindings` path (see exec_function_call).
@@ -164997,12 +165009,19 @@ impl Simulator {
                         // one; a class method bound it as a scalar, so the
                         // body read X and a user function taking an array —
                         // legal in a constraint — always returned 0.
+                        let prior = self.module.arrays.contains_key(&port.name.name)
+                            || self.module.arrays_2d.contains_key(&port.name.name)
+                            || self.module.arrays_nd.contains_key(&port.name.name);
                         if let Some(info) = self.bind_array_arg(port, &args[i]) {
                             if matches!(
                                 port.direction,
                                 PortDirection::Output | PortDirection::Inout | PortDirection::Ref
                             ) {
                                 array_writebacks.push(info);
+                            } else if !prior {
+                                // An input array formal is dropped on return
+                                // too (#327's "warming"; see the function path).
+                                array_inputs.push(info);
                             }
                             continue;
                         }
@@ -165848,6 +165867,9 @@ impl Simulator {
                 if !array_writebacks.is_empty() {
                     self.writeback_array_args(&array_writebacks);
                     self.purge_array_formals(&array_writebacks);
+                }
+                if !array_inputs.is_empty() {
+                    self.purge_array_formals(&array_inputs);
                 }
                 let outs: Vec<&str> = writebacks.iter().map(|(pn, _, _)| pn.as_str()).collect();
                 let vif_ended = if !vif_fast {
