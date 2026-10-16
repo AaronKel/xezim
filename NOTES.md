@@ -533,6 +533,25 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Constraints on variables wider than 64 bits solve sums and differences with
   constants, and signed wide variables take part in `std::randomize` (§18.5).
 * A failed `std::randomize` leaves its variables unchanged (§18.6.1).
+* An omitted argument binds its formal's default as an aggregate: a fixed
+  array, dynamic array, queue or associative array default no longer turns
+  into one packed value. `output` and `inout` formals may have a default
+  (1800-2023 §13.5.3), and the formal is copied back to it. An earlier call
+  with an array argument no longer changes how a later call behaves.
+  (#327, reported by Dragon-Git)
+* An associative array of associative arrays under a fixed, dynamic or queue
+  dimension (`int v[2][string][string]`) works in modules, classes, automatic
+  locals and struct members, including `exists`, `size`, `num` and `foreach`,
+  and automatic locals that are fixed arrays of queues or associative arrays
+  work (§7.4.5, §7.8.1). (#328, reported by Dragon-Git)
+* A whole associative array assigned to or from a class property, or pushed,
+  inserted, concatenated or popped as a queue element, keeps its entries
+  (§7.9.9, §7.10). (#331, reported by Dragon-Git)
+* `$rtoi` of a real outside the 64-bit range returns 0, and a real assigned to
+  a wide integral variable or an integral parameter wraps to the target width
+  (§20.5, §6.12.2).
+* `vpi_user.h` declares the `s_vpi_vecval` words `PLI_UINT32`, as the
+  standard's header does (§38.15).
 
 **Performance**
 
