@@ -469,6 +469,20 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Static structs of a parameterized class can be written and read from module
   code through `C#(args)::` or a typedef of the specialization, and print with
   `%p` from a static method (§8.25).
+* `%m` keeps the names of nested named blocks and named forks after the process
+  waits inside them, and in fork children (§21.2.1.7).
+* `@(cb.sig)` on a clocking block declared in an interface or module instance
+  fires on the block's samples, including the first (§14.13).
+* Program-block processes resume in the Reactive region, after the time slot's
+  nonblocking updates and clocking events (§24.3).
+* `assign arr = '{...}` drives each element of an unpacked array, including
+  descending, `default:`, replicated, keyed and nested 2-D patterns, and a
+  whole-array continuous copy between opposite directions pairs elements left
+  to right (§10.9).
+* Class-property arrays with a descending range (`int ds[3:1]`) keep their
+  direction in assignment patterns, `%p`, `foreach` and
+  `$left`/`$right`/`$increment`, and `$left(m[0])` describes the selected row
+  (§7.4.2, §20.7).
 
 **Performance**
 
