@@ -11204,12 +11204,30 @@ impl<'a> BytecodeCompiler<'a> {
             StatementKind::Case {
                 kind, expr, items, ..
             } => {
+                // §12.5: the selector and the items are sized to the widest
+                // of them. An operation selector (`a8 + 8'd1`) narrower than
+                // an item is computed at that width, in the compare chain.
+                let sel_w = if matches!(
+                    expr.kind,
+                    ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Conditional { .. }
+                ) {
+                    let own = self.lrm_self_width(expr);
+                    let mut w = own;
+                    for p in items.iter().flat_map(|it| it.patterns.iter()) {
+                        if !matches!(p.kind, ExprKind::Range(..)) {
+                            w = w.max(self.lrm_self_width(p));
+                        }
+                    }
+                    (w > own).then_some(w)
+                } else {
+                    None
+                };
                 // ROM shape: plain `case` whose every arm assigns a CONSTANT
                 // to the SAME variable, constant patterns throughout. One
                 // table lookup replaces the whole compare chain. `===`
                 // semantics hold exactly: the patterns are fully defined, so
                 // a selector with any x/z bit matches none of them → default.
-                if matches!(kind, crate::ast::stmt::CaseKind::Case) {
+                if sel_w.is_none() && matches!(kind, crate::ast::stmt::CaseKind::Case) {
                     if let Some((lhs, table, default, res_w)) = self.case_lut_shape(items) {
                         if let Some(sel) = self.compile_expr(expr, 0) {
                             let dst = self.alloc_reg();
@@ -11228,14 +11246,16 @@ impl<'a> BytecodeCompiler<'a> {
                         return true;
                     }
                 }
-                if matches!(
-                    kind,
-                    crate::ast::stmt::CaseKind::Casez | crate::ast::stmt::CaseKind::Casex
-                ) && self.compile_case_mask_jump(kind, expr, items)
+                if sel_w.is_none()
+                    && matches!(
+                        kind,
+                        crate::ast::stmt::CaseKind::Casez | crate::ast::stmt::CaseKind::Casex
+                    )
+                    && self.compile_case_mask_jump(kind, expr, items)
                 {
                     return true;
                 }
-                if let Some(val_reg) = self.compile_expr(expr, 0) {
+                if let Some(val_reg) = self.compile_expr(expr, sel_w.unwrap_or(0)) {
                     let mut end_jumps: Vec<usize> = Vec::new();
                     let mut default_item: Option<&Statement> = None;
                     // Every pattern arm is mutually exclusive and jumps to the

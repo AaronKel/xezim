@@ -305,10 +305,9 @@ endmodule
     assert_eq!(t_lines(src), expected);
 }
 
-/// Pinned: §11.4.13 evaluates `inside` like `==`, at the width of all
-/// operands; xezim evaluates the left operand self-determined.
+/// §11.4.13 evaluates `inside` like `==`, at the width of all operands
+/// (procedural and constraint).
 #[test]
-#[ignore = "inside evaluates its left operand at its own width, not the width of all operands (procedural and constraint)"]
 fn inside_operands_take_the_widest_operand_width() {
     let src = r#"module top;
   bit [7:0] a8;
@@ -350,5 +349,89 @@ endmodule
 "#;
     // Expected values from the reference simulator.
     let expected = ["T|R6 ok=0 a8=255", "T|R7 ok=0 a8=7"];
+    assert_eq!(t_lines(src), expected);
+}
+
+/// §11.4.13/§12.5: `inside` and `case` operands at the width of all
+/// operands — signedness, unpacked-array and wildcard items, `$` bounds,
+/// case/casez/case-inside selectors, constraints and `always_comb`.
+#[test]
+fn inside_and_case_operand_width_neighbours() {
+    let src = r#"// `inside` and `case` operands at the width of all operands: signedness,
+// unpacked-array items, wildcard items, `$` bounds, case/casez selectors.
+module top;
+  bit [7:0] a8;
+  byte b;
+  bit [3:0] n4;
+  logic [3:0] l4;
+  int q[$];
+  bit [8:0] arr9 [2];
+  shortint sh;
+  int ok, r, r7;
+  initial begin
+    a8 = 255; b = -1; n4 = 4'hf; l4 = 4'b1010; q = '{256, 3}; arr9 = '{9'd256, 9'd1}; sh = -1;
+    $display("T|S1 %0d %0d %0d", b inside {8'd255}, b inside {8'd255, 300}, b inside {-1});
+    $display("T|S2 %0d %0d", b inside {[-1:300]}, b inside {[8'd0:8'd255]});
+    $display("T|S3 %0d %0d", a8 inside {-1}, a8 inside {[-1:-1]});
+    $display("T|S4 %0d %0d %0d", (n4 + 4'd1) inside {arr9}, (a8 + 8'd1) inside {arr9}, (a8 + 8'd1) inside {q});
+    $display("T|S5 %0d %0d", (n4 + 4'd1) inside {5'b1_0000}, (n4 + 4'd1) inside {5'b1_xxxx});
+    $display("T|S6 %0d %0d", (n4 + 4'd1) inside {[$:16]}, (n4 + 4'd1) inside {[17:$]});
+    $display("T|S7 %0d %0d", sh inside {16'hffff}, sh inside {[32'hffff:32'hffff]});
+    $display("T|S8 %0d %0d", (a8 << 1) inside {[510:510]}, (b - 8'sd1) inside {[-2:-2]});
+    case (a8 + 8'd1)
+      256: $display("T|K1 256");
+      default: $display("T|K1 def");
+    endcase
+    casez (n4 + 4'd1)
+      5'b1????: $display("T|K2 hi");
+      default: $display("T|K2 def");
+    endcase
+    case (a8 + 8'd1) inside
+      256: $display("T|K3 256");
+      default: $display("T|K3 def");
+    endcase
+    case (a8 + 8'd1) inside
+      [9'd256:9'd256]: $display("T|K4 256");
+      default: $display("T|K4 def");
+    endcase
+    ok = std::randomize(b) with { b inside {8'd255}; };
+    $display("T|R1 ok=%0d b=%0d", ok, b);
+    ok = std::randomize(n4) with { n4 + 4'd1 inside {arr9}; };
+    $display("T|R2 ok=%0d n4=%0d", ok, n4);
+    ok = std::randomize(a8) with { a8 + 8'd2 inside {[257:257]}; };
+    $display("T|R3 ok=%0d a8=%0d", ok, a8);
+    ok = std::randomize(sh) with { sh inside {[32'hffff:32'hffff]}; };
+    $display("T|R4 ok=%0d", ok);
+    ok = std::randomize(a8) with { (a8 << 1) inside {[510:510]}; };
+    $display("T|R5 ok=%0d a8=%0d", ok, a8);
+    ok = std::randomize(a8) with { !((a8 + 8'd1) inside {[1:256]}); };
+    $display("T|R6 ok=%0d", ok);
+    #1 $display("T|C r7=%0d a8=%0d", r7, a8);
+  end
+  always_comb r7 = (a8 + 8'd1) inside {[256:256]} ? 7 : 8;
+endmodule
+"#;
+    // Expected values from the reference simulator.
+    let expected = [
+        "T|S1 1 1 1",
+        "T|S2 1 1",
+        "T|S3 0 0",
+        "T|S4 0 1 1",
+        "T|S5 1 1",
+        "T|S6 1 0",
+        "T|S7 1 1",
+        "T|S8 1 1",
+        "T|K1 256",
+        "T|K2 hi",
+        "T|K3 256",
+        "T|K4 def",
+        "T|R1 ok=1 b=-1",
+        "T|R2 ok=1 n4=0",
+        "T|R3 ok=1 a8=255",
+        "T|R4 ok=0",
+        "T|R5 ok=1 a8=255",
+        "T|R6 ok=0",
+        "T|C r7=7 a8=255",
+    ];
     assert_eq!(t_lines(src), expected);
 }

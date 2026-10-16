@@ -5392,6 +5392,22 @@ impl Simulator {
             return self.csp_eval_node(csp, whole, env, neg);
         };
         let (w, s) = Self::csp_ws(&a);
+        // §11.4.13: the operand and the items are compared like `==`, at the
+        // width of all of them and unsigned unless all are signed: `a8 +
+        // 8'd1 inside {[256:256]}` adds at 32 bits.
+        let frame = self.csp_frame(&env.binds);
+        self.push_local_frame(frame);
+        let joint = self.inside_items_ws(ranges);
+        self.pop_local_frame();
+        let Some((iw, is)) = joint else {
+            return self.csp_eval_node(csp, whole, env, neg);
+        };
+        // A signed operand against an unsigned item: the comparison is
+        // unsigned, of the operand extended by its own sign (as
+        // `value_in_ranges` judges it). Keep the operand signed and map the
+        // items' unsigned bit patterns to the signed values they are.
+        let mixed = s && !is;
+        let (w, s) = (w.max(iw), s && (is || mixed));
         let mut fits = Vec::new();
         let mut cx = LinCx::new(csp);
         let lin = if w <= 64 {
@@ -5406,8 +5422,25 @@ impl Simulator {
         self.csp_add_carries(csp, carries);
         let frame = self.csp_frame(&env.binds);
         self.push_local_frame(frame);
-        let set = dom_norm(self.cons_ranges_i128_at(ranges, w));
+        let mut set = dom_norm(self.cons_ranges_i128_at(ranges, w));
         self.pop_local_frame();
+        if mixed {
+            let half = 1i128 << (w - 1);
+            let mut signed = Vec::with_capacity(set.len() + 1);
+            for &(l, h) in set.iter() {
+                let (l, h) = (Self::bits_at(l, w) as i128, Self::bits_at(h, w) as i128);
+                if l > h {
+                    continue;
+                }
+                if l < half {
+                    signed.push((l, h.min(half - 1)));
+                }
+                if h >= half {
+                    signed.push((l.max(half) - (half << 1), h - (half << 1)));
+                }
+            }
+            set = dom_norm(signed);
+        }
         // A negative endpoint makes the checker read an unsigned value as
         // signed; leave that reading to the checker itself.
         if !s && set.iter().any(|r| r.0 < 0) {
@@ -5441,6 +5474,41 @@ impl Simulator {
                 sg: 1,
             }),
         })
+    }
+
+    /// The joint (width, signed) of an `inside` set's items (§11.4.13): the
+    /// widest item, signed only when every item is. A `$` bound counts as
+    /// neither; an unpacked-array item counts its elements. None when an
+    /// item cannot be sized exactly.
+    pub(super) fn inside_items_ws(&mut self, ranges: &[ConstraintRange]) -> Option<(u32, bool)> {
+        let (mut w, mut s) = (1u32, true);
+        let mut one = |me: &mut Self, e: &Expression, item: bool| -> Option<()> {
+            if matches!(e.kind, ExprKind::Dollar) {
+                return Some(());
+            }
+            if item && let Some(nm) = me.array_operand_name(e) {
+                for i in 0..me.get_queue_size(&nm) {
+                    let ev = me.get_signal_value_by_name(&format!("{}[{}]", nm, i))?;
+                    w = w.max(ev.width);
+                    s &= ev.is_signed;
+                }
+                return Some(());
+            }
+            let (_, ew, es) = me.exact_int(e)?;
+            w = w.max(ew);
+            s &= es;
+            Some(())
+        };
+        for r in ranges {
+            match r {
+                ConstraintRange::Value(e) => one(self, e, true)?,
+                ConstraintRange::Range { lo, hi } => {
+                    one(self, lo, false)?;
+                    one(self, hi, false)?;
+                }
+            }
+        }
+        Some((w, s))
     }
 
     /// The object's own member named by `e` (`x`, `this.x`, `obj.x` for the

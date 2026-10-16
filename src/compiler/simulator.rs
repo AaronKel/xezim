@@ -54368,7 +54368,7 @@ impl Simulator {
                 // owns the §12.5.3 unique/unique0/priority violation checks,
                 // so only intercept when some arm can actually suspend.
                 if !items.iter().any(|i| i.pattern.is_some()) && self.stmt_is_blocking(stmt) {
-                    let val = self.eval_expr(expr);
+                    let val = self.case_selector_value(kind, expr, items);
                     let chosen: Option<&Statement> = items
                         .iter()
                         .find_map(|item| {
@@ -78896,16 +78896,27 @@ impl Simulator {
                 if ok { Value::ones(1) } else { Value::zero(1) }
             }
             ExprKind::Inside { expr, ranges } => {
-                let val = self.eval_expr(expr);
+                // §11.4.13: the operands are compared like `==`, at the width
+                // of ALL of them, so `(a8 + 8'd1) inside {256}` adds at 32
+                // bits (256), not at the 8 bits of `a8`.
+                let jw = self.inside_joint_width(expr, ranges);
+                let val = match jw {
+                    Some(w) => self.eval_expr_ctx(expr, w),
+                    None => self.eval_expr(expr),
+                };
+                let item = |me: &mut Self, e: &Expression| match jw {
+                    Some(w) => me.eval_expr_ctx(e, w),
+                    None => me.eval_expr(e),
+                };
                 for r in ranges {
                     match &r.kind {
                         ExprKind::Range(lo, hi) => {
                             // §11.4.13: `$` bound = type extreme (see
                             // case_inside_match).
                             let lo_ok = matches!(lo.kind, ExprKind::Dollar)
-                                || val.greater_equal(&self.eval_expr(lo)).is_true();
+                                || val.greater_equal(&item(self, lo)).is_true();
                             let hi_ok = matches!(hi.kind, ExprKind::Dollar)
-                                || val.less_equal(&self.eval_expr(hi)).is_true();
+                                || val.less_equal(&item(self, hi)).is_true();
                             if lo_ok && hi_ok {
                                 return Value::from_u64(1, 1);
                             }
@@ -78931,7 +78942,7 @@ impl Simulator {
                             // tested expression using WILDCARD equality, so x/z
                             // bits in the element are don't-cares — exactly what
                             // `==?` does. Plain `==` missed `v inside {4'b10xx}`.
-                            let ev = self.eval_expr(r);
+                            let ev = item(self, r);
                             if val.wildcard_eq(&ev).is_true() {
                                 return Value::from_u64(1, 1);
                             }
@@ -86814,7 +86825,7 @@ impl Simulator {
                     self.exec_case_matches(expr, items);
                     return;
                 }
-                let val = self.eval_expr(expr);
+                let val = self.case_selector_value(kind, expr, items);
                 // SV-2023: under unique/unique0/priority, pre-pass the items
                 // and emit a violation message if multiple match or (for
                 // unique/priority) none match without a default.
@@ -101126,6 +101137,120 @@ impl Simulator {
                     .max(self.lrm_self_width(else_expr)?),
             ),
             _ => None,
+        }
+    }
+
+    /// §11.4.13: `expr inside {items}` compares like `==`, so every operand
+    /// is sized to the widest of them all. Returns that width when it exceeds
+    /// the tested expression's own (None: evaluate as before — a string or
+    /// real operand, an operand the LRM width rules cannot size without
+    /// evaluating it, or nothing wider). An unpacked-array item contributes
+    /// its element width; a `$` bound contributes nothing.
+    fn inside_joint_width(&mut self, expr: &Expression, items: &[Expression]) -> Option<u32> {
+        let mut bounds: Vec<(&Expression, bool)> = Vec::with_capacity(items.len());
+        for it in items {
+            match &it.kind {
+                ExprKind::Range(lo, hi) => {
+                    bounds.push((lo, false));
+                    bounds.push((hi, false));
+                }
+                _ => bounds.push((it, true)),
+            }
+        }
+        self.inside_joint_width_of(expr, &bounds)
+    }
+
+    /// `inside_joint_width` for a constraint's range list.
+    fn inside_joint_width_cr(
+        &mut self,
+        expr: &Expression,
+        ranges: &[ConstraintRange],
+    ) -> Option<u32> {
+        let mut bounds: Vec<(&Expression, bool)> = Vec::with_capacity(ranges.len());
+        for r in ranges {
+            match r {
+                ConstraintRange::Range { lo, hi } => {
+                    bounds.push((lo, false));
+                    bounds.push((hi, false));
+                }
+                ConstraintRange::Value(e) => bounds.push((e, true)),
+            }
+        }
+        self.inside_joint_width_of(expr, &bounds)
+    }
+
+    /// The joint width of `expr` and `bounds` (each flagged when it is a
+    /// whole set item, which may name an unpacked array).
+    fn inside_joint_width_of(
+        &mut self,
+        expr: &Expression,
+        bounds: &[(&Expression, bool)],
+    ) -> Option<u32> {
+        // Only an operation's result depends on the width it is computed
+        // at; a variable or literal compares the same either way.
+        if !matches!(
+            Self::unparen(expr).kind,
+            ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Conditional { .. }
+        ) || self.operand_is_string(expr)
+        {
+            return None;
+        }
+        let own = self.lrm_self_width(expr)?;
+        if own == 64 {
+            // possibly real (§11.8.2): leave it to the per-item compare
+            return None;
+        }
+        let mut w = own;
+        for &(b, item) in bounds {
+            if matches!(b.kind, ExprKind::Dollar) {
+                continue;
+            }
+            if item && let Some(nm) = self.array_operand_name(b) {
+                if self.get_queue_size(&nm) > 0 {
+                    let ev = self.get_signal_value_by_name(&format!("{}[0]", nm))?;
+                    if ev.is_real {
+                        return None;
+                    }
+                    w = w.max(ev.width);
+                }
+                continue;
+            }
+            if self.operand_is_string(b) {
+                return None;
+            }
+            w = w.max(self.lrm_self_width(b)?);
+        }
+        (w > own).then_some(w)
+    }
+
+    /// §12.5: a case expression and its item expressions are sized to the
+    /// widest of them, so the selector is evaluated at that width: `case
+    /// (a8 + 8'd1) 256: ...` adds at 32 bits. A `case inside` selector is
+    /// sized by its value items only — the reference simulator does not
+    /// widen it for a range item.
+    fn case_selector_value(
+        &mut self,
+        kind: &CaseKind,
+        expr: &Expression,
+        items: &[crate::ast::stmt::CaseItem],
+    ) -> Value {
+        if !matches!(
+            Self::unparen(expr).kind,
+            ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Conditional { .. }
+        ) {
+            return self.eval_expr(expr);
+        }
+        let inside = matches!(kind, CaseKind::CaseInside);
+        let bounds: Vec<(&Expression, bool)> = items
+            .iter()
+            .filter(|it| !it.is_default)
+            .flat_map(|it| it.patterns.iter())
+            .filter(|p| !matches!(p.kind, ExprKind::Range(..)))
+            .map(|p| (p, inside))
+            .collect();
+        match self.inside_joint_width_of(expr, &bounds) {
+            Some(w) => self.eval_expr_ctx(expr, w),
+            None => self.eval_expr(expr),
         }
     }
 
@@ -159154,7 +159279,26 @@ impl Simulator {
     /// `-2147483648` (the negation of a 32-bit -2^31) read +2^31 and
     /// `[-2147483648:10]` was an empty range.
     fn cons_ranges_i128_at(&mut self, ranges: &[ConstraintRange], ctx_w: u32) -> Vec<(i128, i128)> {
+        self.cons_ranges_i128_ws(ranges, ctx_w).0
+    }
+
+    /// `cons_ranges_i128_at`, also giving the items' joint (width, signed)
+    /// (§11.4.13: the widest item; signed only when every item is), or None
+    /// for that when an item could not be read exactly.
+    #[allow(clippy::type_complexity)]
+    fn cons_ranges_i128_ws(
+        &mut self,
+        ranges: &[ConstraintRange],
+        ctx_w: u32,
+    ) -> (Vec<(i128, i128)>, Option<(u32, bool)>) {
         let mut out: Vec<(i128, i128)> = Vec::new();
+        let mut ws: Option<(u32, bool)> = Some((1, true));
+        let mut note = |ws: &mut Option<(u32, bool)>, w: u32, s: bool| {
+            if let Some((aw, as_)) = ws {
+                *aw = (*aw).max(w);
+                *as_ &= s;
+            }
+        };
         let at = |x: (i128, u32, bool)| -> i128 {
             let w = x.1.max(ctx_w);
             if w == 0 || w > 64 {
@@ -159173,6 +159317,7 @@ impl Simulator {
                                 self.get_signal_value_by_name(&format!("{}[{}]", nm, i))
                             {
                                 if let Some(v) = ev.to_u64() {
+                                    note(&mut ws, ev.width, ev.is_signed);
                                     let x = Self::as_ctx(v as i128, ev.width, ev.is_signed);
                                     out.push((x, x));
                                 }
@@ -159180,15 +159325,25 @@ impl Simulator {
                         }
                         continue;
                     }
-                    if let Some(x) = self.exact_int(e) {
-                        let v = at(x);
-                        out.push((v, v));
+                    match self.exact_int(e) {
+                        Some(x) => {
+                            note(&mut ws, x.1, x.2);
+                            let v = at(x);
+                            out.push((v, v));
+                        }
+                        None => ws = None,
                     }
                 }
                 ConstraintRange::Range { lo, hi } => {
                     let (Some(lx), Some(hx)) = (self.exact_int(lo), self.exact_int(hi)) else {
+                        ws = None;
                         continue;
                     };
+                    for (b, x) in [(lo, lx), (hi, hx)] {
+                        if !matches!(b.kind, ExprKind::Dollar) {
+                            note(&mut ws, x.1, x.2);
+                        }
+                    }
                     let l = if matches!(lo.kind, ExprKind::Dollar) {
                         lx.0
                     } else {
@@ -159212,17 +159367,32 @@ impl Simulator {
                 }
             }
         }
-        out
+        (out, ws)
     }
 
     /// Exact-signed membership test used by every `inside`/`dist` solve path.
     fn value_in_ranges(&mut self, val: &Value, ranges: &[ConstraintRange]) -> bool {
-        let rs = self.cons_ranges_i128_at(ranges, val.width);
+        let (rs, items_ws) = self.cons_ranges_i128_ws(ranges, val.width);
         let Some(raw) = val.to_u64() else {
             return false;
         };
         if val.has_xz() {
             return false;
+        }
+        // §11.4.13/§11.8.1: a signed value against an unsigned item is
+        // compared unsigned, at the width of all operands. The reference
+        // simulator's solver extends the value by its own sign first, then
+        // compares the bits: `byte b inside {8'd255}` holds for -1, and
+        // `shortint s inside {32'hffff}` holds for no value.
+        if val.is_signed
+            && let Some((iw, false)) = items_ws
+        {
+            let w = iw.max(val.width).min(64);
+            let v = Self::bits_at(Self::as_ctx(raw as i128, val.width, true), w) as i128;
+            return rs.iter().any(|&(l, h)| {
+                let (l, h) = (Self::bits_at(l, w) as i128, Self::bits_at(h, w) as i128);
+                l <= h && v >= l && v <= h
+            });
         }
         // A negative endpoint can only be met by a signed reading of the value
         // (an `integer` whose is_signed was dropped by an earlier draw).
@@ -162639,7 +162809,12 @@ impl Simulator {
                         _ => ConstraintRange::Value(r.clone()),
                     })
                     .collect();
-                let val = self.eval_expr(expr);
+                // §11.4.13: at the width of all operands (see
+                // `inside_joint_width`).
+                let val = match self.inside_joint_width_cr(expr, &cr) {
+                    Some(w) => self.eval_expr_ctx(expr, w),
+                    None => self.eval_expr(expr),
+                };
                 if val.has_xz() || val.width > 64 || val.is_real {
                     return self.eval_expr(e).is_true();
                 }
@@ -162660,8 +162835,12 @@ impl Simulator {
         match item {
             ConstraintItem::Expr(expr) => self.cons_expr_true(expr),
             ConstraintItem::Inside { expr, range, .. } => {
-                // §18.3: exact signed membership — see `value_in_ranges`.
-                let val = self.eval_expr(expr);
+                // §18.3: exact signed membership — see `value_in_ranges`,
+                // at the width of all operands (§11.4.13).
+                let val = match self.inside_joint_width_cr(expr, range) {
+                    Some(w) => self.eval_expr_ctx(expr, w),
+                    None => self.eval_expr(expr),
+                };
                 if !val.has_xz() && val.width <= 64 && !val.is_real {
                     return self.value_in_ranges(&val, range);
                 }
