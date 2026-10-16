@@ -171,3 +171,5 @@ mod function_collection_return;
 mod struct_dynamic_members_instances;
 #[path = "collections/typedef_alias_dims.rs"]
 mod typedef_alias_dims;
+#[path = "collections/declarator_typedef_dims.rs"]
+mod declarator_typedef_dims;
