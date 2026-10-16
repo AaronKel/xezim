@@ -25,6 +25,8 @@ mod blocking_task_super_dispatch;
 mod blocklocal_struct_named_like_member;
 #[path = "classes/class_assoc_struct_string_keys.rs"]
 mod class_assoc_struct_string_keys;
+#[path = "classes/class_descending_array_members.rs"]
+mod class_descending_array_members;
 #[path = "classes/class_formal_named_like_struct.rs"]
 mod class_formal_named_like_struct;
 #[path = "classes/class_formal_typedef_widen.rs"]

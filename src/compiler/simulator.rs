@@ -49993,6 +49993,68 @@ impl Simulator {
         self.process_m_scope.insert(child, chain);
     }
 
+    /// `a[i][j]` -> (`a`, 2): the operand under its constant-or-not index
+    /// selects (not part selects), and how many there are.
+    fn peel_index_selects(e: &Expression) -> Option<(Expression, usize)> {
+        let mut k = 0usize;
+        let mut cur = e;
+        while let ExprKind::Index { expr, .. } = &cur.kind {
+            k += 1;
+            cur = expr;
+        }
+        if let ExprKind::Ident(h) = &cur.kind {
+            let last = h.path.last()?;
+            if !last.selects.is_empty() {
+                if last
+                    .selects
+                    .iter()
+                    .any(|x| matches!(x.kind, ExprKind::Range(..) | ExprKind::RangeSelect { .. }))
+                {
+                    return None;
+                }
+                k += last.selects.len();
+                let mut hb = h.clone();
+                hb.path.last_mut()?.selects.clear();
+                hb.cached_signal_id = std::cell::Cell::new(None);
+                hb.cached_resolved_name = std::cell::OnceCell::new();
+                return Some((Expression::new(ExprKind::Ident(hb), cur.span), k));
+            }
+        }
+        (k > 0).then(|| (cur.clone(), k))
+    }
+
+    fn int_lit_expr(n: i64, span: crate::ast::Span) -> Expression {
+        Expression::new(
+            ExprKind::Number(crate::ast::expr::NumberLiteral::Integer {
+                size: None,
+                signed: true,
+                base: crate::ast::expr::NumberBase::Decimal,
+                value: n.to_string(),
+                cached_val: Default::default(),
+            }),
+            span,
+        )
+    }
+
+    /// §7.4.2 / §20.7: an object's store `scoped` of a fixed-array member
+    /// with a descending dimension (`int ds[3:1]`) keeps its declared
+    /// direction, as a module array does (`array_prop_decl_dims`).
+    fn note_member_decl_dims(
+        &mut self,
+        cdef: &crate::compiler::elaborate::ElaboratedClass,
+        prop: &str,
+        scoped: &str,
+    ) {
+        if let Some(dd) = cdef.array_prop_decl_dims.get(prop) {
+            if dd.first().is_some_and(|&(l, r)| l > r) {
+                self.module.descending_arrays.insert(scoped.to_string());
+            }
+            self.module
+                .unpacked_decl_dims
+                .insert(scoped.to_string(), dd.clone());
+        }
+    }
+
     fn inherit_fork_child_context(&mut self, pid: usize) {
         let mut ctx = self.snapshot_process_context();
         // The parent's open block scopes close in the parent's stream, never
@@ -72347,6 +72409,32 @@ impl Simulator {
                     .get(1)
                     .map(|a| self.eval_expr(a).to_u64().unwrap_or(1))
                     .unwrap_or(1) as usize;
+                // §20.7: a query of a selected sub-array (`m[0]`, `dm[1]`)
+                // describes the dimensions left after the selects:
+                // dimension d of `m[i]` is dimension d + 1 of `m`.
+                if let Some((base, k)) = args.first().and_then(Self::peel_index_selects) {
+                    let probe = Expression::new(
+                        ExprKind::SystemCall {
+                            name: "$unpacked_dimensions".to_string(),
+                            args: vec![base.clone()],
+                        },
+                        base.span,
+                    );
+                    let nd = self.eval_expr(&probe).to_u64().unwrap_or(0) as usize;
+                    if nd > k {
+                        let call = Expression::new(
+                            ExprKind::SystemCall {
+                                name: sn.clone(),
+                                args: vec![
+                                    base.clone(),
+                                    Self::int_lit_expr((dim + k) as i64, base.span),
+                                ],
+                            },
+                            base.span,
+                        );
+                        return self.eval_expr(&call);
+                    }
+                }
                 // §20.7 / §7.5: on a DYNAMIC array or queue the query
                 // functions report the CURRENT element count, not a static
                 // packed width — `$size(d)` == `d.size()`. The declared-dims
@@ -72418,7 +72506,10 @@ impl Simulator {
                         // A fixed-size ARRAY class member lives at
                         // `<handle>#<member>`; the bare name has no dims.
                         if let Some(scoped) = self.instance_assoc_member(&n) {
-                            if self.module.arrays.contains_key(&scoped) {
+                            if self.module.arrays.contains_key(&scoped)
+                                || self.module.arrays_2d.contains_key(&scoped)
+                                || self.module.arrays_nd.contains_key(&scoped)
+                            {
                                 n = std::borrow::Cow::Owned(scoped);
                             }
                         }
@@ -83432,7 +83523,22 @@ impl Simulator {
                     // `.size` shadow) fall through to the key-scan.
                     let keys: Vec<String>;
                     let is_str;
-                    if let Some(sz) = self
+                    if let Some(&(lo, hi, _)) =
+                        self.module.arrays.get(&an).filter(|&&(lo, hi, _)| {
+                            hi >= lo
+                                && !self.module.dynamic_arrays.contains(&an)
+                                && !self.module.associative_arrays.contains_key(&an)
+                        })
+                    {
+                        // §12.7.3: a FIXED class-member array iterates its
+                        // declared range, left bound first (`[3:1]`: 3, 2, 1),
+                        // whatever stray `.size` a whole-array write left.
+                        let desc = self.module.descending_arrays.contains(&an);
+                        keys = (0..=(hi - lo))
+                            .map(|k| if desc { hi - k } else { lo + k }.to_string())
+                            .collect();
+                        is_str = false;
+                    } else if let Some(sz) = self
                         .signals
                         .get(&format!("{}.size", an))
                         .and_then(|v| v.to_u64())
@@ -92471,7 +92577,11 @@ impl Simulator {
                                             let nm = format!("{}#{}", h, prop);
                                             let is_str = self.string_signals.contains(&nm);
                                             let mut parts: Vec<String> = Vec::new();
-                                            for i in lo..=hi {
+                                            // §21.2.1.7: `%p` lists the
+                                            // elements left to right.
+                                            let desc = self.module.descending_arrays.contains(&nm);
+                                            for k in 0..=(hi - lo) {
+                                                let i = if desc { hi - k } else { lo + k };
                                                 let v = self
                                                     .get_signal_value_by_name(&format!(
                                                         "{}[{}]",
@@ -119158,10 +119268,16 @@ impl Simulator {
 
         let mut current = Some(class_name);
         let mut layout: Option<(Vec<(i64, i64)>, DataType)> = None;
+        // §7.4.2 / §10.9: each dimension's declared direction — the first
+        // item of a pattern goes to the LEFT bound (`int ds[3:1]`).
+        let mut descending: Vec<bool> = Vec::new();
         while let Some(name) = current {
             let Some(class_def) = self.module.classes.get(&name) else {
                 break;
             };
+            if let Some(dd) = class_def.array_prop_decl_dims.get(member) {
+                descending = dd.iter().map(|&(l, r)| l > r).collect();
+            }
             if let Some((shape, _)) = class_def.array_nd_properties.get(member) {
                 if let Some(data_type) = class_def.property_types.get(member) {
                     let shape = self
@@ -119187,7 +119303,10 @@ impl Simulator {
         if dimensions.is_empty() {
             return false;
         }
-        self.assign_pattern_array(&scoped, &dimensions, &data_type, items, &[]);
+        if descending.len() != dimensions.len() {
+            descending.clear();
+        }
+        self.assign_pattern_array(&scoped, &dimensions, &data_type, items, &descending);
         true
     }
 
@@ -123432,6 +123551,11 @@ impl Simulator {
         if dims.iter().any(|&(lo, hi)| hi < lo || hi - lo >= 4096) {
             return None;
         }
+        // §21.2.1.7: each dimension lists its elements left bound first.
+        let dims = match self.module.unpacked_decl_dims.get(&scoped) {
+            Some(dd) if dd.len() == dims.len() => dd.clone(),
+            _ => dims,
+        };
         Some(self.render_p_class_elems(handle, prop, "", &dims, &dt, su.as_ref()))
     }
 
@@ -123589,7 +123713,14 @@ impl Simulator {
                 }
             };
         };
-        let parts: Vec<String> = (lo..=hi)
+        // `(left, right)`: a descending dimension lists `left` down.
+        let idx: Vec<i64> = if lo <= hi {
+            (lo..=hi).collect()
+        } else {
+            (hi..=lo).rev().collect()
+        };
+        let parts: Vec<String> = idx
+            .into_iter()
             .map(|i| {
                 self.render_p_class_elems(handle, prop, &format!("{}[{}]", sfx, i), rest, dt, su)
             })
@@ -149681,6 +149812,7 @@ impl Simulator {
                     _ => (lo, hi),
                 };
                 self.module.arrays.insert(scoped.clone(), (lo, hi, width));
+                self.note_member_decl_dims(cdef, prop, &scoped);
                 // §6.8, §7.4: each element starts at its type's default — x
                 // for a 4-state element; an unpacked-struct element as its
                 // member leaves.
@@ -149718,6 +149850,7 @@ impl Simulator {
                     .and_then(|d| self.param_sized_shape(d, &instance, &classes_to_init))
                     .filter(|sh| sh.len() == shape.len());
                 let shape = own_shape.as_ref().unwrap_or(shape);
+                self.note_member_decl_dims(cdef, prop, &scoped);
                 if shape.len() == 2 {
                     self.module
                         .arrays_2d
