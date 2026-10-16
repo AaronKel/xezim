@@ -489,6 +489,26 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * A real converted to an integral type wraps to the target width instead of
   saturating, and fills targets wider than 64 bits: `longint l = 2.0**64` is 0
   (§6.12.2). (#324, #330)
+* A static task that calls another static task of its class by bare name
+  blocks like any task call: a `mailbox.get()`, `#`, `@`, `wait`, semaphore
+  `get` or `fork…join` in the callee used to return at once. `@ev` and
+  `@(C::ev)` on a static class `event` wait for the next `-> ev`, and
+  `ev.triggered` reads it (§8.10, §13.3, §15.4, §15.5). (#313, reported by
+  Ganesh-TNL)
+* `foreach` and the collection methods work on arrays declared through
+  typedefs in every scope the #312 survey covers: chained and cross-package
+  typedef aliases, typedef plus declarator dimensions, typedef'd arrays in
+  generate blocks and as struct members, `foreach (m[i, j])` over an
+  associative array of associative arrays, typedef'd associative formals
+  (`input`, `output`, `ref`) with struct elements, functions returning a
+  queue, dynamic or associative array (also `f().size()`), package arrays
+  used inside module tasks (`P::d = new[n]`, `P::q.max()`), and
+  multi-dimensional package arrays. Two packages declaring a variable of the
+  same name keep separate storage, a class property is no longer shadowed by
+  an unrelated package variable of the same name, and struct members that
+  are queues or associative arrays work in submodules and in a second top
+  module (§6.18, §7.4.5, §7.8, §12.7.3, §13.4, §13.5, §26.3). (#312,
+  reported by Ganesh-TNL)
 
 **Performance**
 
