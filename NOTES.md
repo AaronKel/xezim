@@ -606,10 +606,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 **Performance**
 
 * Measured against 0.11.1 on the README workloads (cold cache, plain release
-  build): C906 CoreMark ×1 runs 8.6% fewer host instructions (376.7 G against
-  412.0 G, 82 s); the C910 memcpy ×200 compiles 20% faster (9.1 s against
-  11.3 s, 106 s whole run); the AXI4 AVIP runs about 5% more cycles (7.0 s),
-  the cost of this release's correctness fixes.
+  build): C906 CoreMark ×1 runs 8.5% fewer host instructions (376.8 G against
+  412.0 G, 79 s); the C910 memcpy ×200 runs about the same (472.7 G against
+  474.0 G instructions, 107 s whole run, about 11 s of it compiling); the
+  AXI4 AVIP runs about 7% more cycles (median of five runs, 6.7 s), the cost
+  of this release's correctness fixes.
 * More class methods and package functions run as bytecode: those that read
   a member off an element of a class-handle collection (`m[k].val`,
   `q[i].name`), package functions that call a static method of a class

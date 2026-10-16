@@ -155,17 +155,16 @@ Both simulators produce the same results on every row.
 
 | Workload | xezim | Reference simulator |
 |---|---|---|
-| XuanTie C906 SoC, CoreMark ×1 (295,294 cycles) | 82 s, 0.65 GB peak | 82 s, 44 s of it simulating |
-| XuanTie C910 dual-core SoC, memcpy ×200, cold start | 106 s, about 10 s of it compiling | 136 s, 97 s of it simulating |
-| AXI4 AVIP, UVM base test | 7.0 s | 97 s, 51 s of it simulating |
+| XuanTie C906 SoC, CoreMark ×1 (295,294 cycles) | 79 s, 0.64 GB peak | 82 s, 44 s of it simulating |
+| XuanTie C910 dual-core SoC, memcpy ×200, cold start | 107 s, about 11 s of it compiling | 136 s, 97 s of it simulating |
+| AXI4 AVIP, UVM base test | 6.7 s | 97 s, 51 s of it simulating |
 
 - **xezim starts fast.** Compiling and elaborating is a small part of a run,
   so short tests and suites of many runs favour xezim.
-- **On long runs the reference kernel is faster**, about 1.8× in the
+- **On long runs the reference kernel is faster**, about 1.75× in the
   simulation phase on the C906, and more on long UVM runs. Closing this gap
-  is where current work goes: since 0.11.1, CoreMark runs 8.6% fewer host
-  instructions and C910 compilation takes 20% less time (see the
-  [release notes](NOTES.md)).
+  is where current work goes: since 0.11.1, CoreMark runs 8.5% fewer host
+  instructions (see the [release notes](NOTES.md)).
 
 To get the most out of a build, use the
 [profile-guided build](docs/building.md#profile-guided-build) (up to 14.5%
