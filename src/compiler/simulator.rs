@@ -143593,6 +143593,45 @@ impl Simulator {
         if !self.port_is_assoc_array(port) {
             return None;
         }
+        // §13.5.3 / §10.9.1: an assignment-pattern actual (a formal's default,
+        // `int m[string] = '{default: 0}`) has no storage to copy from: the
+        // formal starts as a fresh array holding the pattern's keyed items,
+        // with its `default:` recorded for absent keys.
+        if matches!(
+            arg.kind,
+            ExprKind::AssignmentPattern(_) | ExprKind::Concatenation(_)
+        ) {
+            let param = port.name.name.clone();
+            let key = self.formal_dyn_key(&param, &port.data_type);
+            let is_string_key = port.dimensions.iter().any(|d| match d {
+                crate::ast::types::UnpackedDimension::Associative {
+                    data_type: Some(kt),
+                    ..
+                } => matches!(
+                    super::elaborate::resolve_typedef_chain(kt, &self.module.typedef_types),
+                    DataType::Simple {
+                        kind: crate::ast::types::SimpleType::String,
+                        ..
+                    }
+                ),
+                _ => false,
+            });
+            self.module
+                .associative_arrays
+                .insert(key.clone(), is_string_key);
+            let w = resolve_type_width(
+                &port.data_type,
+                Some(&self.module.parameters),
+                Some(&self.module.typedefs),
+            );
+            if w > 0 {
+                self.widths.insert(key.clone(), w);
+            }
+            if matches!(arg.kind, ExprKind::AssignmentPattern(_)) {
+                self.assign_whole_coll(&key, Some(&port.data_type), arg);
+            }
+            return Some((key, String::new(), None));
+        }
         let caller = self.array_actual_storage(arg)?;
         let param = port.name.name.clone();
         if matches!(port.direction, PortDirection::Ref) {
@@ -143642,6 +143681,10 @@ impl Simulator {
         let keys: Vec<String> = self.signals.keys_with_elem_prefix(&prefix);
         for k in keys {
             self.signals.remove(&k);
+        }
+        // A pattern-bound formal's `default:` (see `bind_assoc_param`).
+        if !self.module.assoc_defaults.is_empty() {
+            self.module.assoc_defaults.remove(param);
         }
         match prior {
             // An entry predated THIS call (it belongs to an enclosing frame
@@ -143697,7 +143740,7 @@ impl Simulator {
     ) -> Vec<(String, String)> {
         let mut staged = Vec::new();
         for (param, caller, is_out) in formals {
-            if is_out && param != caller {
+            if is_out && param != caller && !caller.is_empty() {
                 staged.push((self.stage_assoc_formal(param), caller.to_string()));
             }
         }
@@ -143786,6 +143829,47 @@ impl Simulator {
             }
             _ => return None,
         };
+        // §13.5.3 / §10.9.1: an assignment-pattern actual (in practice a
+        // formal's default, `byte v[2] = '{8'hA5, 8'h5A}`) has no storage to
+        // copy from: register the formal and assign the pattern's items to
+        // its elements, the leftmost item to the leftmost index. There is
+        // nothing to copy back, so the returned caller is empty.
+        if let ExprKind::AssignmentPattern(items) = &arg.kind {
+            if dims.len() != 1 {
+                return None;
+            }
+            let param = port.name.name.clone();
+            let dt = &port.data_type;
+            let w = super::elaborate::resolve_type_width(
+                dt,
+                Some(&self.module.parameters),
+                Some(&self.module.typedefs),
+            )
+            .max(1);
+            let descending = match dims.first() {
+                Some(UD::Range { left, right, .. }) => {
+                    super::elaborate::const_eval_i64_with_params(left, params)
+                        > super::elaborate::const_eval_i64_with_params(right, params)
+                }
+                _ => false,
+            };
+            self.module.arrays.insert(param.clone(), (lo, hi, w));
+            let ordered: Vec<Expression> =
+                self.pattern_ordered(items).into_iter().cloned().collect();
+            let default = items.iter().find_map(|it| match it {
+                AssignmentPatternItem::Default(e) => Some(e.clone()),
+                _ => None,
+            });
+            for (j, idx) in (lo..=hi).enumerate() {
+                let idx = if descending { hi - (idx - lo) } else { idx };
+                let Some(e) = ordered.get(j).or(default.as_ref()) else {
+                    break;
+                };
+                let e = e.clone();
+                self.assign_pattern_or_leaf(&format!("{}[{}]", param, idx), dt, &e);
+            }
+            return Some((param, String::new(), lo, hi));
+        }
         // §18.5.12 / §13.5.2: resolve the actual's storage key across every
         // spelling — a bare name (a caller-local, or an implicit-`this` member
         // under `<handle>#<member>`), or an explicit member access `c.member` /
@@ -144094,6 +144178,68 @@ impl Simulator {
     /// this a `.name(expr)` actual was evaluated as an opaque expression in
     /// whatever position it happened to occupy — silently binding the wrong
     /// formal, or nothing at all.
+    /// §13.5.3: the default an OMITTED argument binds through the aggregate
+    /// binders, like a supplied actual: one that can be an aggregate (an
+    /// assignment pattern or an unpacked concatenation), or any default of a
+    /// formal with unpacked dimensions or an `output`/`inout` direction (whose
+    /// default names the variable copied back to). A scalar or enum default
+    /// of an input keeps the scalar path, which evaluates it in the callee's
+    /// scope.
+    #[inline]
+    fn default_actual(port: &crate::ast::decl::FunctionPort) -> Option<&Expression> {
+        let d = port.default.as_ref()?;
+        (matches!(
+            d.kind,
+            ExprKind::AssignmentPattern(_) | ExprKind::Concatenation(_)
+        ) || !port.dimensions.is_empty()
+            || matches!(port.direction, PortDirection::Output | PortDirection::Inout))
+        .then_some(d)
+    }
+
+    /// §13.5.3: the values of a method's default-bound `output`/`inout`
+    /// formals (`(formal, default lvalue)`), read before its frame is popped.
+    #[cold]
+    #[inline(never)]
+    fn snapshot_default_outs(&self, outs: &[(String, Expression)]) -> Vec<(Expression, Value)> {
+        outs.iter()
+            .filter_map(|(pn, dflt)| {
+                self.local_stack
+                    .last()
+                    .and_then(|l| l.get(pn).cloned())
+                    .map(|v| (dflt.clone(), v))
+            })
+            .collect()
+    }
+
+    /// §13.5.3: copy a method's default-bound outputs back to their defaults,
+    /// which name variables of the METHOD's scope (`output int o = p` is this
+    /// object's `p`): applied while `this` is still current.
+    #[cold]
+    #[inline(never)]
+    fn apply_default_outs(&mut self, wb: Vec<(Expression, Value)>, cname: &str) {
+        self.class_context_stack.push(Some(cname.to_string()));
+        for (dflt, v) in wb {
+            self.assign_value(&dflt, &v);
+        }
+        self.class_context_stack.pop();
+    }
+
+    /// §13.5.3: whether an omitted `output`/`inout` formal's default names
+    /// storage the formal can be copied back to: a variable, a select or
+    /// member of one, or a concatenation of those.
+    fn is_lvalue_expr(e: &Expression) -> bool {
+        match &e.kind {
+            ExprKind::Ident(_) => true,
+            ExprKind::Index { expr, .. }
+            | ExprKind::RangeSelect { expr, .. }
+            | ExprKind::MemberAccess { expr, .. } => Self::is_lvalue_expr(expr),
+            ExprKind::Concatenation(parts) => {
+                !parts.is_empty() && parts.iter().all(Self::is_lvalue_expr)
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn normalize_call_args(
         ports: &[crate::ast::decl::FunctionPort],
         args: &[Expression],
@@ -144775,10 +144921,16 @@ impl Simulator {
                 port.direction,
                 PortDirection::Output | PortDirection::Inout | PortDirection::Ref
             );
+            // §13.5.3: an omitted argument binds the formal's DEFAULT through
+            // the same aggregate binders as a supplied actual. Skipping them
+            // left an array / queue / associative default to the scalar path,
+            // which stored it as one packed value, so `v[0]` became a bit
+            // select of it.
+            let actual = args.get(i).or_else(|| Self::default_actual(port));
             // An ASSOCIATIVE-array formal: functions bound nothing at all, so
             // `arr.size()` inside the body read 0.
-            if i < args.len() {
-                if let Some((param, caller, prior)) = self.bind_assoc_param(port, &args[i]) {
+            if let Some(actual) = actual {
+                if let Some((param, caller, prior)) = self.bind_assoc_param(port, actual) {
                     assoc_params.push((param, caller, is_out, prior));
                     continue;
                 }
@@ -144792,7 +144944,7 @@ impl Simulator {
                         &port.name.name,
                         &port.data_type,
                         port.direction,
-                        &args[i],
+                        actual,
                         &mut locals,
                     ) {
                         // §13.4.2: struct FORMALS bind member-wise (above) but are
@@ -144813,7 +144965,7 @@ impl Simulator {
                     }
                 }
             }
-            if i < args.len() {
+            if let Some(actual) = actual {
                 // §6.18/§6.20.3: a typedef'd (or type-param-bound) formal
                 // carries its unpacked dims on the TYPE, not the port —
                 // `function void set(my_array_t val)` bound as a scalar.
@@ -144840,7 +144992,7 @@ impl Simulator {
                 if let Some((store, caller)) = self.bind_queue_param(
                     &port.name.name,
                     &eff_dims,
-                    &args[i],
+                    actual,
                     &port.data_type,
                     port.direction,
                 ) {
@@ -144852,13 +145004,21 @@ impl Simulator {
             }
             // Unpacked ARRAY formal: functions never bound one, so the body read
             // X and a `ref` write never reached the caller (§13.5.2).
-            if i < args.len() {
+            if let Some(actual) = actual {
                 let prior = self.module.arrays.contains_key(&port.name.name)
                     || self.module.arrays_2d.contains_key(&port.name.name)
                     || self.module.arrays_nd.contains_key(&port.name.name);
-                if let Some(info) = self.bind_array_arg(port, &args[i]) {
+                if let Some(info) = self.bind_array_arg(port, actual) {
+                    // §21.2.1.7: a formal bound from its default pattern
+                    // records its declared type, as the task path does for
+                    // every formal, or `%p` of the formal printed x.
+                    if info.1.is_empty() {
+                        self.register_formal_type_metadata(&port.name.name, &port.data_type, false);
+                    }
                     if is_out {
-                        array_writebacks.push(info);
+                        if !info.1.is_empty() {
+                            array_writebacks.push(info);
+                        }
                     } else if !prior {
                         // An INPUT array formal is dropped on return too: left
                         // registered, a later call whose same-named formal
@@ -144869,8 +145029,13 @@ impl Simulator {
                     continue;
                 }
             }
-            if is_out && i < args.len() {
-                output_bindings.push((port.name.name.clone(), args[i].clone()));
+            // §13.5.3 (1800-2023): an omitted `output`/`inout` argument with a
+            // default binds the default as its actual, so `output o = a`
+            // copies `o` back to `a` on return.
+            if is_out {
+                if let Some(actual) = actual.filter(|a| i < args.len() || Self::is_lvalue_expr(a)) {
+                    output_bindings.push((port.name.name.clone(), actual.clone()));
+                }
             }
             let mut val = if i < args.len() {
                 self.eval_expr(&args[i])
@@ -145619,6 +145784,9 @@ impl Simulator {
                 self.signals.remove(&k);
             }
             self.module.associative_arrays.remove(&param_name);
+            if !self.module.assoc_defaults.is_empty() {
+                self.module.assoc_defaults.remove(&param_name);
+            }
         }
         self.writeback_array_args(&wb);
         for param_name in &array_params {
@@ -146405,29 +146573,34 @@ impl Simulator {
                         .insert(port.name.name.clone(), type_name.clone());
                 }
             }
+            // §13.5.3: an omitted argument binds the formal's DEFAULT through
+            // the aggregate binders below, like a supplied actual (see
+            // `exec_function_call_body`).
+            let actual = args.get(i).or_else(|| Self::default_actual(port));
             // §13.5, §6.18: an associative formal declared through a typedef
             // (`output aa_t a`) is one too — as for functions. Checked first: the
             // struct and queue binders below would claim a typedef of struct
             // elements.
             let is_assoc = self.port_is_assoc_array(port);
-            if is_assoc && i < args.len() {
+            if let Some(actual) = actual.filter(|_| is_assoc) {
                 let assoc_is_out = matches!(
                     port.direction,
                     PortDirection::Output | PortDirection::Inout | PortDirection::Ref
                 );
-                if let Some((param_name, caller_name, _)) = self.bind_assoc_param(port, &args[i]) {
+                if let Some((param_name, caller_name, _)) = self.bind_assoc_param(port, actual) {
                     assoc_params.push((param_name, caller_name, assoc_is_out));
                 }
                 continue;
             }
             // Unpacked array formal (`int a[2:0]` or `int a[3]`): copy the
             // caller's elements in, and copy them back for an out/inout/ref.
-            if i < args.len() {
-                if let Some(info) = self.bind_array_arg(port, &args[i]) {
+            if let Some(actual) = actual {
+                if let Some(info) = self.bind_array_arg(port, actual) {
                     if matches!(
                         port.direction,
                         PortDirection::Output | PortDirection::Inout | PortDirection::Ref
-                    ) {
+                    ) && !info.1.is_empty()
+                    {
                         array_writebacks.push(info.clone());
                     }
                     array_params.push(info.0);
@@ -146441,7 +146614,7 @@ impl Simulator {
             // left the caller's queue empty. Worse, that formal-named storage
             // persisted across calls, so the next call saw the previous one's
             // elements.
-            if i < args.len() {
+            if let Some(actual) = actual {
                 let eff_dims: Vec<crate::ast::types::UnpackedDimension> =
                     if port.dimensions.is_empty() {
                         if let (false, crate::ast::types::DataType::TypeReference { name, .. }) =
@@ -146466,7 +146639,7 @@ impl Simulator {
                 if let Some((store, caller)) = self.bind_queue_param(
                     &port.name.name,
                     &eff_dims,
-                    &args[i],
+                    actual,
                     &port.data_type,
                     port.direction,
                 ) {
@@ -146485,12 +146658,12 @@ impl Simulator {
             // (functions already bind them that way), so the body read x from
             // every member of an input, and an output/inout/ref struct formal
             // copied nothing back to the caller's variable.
-            if i < args.len() && port.dimensions.is_empty() {
+            if let Some(actual) = actual.filter(|_| port.dimensions.is_empty()) {
                 if let Some(backs) = self.bind_unpacked_struct_formal(
                     &port.name.name,
                     &data_type,
                     port.direction,
-                    &args[i],
+                    actual,
                     &mut locals,
                 ) {
                     output_bindings.extend(backs);
@@ -146500,14 +146673,16 @@ impl Simulator {
             }
             match port.direction {
                 PortDirection::Output | PortDirection::Inout => {
-                    let val = if i < args.len() {
-                        self.eval_expr(&args[i])
-                    } else {
-                        Value::zero(32)
+                    // §13.5.3 (1800-2023): an omitted argument with a default
+                    // binds the default as its actual, so `output o = a`
+                    // copies `o` back to `a` on return.
+                    let val = match actual {
+                        Some(a) => self.eval_expr(a),
+                        None => Value::zero(32),
                     };
                     locals.insert(port.name.name.clone(), val);
-                    if i < args.len() {
-                        output_bindings.push((port.name.name.clone(), args[i].clone()));
+                    if let Some(a) = actual.filter(|a| i < args.len() || Self::is_lvalue_expr(a)) {
+                        output_bindings.push((port.name.name.clone(), a.clone()));
                     }
                 }
                 PortDirection::Ref => {
@@ -164833,6 +165008,7 @@ impl Simulator {
                 let mut queue_writebacks: Vec<(String, String)> = Vec::new();
                 let mut array_writebacks: Vec<(String, String, i64, i64)> = Vec::new();
                 let mut array_inputs: Vec<(String, String, i64, i64)> = Vec::new();
+                let mut default_out_bindings: Vec<(String, Expression)> = Vec::new();
                 let mut assoc_params: Vec<(String, String, bool, Option<bool>)> = Vec::new();
                 // Member-wise struct `output`/`inout`/`ref` formals bypass the
                 // whole-value `output_bindings` path (see exec_function_call).
@@ -164857,6 +165033,10 @@ impl Simulator {
                         );
                     }
                     let is_assoc = !plain && self.port_is_assoc_array(port);
+                    // §13.5.3: an omitted argument binds the formal's DEFAULT
+                    // through the aggregate binders below, like a supplied
+                    // actual (see `exec_function_call_body`).
+                    let actual = args.get(i).or_else(|| Self::default_actual(port));
                     // An associative-array `output`/`inout`/`ref` formal
                     // is copied back via the assoc-param signal-namespace
                     // merge, NOT the scalar `output_bindings` path (which
@@ -164864,14 +165044,23 @@ impl Simulator {
                     if matches!(
                         port.direction,
                         PortDirection::Output | PortDirection::Inout | PortDirection::Ref
-                    ) && i < args.len()
-                        && !is_assoc
+                    ) && !is_assoc
                     {
-                        output_bindings.push((port.name.name.clone(), args[i].clone()));
-                    }
-                    if !plain && i < args.len() {
-                        if let Some((param, caller, prior)) = self.bind_assoc_param(port, &args[i])
+                        if i < args.len() {
+                            output_bindings.push((port.name.name.clone(), args[i].clone()));
+                        } else if let Some(d) = port
+                            .default
+                            .as_ref()
+                            .filter(|d| port.dimensions.is_empty() && Self::is_lvalue_expr(d))
                         {
+                            // §13.5.3: a default is in the METHOD's scope, so
+                            // `output int o = p` names this object's `p`:
+                            // copied back while `this` is still current.
+                            default_out_bindings.push((port.name.name.clone(), d.clone()));
+                        }
+                    }
+                    if let Some(actual) = actual.filter(|_| !plain) {
+                        if let Some((param, caller, prior)) = self.bind_assoc_param(port, actual) {
                             let is_out = matches!(
                                 port.direction,
                                 PortDirection::Output | PortDirection::Inout | PortDirection::Ref
@@ -164888,7 +165077,7 @@ impl Simulator {
                             self.bind_unpacked_struct_arg(
                                 &port.name.name,
                                 &port.data_type,
-                                &args[i],
+                                actual,
                                 &mut locals,
                                 Some(handle),
                             )
@@ -164990,7 +165179,7 @@ impl Simulator {
                         if let Some((store, caller)) = self.bind_queue_param(
                             &port.name.name,
                             &eff_dims,
-                            &args[i],
+                            actual,
                             &port.data_type,
                             port.direction,
                         ) {
@@ -165012,12 +165201,14 @@ impl Simulator {
                         let prior = self.module.arrays.contains_key(&port.name.name)
                             || self.module.arrays_2d.contains_key(&port.name.name)
                             || self.module.arrays_nd.contains_key(&port.name.name);
-                        if let Some(info) = self.bind_array_arg(port, &args[i]) {
+                        if let Some(info) = self.bind_array_arg(port, actual) {
                             if matches!(
                                 port.direction,
                                 PortDirection::Output | PortDirection::Inout | PortDirection::Ref
                             ) {
-                                array_writebacks.push(info);
+                                if !info.1.is_empty() {
+                                    array_writebacks.push(info);
+                                }
                             } else if !prior {
                                 // An input array formal is dropped on return
                                 // too (#327's "warming"; see the function path).
@@ -165806,7 +165997,15 @@ impl Simulator {
                             .map(|v| (caller_lval.clone(), v))
                     })
                     .collect();
+                let default_wb = if default_out_bindings.is_empty() {
+                    Vec::new()
+                } else {
+                    self.snapshot_default_outs(&default_out_bindings)
+                };
                 self.pop_local_frame();
+                if !default_wb.is_empty() {
+                    self.apply_default_outs(default_wb, &cname);
+                }
                 self.this_stack.pop();
                 // Capture the callee's formals, restore the caller's
                 // shadowed storage, then apply — see `stage_queue_param`.

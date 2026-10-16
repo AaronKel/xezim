@@ -109,8 +109,6 @@ pub fn lint_should_fail(defs: &[&SourceDefinition], elab: &ElaboratedModule) -> 
                 for it in &p.items {
                     match it {
                         PackageItem::Class(c) => check_class(c, &mut errs),
-                        PackageItem::Function(f) => check_output_port_defaults(&f.ports, &mut errs),
-                        PackageItem::Task(t) => check_output_port_defaults(&t.ports, &mut errs),
                         PackageItem::Data(d) => check_enum_type(&d.data_type, elab, &mut errs),
                         PackageItem::Typedef(td) => check_enum_type(&td.data_type, elab, &mut errs),
                         _ => {}
@@ -236,8 +234,6 @@ fn check_module_item(
                 }
             }
         }
-        ModuleItem::FunctionDeclaration(f) => check_output_port_defaults(&f.ports, errs),
-        ModuleItem::TaskDeclaration(t) => check_output_port_defaults(&t.ports, errs),
         ModuleItem::GateInstantiation(g) => check_gate_terminals(g, errs),
         // The per-item checks must SEE inside generate constructs — without
         // this recursion every rule above was bypassed by wrapping the illegal
@@ -323,29 +319,6 @@ fn check_gate_terminals(g: &xezim_core::ast::decl::GateInstantiation, errs: &mut
                     .as_ref()
                     .map(|i| format!(" '{}'", i.name))
                     .unwrap_or_default()
-            ));
-        }
-    }
-}
-
-/// §13.5.3 (a reference simulator restriction): a default value on an `output`/`inout`
-/// subroutine port is not permitted. Flags `task t(output int j = b);`.
-fn check_output_port_defaults(
-    ports: &[xezim_core::ast::decl::FunctionPort],
-    errs: &mut Vec<String>,
-) {
-    use xezim_core::ast::types::PortDirection;
-    for p in ports {
-        if p.default.is_some()
-            && matches!(p.direction, PortDirection::Output | PortDirection::Inout)
-        {
-            errs.push(format!(
-                "default value on subroutine {} port '{}' is not allowed (LRM 1800-2017 §13.5.3)",
-                match p.direction {
-                    PortDirection::Output => "output",
-                    _ => "inout",
-                },
-                p.name.name
             ));
         }
     }
@@ -1330,19 +1303,17 @@ fn check_class(c: &ClassDeclaration, errs: &mut Vec<String>) {
     }
     // §8.26.4 (an interface class extending a type parameter) is a parse
     // error: the parser sees every base, the AST keeps only the first.
-    // Per-method checks: output/inout port defaults, and (for the constructor)
-    // that `super.new(...)` is the first statement.
+    // Per-method check: a constructor's `super.new(...)` is its first
+    // statement. (An `output`/`inout` port default is legal, §13.5.3 of
+    // 1800-2023.)
     let has_base = c.extends.is_some();
     for item in &c.items {
         if let ClassItem::Method(m) = item {
-            let (ports, body, is_new) = match &m.kind {
-                ClassMethodKind::Function(f) => {
-                    (&f.ports, Some(&f.items), f.name.name.name == "new")
-                }
-                ClassMethodKind::Task(t) => (&t.ports, Some(&t.items), t.name.name.name == "new"),
+            let (body, is_new) = match &m.kind {
+                ClassMethodKind::Function(f) => (Some(&f.items), f.name.name.name == "new"),
+                ClassMethodKind::Task(t) => (Some(&t.items), t.name.name.name == "new"),
                 _ => continue,
             };
-            check_output_port_defaults(ports, errs);
             if is_new && has_base {
                 if let Some(stmts) = body {
                     check_super_new_first(stmts, errs);

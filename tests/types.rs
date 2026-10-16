@@ -255,6 +255,8 @@ mod struct_unpacked_array_member;
 mod submodule_packed_struct_member_contassign;
 #[path = "types/subroutine_local_struct_defaults.rs"]
 mod subroutine_local_struct_defaults;
+#[path = "types/subroutine_aggregate_defaults.rs"]
+mod subroutine_aggregate_defaults;
 #[path = "types/tagged_union_matches.rs"]
 mod tagged_union_matches;
 #[path = "types/tagged_union_pattern_literal.rs"]

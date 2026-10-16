@@ -282,12 +282,14 @@ fn new_array_to_dynamic_ok() {
 }
 
 // ---------------------------------------------------------------------------
-// I. Subroutine output/inout port default (§13.5.3) — not allowed.
+// I. Subroutine output/inout port default (§13.5.3). The 1800-2017 wording
+//    disallowed it; 1800-2023 allows it (the default is the actual an
+//    omitted argument copies back to), and the reference simulator accepts it.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn output_port_default_rejected() {
-    reject(
+fn output_port_default_accepted() {
+    accept(
         "sv_port_default14",
         "module test(); integer b;\n\
          task k(input integer i = 0, output integer j = b); j = i; endtask endmodule",
