@@ -173,3 +173,5 @@ mod struct_dynamic_members_instances;
 mod typedef_alias_dims;
 #[path = "collections/declarator_typedef_dims.rs"]
 mod declarator_typedef_dims;
+#[path = "collections/package_var_collisions.rs"]
+mod package_var_collisions;
