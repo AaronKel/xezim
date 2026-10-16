@@ -503,3 +503,5 @@ mod zero_width_select_unselected_generate;
 mod let_declaration_scopes;
 #[path = "misc/constraint_inside_wrap.rs"]
 mod constraint_inside_wrap;
+#[path = "misc/loop_var_scope_lint.rs"]
+mod loop_var_scope_lint;
