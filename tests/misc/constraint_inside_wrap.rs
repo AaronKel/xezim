@@ -270,10 +270,9 @@ endmodule
     assert_eq!(t_lines(src), expected);
 }
 
-/// Pinned: arithmetic over a variable wider than 64 bits (`w + 80'd5 ==
-/// 80'd2`) is not modelled by the wide-variable solver.
+/// §18.5/§11.4.3: arithmetic over a variable wider than 64 bits (`w + 80'd5
+/// == 80'd2`) wraps at the relation's width.
 #[test]
-#[ignore = "wide (>64-bit) arithmetic in constraints is not modelled; randomize() fails"]
 fn wide_operand_arithmetic_in_constraints() {
     let src = r#"// Wide (>64-bit) operands that may wrap.
 module top;
@@ -327,6 +326,61 @@ endmodule
 "#;
     // Expected values from the reference simulator.
     let expected = ["T|P1 0 1", "T|R4 ok=1 a8=255", "T|R5 ok=0", "T|R6 ok=0"];
+    assert_eq!(t_lines(src), expected);
+}
+
+/// §18.5/§11.4.3: wide operands with constants on either side, negation,
+/// wrapped intervals, signed variables and selects.
+#[test]
+fn wide_operand_affine_neighbours() {
+    let src = r#"// Wide (>64-bit) operands with constants: sums, differences, negation,
+// a constant on either side, wrapped intervals, signed variables, selects.
+module top;
+  bit [79:0] w;
+  bit signed [79:0] sw;
+  bit [95:0] y;
+  bit [7:0] n;
+  int ok;
+  initial begin
+    ok = std::randomize(w) with { 80'd10 - w == 80'd3; };
+    $display("T|A1 ok=%0d w=%0d", ok, w);
+    ok = std::randomize(w) with { -w == 80'd1; };
+    $display("T|A2 ok=%0d w=%0h", ok, w);
+    ok = std::randomize(sw) with { sw + 80'sd5 < 80'sd0; sw > -80'sd10; };
+    $display("T|A3 ok=%0d v=%0d", ok, sw inside {[-80'sd9:-80'sd6]} || sw >= 80'sh7ffffffffffffffffffb);
+    ok = std::randomize(w) with { w + 80'd1 + 80'd2 == 80'd0; };
+    $display("T|A4 ok=%0d w=%0h", ok, w);
+    ok = std::randomize(w, n) with { n == 5; w + 80'd7 == 80'd9; };
+    $display("T|A5 ok=%0d w=%0d n=%0d", ok, w, n);
+    ok = std::randomize(y) with { y[95:16] + 80'd1 == 80'd0; y[15:0] == 16'h1234; };
+    $display("T|A6 ok=%0d y=%0h", ok, y);
+    ok = std::randomize(w) with { w + 80'd5 != 80'd2; w inside {[80'hfffffffffffffffffffc:80'hfffffffffffffffffffd]}; };
+    $display("T|A7 ok=%0d w=%0h", ok, w);
+    ok = std::randomize(w) with { w - 80'd1 >= 80'hffffffffffffffffff00; };
+    $display("T|A8 ok=%0d v=%0d", ok, (w == 0) || (w >= 80'hffffffffffffffffff01));
+    ok = std::randomize(w) with { w > 80'hffff_ffff_ffff_ffff; w < 80'h1_0000_0000_0000_0002; };
+    $display("T|A9 ok=%0d v=%0d", ok, w inside {[80'h1_0000_0000_0000_0000:80'h1_0000_0000_0000_0001]});
+    ok = std::randomize(sw) with { sw + 80'sd5 == -80'sd1; };
+    $display("T|A10 ok=%0d sw=%0d", ok, sw);
+    ok = std::randomize(w) with { w - 80'd10 > 80'hfffffffffffffffffff0; w < 80'd100; };
+    $display("T|A11 ok=%0d v=%0d", ok, w < 10);
+  end
+endmodule
+"#;
+    // Expected values from the reference simulator.
+    let expected = [
+        "T|A1 ok=1 w=7",
+        "T|A2 ok=1 w=ffffffffffffffffffff",
+        "T|A3 ok=1 v=1",
+        "T|A4 ok=1 w=fffffffffffffffffffd",
+        "T|A5 ok=1 w=2 n=5",
+        "T|A6 ok=1 y=ffffffffffffffffffff1234",
+        "T|A7 ok=1 w=fffffffffffffffffffc",
+        "T|A8 ok=1 v=1",
+        "T|A9 ok=1 v=1",
+        "T|A10 ok=1 sw=-6",
+        "T|A11 ok=1 v=1",
+    ];
     assert_eq!(t_lines(src), expected);
 }
 

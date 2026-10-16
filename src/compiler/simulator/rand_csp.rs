@@ -1424,7 +1424,7 @@ impl Simulator {
             // §18.5: a local wider than 64 bits is solved through segments
             // of at most 64 bits, as a class member is (`csp_wide_split`).
             let wide = *w > 64;
-            if wide && (*s || members.is_some() || !sized.is_empty()) {
+            if wide && (members.is_some() || !sized.is_empty()) {
                 // Not modelled: left out of the solve, as before.
                 continue;
             }
@@ -7740,6 +7740,52 @@ impl Simulator {
     }
 }
 
+/// Two-state arithmetic modulo 2^w on little-endian 64-bit words (the
+/// constants of a wide relation, see `csp_wide_affine`).
+fn ww_mask(a: &mut [u64], w: u32) {
+    let r = w % 64;
+    if r != 0
+        && let Some(top) = a.get_mut(((w - 1) / 64) as usize)
+    {
+        *top &= (1u64 << r) - 1;
+    }
+}
+
+fn ww_add(a: &[u64], b: &[u64], w: u32) -> Vec<u64> {
+    let mut out = vec![0u64; a.len()];
+    let mut carry = 0u128;
+    for (i, o) in out.iter_mut().enumerate() {
+        let t = u128::from(a[i]) + u128::from(b.get(i).copied().unwrap_or(0)) + carry;
+        *o = t as u64;
+        carry = t >> 64;
+    }
+    ww_mask(&mut out, w);
+    out
+}
+
+fn ww_neg(a: &[u64], w: u32) -> Vec<u64> {
+    let inv: Vec<u64> = a.iter().map(|x| !x).collect();
+    let mut one = vec![0u64; a.len()];
+    if let Some(f) = one.first_mut() {
+        *f = 1;
+    }
+    ww_add(&inv, &one, w)
+}
+
+fn ww_sub(a: &[u64], b: &[u64], w: u32) -> Vec<u64> {
+    ww_add(a, &ww_neg(b, w), w)
+}
+
+fn ww_cmp(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+    for i in (0..a.len()).rev() {
+        match a[i].cmp(&b[i]) {
+            std::cmp::Ordering::Equal => {}
+            o => return o,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 /// A `w`-bit operand of a relation on wide variables: constant bits with
 /// solver variables laid over some ranges (each read whole, unsigned and at
 /// most 64 bits wide: a segment of a wide variable or a narrow variable).
@@ -8646,8 +8692,10 @@ impl Simulator {
                 left,
                 ..
             } => return self.csp_wide_ws(csp, left, env),
+            // §11.6.1/§11.8.1: `+ - & |` take the larger width, signed
+            // only when both operands are.
             ExprKind::Binary {
-                op: BinaryOp::BitAnd | BinaryOp::BitOr,
+                op: BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::Add | BinaryOp::Sub,
                 left,
                 right,
             } => {
@@ -8657,6 +8705,10 @@ impl Simulator {
                 );
                 return Some((a.0.max(b.0), a.1 && b.1));
             }
+            ExprKind::Unary {
+                op: UnaryOp::Minus,
+                operand,
+            } => return self.csp_wide_ws(csp, operand, env),
             _ => {}
         }
         if let Some((v, _, w, whole)) = self.csp_wide_bits(csp, e, env) {
@@ -8922,6 +8974,14 @@ impl Simulator {
         let (wl, sl) = self.csp_wide_ws(csp, left, env)?;
         let (wr, sr) = self.csp_wide_ws(csp, right, env)?;
         let (w, s) = (wl.max(wr), sl && sr);
+        // An operand computed by `+`/`-` from a variable (a constant one,
+        // `-80'sd10`, is just a constant).
+        let arith = |me: &mut Self, csp: &Csp, e: &Expression| {
+            Self::csp_wide_arith(e) && !me.csp_free(csp, e, env)
+        };
+        if arith(self, csp, left) || arith(self, csp, right) {
+            return self.csp_wide_affine_rel(csp, op, left, right, w, s, env);
+        }
         let l = self.csp_wide_op(csp, left, w, s, env)?;
         let r = self.csp_wide_op(csp, right, w, s, env)?;
         let chunks = Self::csp_wide_chunks(&l, &r, s)?;
@@ -8945,6 +9005,237 @@ impl Simulator {
             BinaryOp::Gt => self.csp_wide_lex(csp, &chunks, true, true),
             BinaryOp::Geq => self.csp_wide_lex(csp, &chunks, true, false),
             _ => return None,
+        })
+    }
+
+    /// Is `e` a sum, difference or negation (the shapes `csp_wide_affine`
+    /// reads)?
+    fn csp_wide_arith(e: &Expression) -> bool {
+        matches!(
+            Self::unparen(e).kind,
+            ExprKind::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                ..
+            } | ExprKind::Unary {
+                op: UnaryOp::Minus,
+                ..
+            }
+        )
+    }
+
+    /// §11.4.3/§11.6.1: `e` in the context `(w, s)` as `±x + k` modulo
+    /// 2^w, `x` being at most one operand that `csp_wide_op` reads as plain
+    /// variable bits (a wide variable, a select of one, a narrow variable)
+    /// and `k` the sum of the constant operands, extended to `w` bits. The
+    /// operand comes back with whether it is negated; None for a constant.
+    #[allow(clippy::type_complexity)]
+    fn csp_wide_affine<'e>(
+        &mut self,
+        csp: &Csp,
+        e: &'e Expression,
+        w: u32,
+        s: bool,
+        env: &Env,
+    ) -> Option<(Option<(&'e Expression, bool)>, Vec<u64>)> {
+        let e = Self::unparen(e);
+        if self.csp_free(csp, e, env) {
+            let o = self.csp_wide_op(csp, e, w, s, env)?;
+            return o.vars.is_empty().then_some((None, o.bits));
+        }
+        match &e.kind {
+            ExprKind::Binary {
+                op: op @ (BinaryOp::Add | BinaryOp::Sub),
+                left,
+                right,
+            } => {
+                let (xa, ka) = self.csp_wide_affine(csp, left, w, s, env)?;
+                let (xb, kb) = self.csp_wide_affine(csp, right, w, s, env)?;
+                let sub = *op == BinaryOp::Sub;
+                let x = match (xa, xb.map(|(x, n)| (x, n ^ sub))) {
+                    (Some(_), Some(_)) => return None,
+                    (a, b) => a.or(b),
+                };
+                let k = if sub {
+                    ww_sub(&ka, &kb, w)
+                } else {
+                    ww_add(&ka, &kb, w)
+                };
+                Some((x, k))
+            }
+            ExprKind::Unary {
+                op: UnaryOp::Minus,
+                operand,
+            } => {
+                let (x, k) = self.csp_wide_affine(csp, operand, w, s, env)?;
+                Some((x.map(|(x, n)| (x, !n)), ww_neg(&k, w)))
+            }
+            _ => {
+                let o = self.csp_wide_op(csp, e, w, s, env)?;
+                if o.vars.is_empty() || o.bits.iter().any(|&b| b != 0) {
+                    return None;
+                }
+                Some((Some((e, false)), vec![0; o.bits.len()]))
+            }
+        }
+    }
+
+    /// `left op right` where one side is `±x + k` (modulo 2^w, see
+    /// `csp_wide_affine`) and the other a constant `c`: the values of
+    /// `±x + k` that satisfy `op c` are one interval (two for `!=`), and
+    /// moving `k` and the sign across turns each into an interval of `x` —
+    /// two when it wraps past 2^w. A signed context compares `y ^ msb`
+    /// unsigned (§11.4.4). So `w + 80'd5 == 80'd2` is `w == 2^80 - 3`.
+    #[allow(clippy::too_many_arguments)]
+    fn csp_wide_affine_rel(
+        &mut self,
+        csp: &mut Csp,
+        op: BinaryOp,
+        left: &Expression,
+        right: &Expression,
+        w: u32,
+        s: bool,
+        env: &Env,
+    ) -> Option<Node> {
+        let (xl, kl) = self.csp_wide_affine(csp, left, w, s, env)?;
+        let (xr, kr) = self.csp_wide_affine(csp, right, w, s, env)?;
+        let (x, neg, k, c, op) = match (xl, xr) {
+            (Some((x, n)), None) => (x, n, kl, kr, op),
+            (None, Some((x, n))) => {
+                let op = match op {
+                    BinaryOp::Lt => BinaryOp::Gt,
+                    BinaryOp::Leq => BinaryOp::Geq,
+                    BinaryOp::Gt => BinaryOp::Lt,
+                    BinaryOp::Geq => BinaryOp::Leq,
+                    o => o,
+                };
+                (x, n, kr, kl, op)
+            }
+            _ => return None,
+        };
+        // A signed operand narrower than the signed context is sign-extended
+        // there; its bits are not one interval of the extended value.
+        let (xw, xs) = self.csp_wide_ws(csp, x, env)?;
+        if s && xs && xw < w {
+            return None;
+        }
+        let nw = w.div_ceil(64) as usize;
+        let zero = vec![0u64; nw];
+        let mut max = vec![u64::MAX; nw];
+        ww_mask(&mut max, w);
+        let mut bias = zero.clone();
+        if s {
+            bias[((w - 1) / 64) as usize] = 1u64 << ((w - 1) % 64);
+        }
+        let one = {
+            let mut o = zero.clone();
+            o[0] = 1;
+            o
+        };
+        // The biased value `y' = y + bias` of `y = ±x + k` lies in `ys`.
+        let cb = ww_add(&c, &bias, w);
+        let below = (cb != zero).then(|| ww_sub(&cb, &one, w));
+        let above = (cb != max).then(|| ww_add(&cb, &one, w));
+        let ys: Vec<(Vec<u64>, Vec<u64>)> = match op {
+            BinaryOp::Eq | BinaryOp::CaseEq => vec![(cb.clone(), cb.clone())],
+            BinaryOp::Neq | BinaryOp::CaseNeq => below
+                .map(|b| (zero.clone(), b))
+                .into_iter()
+                .chain(above.map(|a| (a, max.clone())))
+                .collect(),
+            BinaryOp::Lt => below.map(|b| (zero.clone(), b)).into_iter().collect(),
+            BinaryOp::Leq => vec![(zero.clone(), cb.clone())],
+            BinaryOp::Gt => above.map(|a| (a, max.clone())).into_iter().collect(),
+            BinaryOp::Geq => vec![(cb.clone(), max.clone())],
+            _ => return None,
+        };
+        let kb = ww_add(&k, &bias, w);
+        let mut alts = Vec::new();
+        let span = left.span;
+        let lit = |v: &[u64]| Self::literal_of(&Value::from_words(v, w), span);
+        let mut ivs = Vec::new();
+        for (a, b) in ys {
+            // `y' = x + kb` gives `x = y' - kb`; `y' = kb - x` gives
+            // `x = kb - y'` (decreasing, so the ends swap).
+            let (p, q) = if neg {
+                (ww_sub(&kb, &b, w), ww_sub(&kb, &a, w))
+            } else {
+                (ww_sub(&a, &kb, w), ww_sub(&b, &kb, w))
+            };
+            if ww_cmp(&p, &q) == std::cmp::Ordering::Greater {
+                ivs.push((p, max.clone()));
+                ivs.push((zero.clone(), q));
+            } else {
+                ivs.push((p, q));
+            }
+        }
+        // Several intervals: their disjunction acts only once all but one
+        // are excluded, so a search drawing the variable's 64-bit segments
+        // at random would almost never meet one. Its most significant
+        // segment (bits `lo..w` of `x`) lies in the union of the intervals'
+        // `>> lo` images, which propagates at once.
+        let mut proj = None;
+        if ivs.len() > 1
+            && let Some(o) = self.csp_wide_op(csp, x, w, false, env)
+            && let Some(&(lo, vw, v)) = o.vars.iter().max_by_key(|t| t.0)
+            && lo + vw == w
+            && lo < 128
+        {
+            let top = |x: &[u64]| -> i128 {
+                let mut r: u128 = 0;
+                for i in lo..w {
+                    if (x[(i / 64) as usize] >> (i % 64)) & 1 == 1 {
+                        r |= 1u128 << (i - lo);
+                    }
+                }
+                r as i128
+            };
+            let set = dom_norm(ivs.iter().map(|(p, q)| (top(p), top(q))).collect());
+            let one = Self::literal_of(&Value::from_u64(1, 1), crate::ast::Span::dummy());
+            let src = self.csp_src(csp, SrcItem::Expr(one), &Env::default(), vec![v]);
+            proj = Some(Node::In {
+                lin: Lin::var(v),
+                set,
+                neg: false,
+                fits: Vec::new(),
+                src,
+                wrap: None,
+            });
+        }
+        {
+            for (p, q) in ivs {
+                let n = if p == q {
+                    self.csp_wide_rel(csp, BinaryOp::Eq, x, &lit(&p), env, false)?
+                } else {
+                    let mut both = Vec::new();
+                    if p != zero {
+                        both.push(self.csp_wide_rel(
+                            csp,
+                            BinaryOp::Geq,
+                            x,
+                            &lit(&p),
+                            env,
+                            false,
+                        )?);
+                    }
+                    if q != max {
+                        both.push(self.csp_wide_rel(
+                            csp,
+                            BinaryOp::Leq,
+                            x,
+                            &lit(&q),
+                            env,
+                            false,
+                        )?);
+                    }
+                    Self::csp_wide_and(both)
+                };
+                alts.push(n);
+            }
+        }
+        let set = Self::csp_wide_or(alts);
+        Some(match proj {
+            Some(p) => Self::csp_wide_and(vec![set, p]),
+            None => set,
         })
     }
 
