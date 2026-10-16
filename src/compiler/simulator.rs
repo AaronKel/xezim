@@ -7712,6 +7712,10 @@ pub struct Simulator {
     /// ELEMENT (`aa[k].q`): growing one creates the element (§7.8.6), see
     /// `mark_struct_coll_owner_present`.
     assoc_elem_colls: HashSet<String>,
+    /// Element collections (`@v#3[0]`, ...) of each automatic local array of
+    /// collections, keyed by the local's storage; dropped with it (see
+    /// `declare_local_coll_array`, `cleanup_dyn_storage`).
+    local_coll_elems: HashMap<String, Vec<String>>,
     /// `(callee member, caller member)` collection copy-backs of the dynamic
     /// members of an output/inout/ref struct formal, drained into the call's
     /// queue writebacks (see `bind_unpacked_struct_formal`).
@@ -13314,6 +13318,7 @@ impl Simulator {
             indexed_coll_mask: std::cell::Cell::new(0),
             struct_coll_member_len_mask: std::cell::Cell::new(0),
             assoc_elem_colls: HashSet::default(),
+            local_coll_elems: HashMap::default(),
             pending_struct_coll_wb: Vec::new(),
             pending_ret_struct: None,
             class_member_names_cell: std::cell::OnceCell::new(),
@@ -85550,6 +85555,17 @@ impl Simulator {
                     None
                 };
             let dims = scope_sized.as_ref().unwrap_or(dims);
+            // §7.4.5 / §7.8: a local unpacked array whose ELEMENT is a
+            // collection (`int q[3][$]`, `int v[2][string][string]`), as a
+            // module-scope one is registered in elaboration: the fixed outer
+            // shape, and every element its own queue / associative array.
+            // Without it the trailing dimensions were dropped, so
+            // `v[0]["A"] = 7` and `q[1].push_back(4)` were lost.
+            if let Some(k) = super::elaborate::coll_elem_split(dims)
+                && self.declare_local_coll_array(d, data_type, dims, k, w, lifetime.clone())
+            {
+                continue;
+            }
             // A local MULTI-dimensional array was registered from its
             // first dimension only, so `int n[2][2]` became a 1-D array
             // of double-width elements: `n[1][0]` read 0 and the
@@ -89017,6 +89033,106 @@ impl Simulator {
                 );
             }
         }
+    }
+
+    /// Register a local array of collections (see the caller): `dims[..k]`
+    /// fixed, `dims[k]` the element's collection kind. Returns false (nothing
+    /// registered) when the outer shape is not a fixed one.
+    #[cold]
+    #[inline(never)]
+    fn declare_local_coll_array(
+        &mut self,
+        d: &VarDeclarator,
+        data_type: &DataType,
+        dims: &[crate::ast::types::UnpackedDimension],
+        k: usize,
+        w: u32,
+        lifetime: Option<crate::ast::types::Lifetime>,
+    ) -> bool {
+        use crate::ast::types::UnpackedDimension as UD;
+        let shape: Option<Vec<(i64, i64)>> = dims[..k]
+            .iter()
+            .map(|dim| match dim {
+                UD::Range { left, right, .. } => {
+                    let l = super::elaborate::const_eval_i64_with_params(left, None)?;
+                    let r = super::elaborate::const_eval_i64_with_params(right, None)?;
+                    Some((l.min(r), l.max(r)))
+                }
+                UD::Expression { expr, .. } => {
+                    let n = super::elaborate::const_eval_i64_with_params(expr, None)?;
+                    (n > 0).then_some((0, n - 1))
+                }
+                _ => None,
+            })
+            .collect();
+        let Some(shape) = shape.filter(|sh| {
+            sh.iter()
+                .map(|&(lo, hi)| (hi - lo + 1).max(0))
+                .product::<i64>()
+                <= 4096
+        }) else {
+            return false;
+        };
+        let bare = d.name.name.clone();
+        let name = if matches!(lifetime, Some(crate::ast::types::Lifetime::Static)) {
+            bare
+        } else {
+            self.declare_local_dyn(&bare)
+        };
+        match shape.len() {
+            1 => {
+                self.module
+                    .arrays
+                    .insert(name.clone(), (shape[0].0, shape[0].1, w));
+            }
+            2 => {
+                self.module
+                    .arrays_2d
+                    .insert(name.clone(), (shape[0], shape[1], w));
+            }
+            _ => {
+                self.module
+                    .arrays_nd
+                    .insert(name.clone(), (shape.clone(), w));
+            }
+        }
+        let assoc_key = match &dims[k] {
+            UD::Associative { data_type: kdt, .. } => Some(kdt.as_ref().is_some_and(|dt| {
+                matches!(
+                    super::elaborate::resolve_typedef_chain(dt, &self.module.typedef_types),
+                    DataType::Simple {
+                        kind: crate::ast::types::SimpleType::String,
+                        ..
+                    }
+                )
+            })),
+            _ => None,
+        };
+        let mut elems = Vec::new();
+        for sfx in Self::nd_elem_suffixes(&shape) {
+            let en = format!("{}{}", name, sfx);
+            elems.push(en.clone());
+            // A fresh declaration: drop what a prior frame's same-named
+            // local left behind.
+            for key in self.signals.keys_with_elem_prefix(&format!("{}[", en)) {
+                self.signals.remove(&key);
+            }
+            match assoc_key {
+                Some(is_str) => {
+                    self.module.associative_arrays.insert(en, is_str);
+                }
+                None => {
+                    self.module.dynamic_arrays.insert(en.clone());
+                    self.module.arrays.insert(en.clone(), (0, 63, w));
+                    self.set_queue_size(&en, 0);
+                }
+            }
+        }
+        if name.starts_with('@') {
+            self.local_coll_elems.insert(name.clone(), elems);
+        }
+        self.module.var_decl_types.insert(name, data_type.clone());
+        true
     }
 
     /// Whether a local's unpacked dimension needs the enclosing scope to be
@@ -108929,6 +109045,19 @@ impl Simulator {
         self.module.var_decl_types.remove(key);
         self.module.packed_struct_fields.remove(key);
         self.module.array_elem_class.remove(key);
+        if !self.local_coll_elems.is_empty()
+            && let Some(elems) = self.local_coll_elems.remove(key)
+        {
+            for en in elems {
+                for k in self.signals.keys_with_elem_prefix(&format!("{}[", en)) {
+                    self.signals.remove(&k);
+                }
+                self.signals.remove(&format!("{}.size", en));
+                self.module.associative_arrays.remove(&en);
+                self.module.dynamic_arrays.remove(&en);
+                self.module.arrays.remove(&en);
+            }
+        }
         self.signals.remove(&size_key);
         self.widths.remove(key);
         self.string_signals.remove(key);
