@@ -334,7 +334,6 @@ fn issue_317_clocking_iff_sees_this_edge() {
 /// queues at package, module, class, interface and block scope, every case
 /// in its own top module, run verbatim. The reference passes all 41.
 #[test]
-#[ignore = "#312 survey: 48 checks fail (chained/cross-package typedefs, class AA properties, 2-D AAs, typedef'd formals and returns)"]
 fn issue_312_survey_multi_module() {
     let msgs = outputs(
         include_str!("../issue_cases/foreach_typedef_312_multi_module.sv"),
@@ -347,7 +346,6 @@ fn issue_312_survey_multi_module() {
 /// The same 41-case survey with every case in one module, run verbatim. The
 /// reference passes all 41.
 #[test]
-#[ignore = "#312 survey: 66 checks fail when the cases share one module, including the no-typedef controls"]
 fn issue_312_survey_single_module() {
     let msgs = outputs(
         include_str!("../issue_cases/foreach_typedef_312_single_module.sv"),
