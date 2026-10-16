@@ -239,12 +239,32 @@ fn clocking_event_iff_sibling_shapes() {
 }
 
 /// §14.13: a clockvar's first sample (x to its value) is a change, so
-/// `@(cb.sig)` completes at the first clocking event; and a `join_any`
-/// whose item is a bare `@(cb iff g)` completes at the first edge on the
-/// reference simulator.
+/// `@(cb.sig)` completes at the first clocking event. The block lives in an
+/// interface instance, whose clockvars are named by their inlined path
+/// (`bus.data`); `@(bus.cb.data)` used to miss their sample mirror and wait
+/// on nothing.
 #[test]
-#[ignore = "clockvar first-sample change event and join_any bare-event item are not modelled"]
 fn clockvar_first_sample_event_and_join_any_item() {
+    let want: Vec<&str> = EXPECT_FIRST_SAMPLE
+        .iter()
+        .copied()
+        .filter(|l| !l.contains("fork_any"))
+        .collect();
+    assert_eq!(
+        sorted_t_lines(&SRC_FIRST_SAMPLE.replace(FORK_ANY_BLOCK, "")),
+        want
+    );
+}
+
+/// Deliberate divergence (§9.4.2.3): the reference simulator completes a
+/// `join_any` whose item is a bare `@(cb iff g);` at the next clocking
+/// event even though `g` is false there — it drops the guard of a
+/// null-statement event item in a fork of two or more items (an item with a
+/// statement, or a lone item, keeps it). xezim follows the standard and
+/// completes the item when the guard holds (t=35).
+#[test]
+#[ignore = "deliberate divergence: the reference simulator ignores the iff guard of a bare @(cb iff g); item of a multi-item fork (§9.4.2.3)"]
+fn join_any_bare_clocking_iff_item() {
     assert_eq!(sorted_t_lines(SRC_FIRST_SAMPLE), EXPECT_FIRST_SAMPLE);
 }
 
@@ -255,6 +275,13 @@ fn clockvar_first_sample_event_and_join_any_item() {
 #[ignore = "program-block processes resume in the Active region"]
 fn program_clocking_wait_after_raw_edge() {
     assert_eq!(sorted_t_lines(SRC_PROGRAM), EXPECT_PROGRAM);
+}
+
+/// §14.13: `@(bus.cb.sig)` of an interface's clocking block, armed after
+/// the first sample, and an `always @(bus.cb.sig)`.
+#[test]
+fn interface_clockvar_event_shapes() {
+    assert_eq!(sorted_t_lines(SRC_IFACE_CBVAR), EXPECT_IFACE_CBVAR);
 }
 
 const SRC_SIBLINGS: &str = r#"
@@ -423,6 +450,17 @@ module top;
 endmodule
 "#;
 
+/// The `join_any` block of `SRC_FIRST_SAMPLE` (see
+/// `join_any_bare_clocking_iff_item`).
+const FORK_ANY_BLOCK: &str = r#"  initial begin
+    fork
+      @(bus.cb iff (bus.cb.data == 16'h0001));
+      #100;
+    join_any
+    $display("T| fork_any t=%0t", $time);
+  end
+"#;
+
 const EXPECT_FIRST_SAMPLE: [&str; 5] = [
     "T| cbvar_data t=5 d=0000",
     "T| cbvar_first t=5 cs=1",
@@ -466,3 +504,38 @@ endmodule
 "#;
 
 const EXPECT_PROGRAM: [&str; 3] = ["T| mod_plain t=5", "T| prog_iff t=35", "T| prog_plain t=15"];
+const SRC_IFACE_CBVAR: &str = r#"`timescale 1ns/1ns
+interface bus_if (input logic clk);
+  logic [15:0] data;
+  logic cs_n;
+  clocking cb @(posedge clk);
+    input data;
+    input cs_n;
+  endclocking
+endinterface
+module top;
+  logic clk = 0;
+  always #5 clk = ~clk;
+  bus_if bus (clk);
+  initial begin
+    bus.data = 0; bus.cs_n = 1;
+    #30 bus.data = 16'h0001;
+  end
+  initial begin
+    #7 @(bus.cb.data);
+    $display("T| late t=%0t d=%h", $time, bus.cb.data);
+  end
+  initial begin
+    @(bus.cb.data);
+    $display("T| early t=%0t d=%h", $time, bus.cb.data);
+  end
+  always @(bus.cb.cs_n) $display("T| alw t=%0t cs=%b", $time, bus.cb.cs_n);
+  initial #50 $finish;
+endmodule
+"#;
+
+const EXPECT_IFACE_CBVAR: [&str; 3] = [
+    "T| alw t=5 cs=1",
+    "T| early t=5 d=0000",
+    "T| late t=35 d=0001",
+];

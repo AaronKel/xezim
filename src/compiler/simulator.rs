@@ -42674,6 +42674,25 @@ impl Simulator {
         }
     }
 
+    /// §14.13: the hidden sample mirror of clockvar `leaf` of block `cb`. A
+    /// block of a module or interface INSTANCE (`bus.cb`) names its signals
+    /// by their inlined path (`bus.data`), so `bus.cb.data` matches the
+    /// signal whose last segment is `data`.
+    fn clocking_mirror_name(module: &ElaboratedModule, cb: &str, leaf: &str) -> String {
+        let sig = module.clocking_blocks.get(cb).and_then(|cd| {
+            cd.signals
+                .iter()
+                .find(|s| s.name.name == leaf)
+                .or_else(|| {
+                    cd.signals
+                        .iter()
+                        .find(|s| s.name.name.rsplit('.').next() == Some(leaf))
+                })
+                .map(|s| s.name.name.as_str())
+        });
+        format!("{}{}.{}", CB_SAMPLE_PREFIX, cb, sig.unwrap_or(leaf))
+    }
+
     fn collect_expr_reads(
         expr: &Expression,
         module: &ElaboratedModule,
@@ -42696,11 +42715,10 @@ impl Simulator {
             if segs.len() >= 2 {
                 let cb = segs[..segs.len() - 1].join(".");
                 if module.clocking_blocks.contains_key(&cb) {
-                    reads.insert(format!(
-                        "{}{}.{}",
-                        CB_SAMPLE_PREFIX,
-                        cb,
-                        segs[segs.len() - 1]
+                    reads.insert(Self::clocking_mirror_name(
+                        module,
+                        &cb,
+                        &segs[segs.len() - 1],
                     ));
                     return;
                 }
@@ -44351,8 +44369,11 @@ impl Simulator {
                         // only when the sample actually changed.
                         if segs.len() >= 2 {
                             if let Some(cbk) = self.resolve_clocking_key(&segs[..segs.len() - 1]) {
-                                let hidden =
-                                    format!("{}{}.{}", CB_SAMPLE_PREFIX, cbk, segs[segs.len() - 1]);
+                                let hidden = Self::clocking_mirror_name(
+                                    &self.module,
+                                    &cbk,
+                                    segs[segs.len() - 1],
+                                );
                                 if self.signal_name_to_id.contains_key(hidden.as_str()) {
                                     out.push(Sensitivity {
                                         signal_name: hidden,
@@ -44516,11 +44537,10 @@ impl Simulator {
                                 if let Some(cbk) =
                                     self.resolve_clocking_key(&refs[..refs.len() - 1])
                                 {
-                                    let hidden = format!(
-                                        "{}{}.{}",
-                                        CB_SAMPLE_PREFIX,
-                                        cbk,
-                                        refs[refs.len() - 1]
+                                    let hidden = Self::clocking_mirror_name(
+                                        &self.module,
+                                        &cbk,
+                                        refs[refs.len() - 1],
                                     );
                                     if self.signal_name_to_id.contains_key(hidden.as_str()) {
                                         out.push(Sensitivity {
