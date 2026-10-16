@@ -483,6 +483,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   direction in assignment patterns, `%p`, `foreach` and
   `$left`/`$right`/`$increment`, and `$left(m[0])` describes the selected row
   (§7.4.2, §20.7).
+* A scalar `bit` DPI formal passes only its one bit to C, and an `output` or
+  `inout` one keeps only bit 0 of what C writes (§35.5.6.1). (#330, contributed
+  by Thomasb81)
+* A real converted to an integral type wraps to the target width instead of
+  saturating, and fills targets wider than 64 bits: `longint l = 2.0**64` is 0
+  (§6.12.2). (#324, #330)
 
 **Performance**
 
