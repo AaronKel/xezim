@@ -65280,12 +65280,14 @@ impl Simulator {
             key
         };
         let key = render_key(rest);
-        let base = slot * struct_w;
+        // Checked: an out-of-range index must miss, not wrap into another bit.
+        let base = slot.checked_mul(struct_w)?;
         // Exact hit: the whole path names a registered field.
         if let Some((_, off, w)) = fields.iter().find(|(m, _, _)| m == &key) {
             let (off, w) = (*off, *w);
             let total = self.get_signal_value_by_name(&storage)?.width;
-            return (base + off + w <= total).then_some((storage, base + off, w));
+            let lsb = base.checked_add(off)?;
+            return (lsb.checked_add(w)? <= total).then_some((storage, lsb, w));
         }
         // Otherwise walk the path: fields and indices interleaved at any
         // depth (`wdata[0]`, `descriptors[0].region`, `m[1].words[2]`). Every
@@ -65361,14 +65363,14 @@ impl Simulator {
                             .product();
                         (ew / inner.max(1), slot)
                     };
-                    disp += slot * step_w;
+                    disp = disp.checked_add(slot.checked_mul(step_w)?)?;
                     fw = step_w.min(fw);
                 }
             }
         }
-        let lsb = base + off + disp;
+        let lsb = base.checked_add(off)?.checked_add(disp)?;
         let total = self.get_signal_value_by_name(&storage)?.width;
-        (lsb + fw <= total).then_some((storage, lsb, fw))
+        (lsb.checked_add(fw)? <= total).then_some((storage, lsb, fw))
     }
 
     /// Resolve `arr[i]…[j].field…[k]` over a PACKED array of packed structs to
