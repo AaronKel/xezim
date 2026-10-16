@@ -108671,6 +108671,20 @@ impl Simulator {
                                 let ok = self.inline_constraints_satisfied(constraints);
                                 return Value::from_u64(if ok { 1 } else { 0 }, 32);
                             }
+                            // §18.6.1/§18.12: when randomize() fails, the
+                            // variables keep the values they had. The trial
+                            // assignments below write the targets, so keep
+                            // the integral scalar ones to put back.
+                            let mut snapshot: Vec<(Expression, Value)> = Vec::new();
+                            for a in args {
+                                if matches!(a.kind, ExprKind::Ident(_))
+                                    && self.array_operand_name(a).is_none()
+                                    && self.lrm_self_width(a).is_some_and(|w| w <= 64)
+                                {
+                                    let v = self.eval_expr(a);
+                                    snapshot.push((a.clone(), v));
+                                }
+                            }
                             self.exec_std_randomize(args);
                             // Collect the randomize target lvalues by name. A
                             // struct arg expands to its per-field lvalues so
@@ -108716,6 +108730,9 @@ impl Simulator {
                             if let Some(ok) = self.std_randomize_sized(constraints, &targets) {
                                 if !ok {
                                     self.rand_fail_warn_std(constraints);
+                                    for (lv, v) in &snapshot {
+                                        self.assign_value(lv, v);
+                                    }
                                 }
                                 return Value::from_u64(ok as u64, 32);
                             }
@@ -108893,6 +108910,9 @@ impl Simulator {
                             // narrow band the i64 interval solver cannot reach.
                             if !satisfied {
                                 self.rand_fail_warn_std(constraints);
+                                for (lv, v) in &snapshot {
+                                    self.assign_value(lv, v);
+                                }
                             }
                             return Value::from_u64(if satisfied { 1 } else { 0 }, 32);
                         }

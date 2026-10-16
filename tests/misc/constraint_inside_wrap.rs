@@ -330,3 +330,25 @@ endmodule
     let expected = ["T|P1 0 1", "T|R4 ok=1 a8=255", "T|R5 ok=0", "T|R6 ok=0"];
     assert_eq!(t_lines(src), expected);
 }
+
+/// §18.6.1/§18.12: a failed `std::randomize` leaves its variables as they
+/// were.
+#[test]
+fn failed_std_randomize_keeps_values() {
+    let src = r#"module top;
+  bit [7:0] a8;
+  int ok;
+  initial begin
+    a8 = 255;
+    ok = std::randomize(a8) with { !((a8 + 8'd1) inside {[1:256]}); };
+    $display("T|R6 ok=%0d a8=%0d", ok, a8);
+    a8 = 7;
+    ok = std::randomize(a8) with { a8 > 10; a8 < 5; };
+    $display("T|R7 ok=%0d a8=%0d", ok, a8);
+  end
+endmodule
+"#;
+    // Expected values from the reference simulator.
+    let expected = ["T|R6 ok=0 a8=255", "T|R7 ok=0 a8=7"];
+    assert_eq!(t_lines(src), expected);
+}
