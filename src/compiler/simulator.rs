@@ -82096,11 +82096,37 @@ impl Simulator {
                     .last()
                     .is_some_and(|f| f.iter().any(|(k, _)| k == &lh.path[0].name.name)))
         };
-        let formal_operand = bare_is_current_formal(lvalue) || bare_is_current_formal(rvalue);
+        // §7.9.9: a whole associative-array copy with a class property on ONE
+        // side and a plain module, local or formal associative variable on the
+        // other (`h.m = src`, `dst = h.m`, `this.m = s` with `s` a formal).
+        // Neither this path (which wanted a property on both sides) nor the
+        // plain-variable copy (which wants a plain name on the left) took it,
+        // so it fell to a scalar assignment that copied no entries. A bare
+        // formal resolves through the call frame, never to a same-named
+        // property (see above).
+        let (lf, rf) = (
+            bare_is_current_formal(lvalue),
+            bare_is_current_formal(rvalue),
+        );
+        let formal_operand = lf || rf;
+        let (l_assoc, r_assoc) = if formal_operand {
+            (None, None)
+        } else {
+            (self.expr_assoc_name(lvalue), self.expr_assoc_name(rvalue))
+        };
+        // §7.9.9 / §7.10.2.5: a whole associative-array copy with a plain
+        // variable on one side, or a popped associative element (see
+        // `assoc_copy_with_plain_side`).
+        if (formal_operand
+            || l_assoc.is_some() != r_assoc.is_some()
+            || matches!(rvalue.kind, ExprKind::Call { .. }))
+            && !self.module.associative_arrays.is_empty()
+            && self.assoc_copy_with_plain_side(lvalue, rvalue, lf, rf, &l_assoc, &r_assoc)
+        {
+            return;
+        }
         if !formal_operand {
-            if let (Some(dst), Some(src)) =
-                (self.expr_assoc_name(lvalue), self.expr_assoc_name(rvalue))
-            {
+            if let (Some(dst), Some(src)) = (l_assoc, r_assoc) {
                 // A QUEUE / DYNAMIC-ARRAY copy (`a.q = b.q`) must copy
                 // elements + size, not re-key assoc entries. Distinguish
                 // by whether the collection is a true assoc array.
@@ -83543,6 +83569,35 @@ impl Simulator {
                     } else {
                         exprs.iter().collect()
                     };
+                    // §10.10 / §7.8: in a queue (or array) of ASSOCIATIVE
+                    // arrays, an associative operand (`q = {src}`) is one
+                    // whole element: its entries are copied into it.
+                    // Evaluated as one value, the element kept no entries.
+                    let assoc_srcs: Vec<Option<String>> =
+                        if self.module.associative_arrays.is_empty() {
+                            Vec::new()
+                        } else {
+                            items.iter().map(|e| self.assoc_value_operand(e)).collect()
+                        };
+                    if assoc_srcs.iter().any(Option::is_some) {
+                        let is_dyn = class_dyn || self.module.dynamic_arrays.contains(&*lname);
+                        let lo = self.module.arrays.get(&*lname).map_or(0, |t| t.0);
+                        for (i, (e, src)) in items.iter().zip(assoc_srcs).enumerate() {
+                            let elem = format!("{}[{}]", lname, lo + i as i64);
+                            match src {
+                                Some(src) => self.store_assoc_elem(&elem, &src),
+                                None => {
+                                    let v = self.eval_expr(e);
+                                    self.set_signal_value_by_name(&elem, v);
+                                }
+                            }
+                        }
+                        if is_dyn {
+                            self.set_queue_size(&lname, items.len() as u64);
+                        }
+                        self.settle_after_proc_write();
+                        return;
+                    }
                     // Expand queue/array elements in concat (e.g. q = {q, 4})
                     let all_vals = self.unpacked_concat_operand_values(items);
                     let is_dyn = class_dyn || self.module.dynamic_arrays.contains(&*lname);
@@ -120986,6 +121041,93 @@ impl Simulator {
         }
     }
 
+    /// §7.9.9: `dst = src` where one side is a class property (`l_assoc` /
+    /// `r_assoc`, from `expr_assoc_name`) and the other a plain module, local
+    /// or formal associative variable (`lf`/`rf`: a bare current-frame
+    /// formal or local, resolved through the frame only), and §7.10.2.5 /
+    /// §7.10.2.6 `got = q.pop_back()` on a queue of associative arrays.
+    /// Returns whether it assigned.
+    #[inline(never)]
+    fn assoc_copy_with_plain_side(
+        &mut self,
+        lvalue: &Expression,
+        rvalue: &Expression,
+        lf: bool,
+        rf: bool,
+        l_assoc: &Option<String>,
+        r_assoc: &Option<String>,
+    ) -> bool {
+        // §7.10.2.5 / §7.10.2.6: `got = q.pop_back()` on a queue of
+        // associative arrays hands the popped element's entries to an
+        // associative target (the element has no single value to return).
+        if let ExprKind::Call { func, args } = &rvalue.kind
+            && args.is_empty()
+            && self.callee_method_name_is(func, |m| matches!(m, "pop_front" | "pop_back"))
+            && let Some((qn, m)) = self.collection_method_of(func)
+        {
+            let sz = self.get_queue_size(&qn);
+            let elem = format!(
+                "{}[{}]",
+                qn,
+                if m == "pop_front" { 0 } else { sz.max(1) - 1 }
+            );
+            if sz > 0
+                && self.module.associative_arrays.contains_key(&elem)
+                && let Some(dst) = l_assoc
+                    .clone()
+                    .or_else(|| self.plain_assoc_operand(lvalue))
+                    .filter(|n| self.is_associative_array(n))
+            {
+                self.copy_assoc_entries(&dst, &elem);
+                self.eval_expr(rvalue);
+                self.settle_after_proc_write();
+                return true;
+            }
+        }
+        let plain_pair = if lf || rf {
+            // A formal side must itself be associative before the property
+            // side is resolved: most formals are not.
+            match (lf, rf) {
+                (true, false) => self
+                    .plain_assoc_operand(lvalue)
+                    .and_then(|d| Some((d, self.expr_assoc_name(rvalue)?))),
+                (false, true) => self
+                    .plain_assoc_operand(rvalue)
+                    .and_then(|s| Some((self.expr_assoc_name(lvalue)?, s))),
+                _ => None,
+            }
+        } else {
+            match (&l_assoc, &r_assoc) {
+                (Some(d), None) => self.plain_assoc_operand(rvalue).map(|s| (d.clone(), s)),
+                (None, Some(s)) => self.plain_assoc_operand(lvalue).map(|d| (d, s.clone())),
+                _ => None,
+            }
+        };
+        if let Some((dst, src)) = plain_pair
+            && self.is_associative_array(&dst)
+            && self.is_associative_array(&src)
+        {
+            if dst != src {
+                self.copy_assoc_entries(&dst, &src);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// A plain (non-member) associative-array operand — a module variable, or
+    /// a local's or formal's per-call storage — as its storage name.
+    fn plain_assoc_operand(&self, e: &Expression) -> Option<String> {
+        let ExprKind::Ident(h) = &e.kind else {
+            return None;
+        };
+        if h.path.len() != 1 || !h.path[0].selects.is_empty() {
+            return None;
+        }
+        let n = self.resolve_hier_name(h);
+        self.is_associative_array(&n).then(|| n.into_owned())
+    }
+
     /// §7.9.9: `dst = src` between associative arrays — `dst` ends up with
     /// exactly `src`'s entries.
     /// Reserved storage for an associative array a function returns.
@@ -122061,9 +122203,38 @@ impl Simulator {
             }
             return;
         }
+        // A queue of ASSOCIATIVE arrays: an element is a set of keyed entries.
+        if self.module.associative_arrays.contains_key(&src) {
+            self.store_assoc_elem(&dst, &src);
+            return;
+        }
         if let Some(v) = self.get_signal_value_by_name(&src) {
             self.set_signal_value_by_name(&dst, v);
         }
+    }
+
+    /// An associative-array VALUE operand (`src`, `h.m`, a formal or local):
+    /// its storage name.
+    fn assoc_value_operand(&mut self, e: &Expression) -> Option<String> {
+        if !matches!(e.kind, ExprKind::Ident(_) | ExprKind::MemberAccess { .. }) {
+            return None;
+        }
+        self.plain_assoc_operand(e)
+            .or_else(|| self.expr_assoc_name(e))
+            .filter(|n| self.is_associative_array(n))
+    }
+
+    /// §7.8: make collection element `elem` an associative array holding
+    /// exactly the entries of associative array `src`.
+    fn store_assoc_elem(&mut self, elem: &str, src: &str) {
+        let is_str = self.is_string_keyed_array(src);
+        self.module
+            .associative_arrays
+            .insert(elem.to_string(), is_str);
+        if let Some(w) = self.module.assoc_elem_widths.get(src).copied() {
+            self.module.assoc_elem_widths.insert(elem.to_string(), w);
+        }
+        self.copy_assoc_entries(elem, src);
     }
 
     /// §7.2.1: copy the unpacked struct class property `key` of object `h`
@@ -123097,6 +123268,14 @@ impl Simulator {
                 self.set_queue_size(elem, n);
                 return;
             }
+        }
+        // §7.10 / §7.8: pushing an ASSOCIATIVE-array value (a queue of
+        // associative arrays, `int q[$][string]`) copies the source's entries
+        // into the new element, which becomes an associative array of the
+        // source's key kind. Evaluated as one value it kept no entries.
+        if let Some(src) = self.assoc_value_operand(arg) {
+            self.store_assoc_elem(elem, &src);
+            return;
         }
         if let Some(su) = self.queue_elem_struct(obj_name) {
             if Self::spreads_member_wise(&su) {
