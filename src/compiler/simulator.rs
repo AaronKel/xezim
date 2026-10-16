@@ -17223,9 +17223,15 @@ impl Simulator {
     /// an assignment to the formal would, so a real rounds (§6.12.2) instead
     /// of passing its f64 bit pattern (`c_add(2.6, 3.4)` handed C 0s).
     fn dpi_int_actual(&mut self, e: &Expression) -> Value {
+        self.dpi_int_actual_w(e, 64)
+    }
+
+    /// `dpi_int_actual` for a packed-vector formal of `width` bits: a real
+    /// fills all of them (`1.0e30` into a `bit [127:0]`).
+    fn dpi_int_actual_w(&mut self, e: &Expression, width: u32) -> Value {
         let v = self.eval_expr(e);
         if v.is_real {
-            Self::real_to_int(v.to_f64(), 64)
+            Self::real_to_int(v.to_f64(), width.max(64))
         } else {
             v
         }
@@ -17513,7 +17519,7 @@ impl Simulator {
                     // of {aval, bval} u32 pairs (see dpi_value_to_logic_interleaved).
                     let vv = args
                         .get(i)
-                        .map(|e| self.dpi_int_actual(e))
+                        .map(|e| self.dpi_int_actual_w(e, *width))
                         .unwrap_or_else(|| Value::zero(*width));
                     let buf = Self::dpi_value_to_logic_interleaved(&vv, *width);
                     logic_aval.push(buf);
@@ -17524,7 +17530,7 @@ impl Simulator {
                 DpiArgKind::VecLogicOut(width) => {
                     let init = args
                         .get(i)
-                        .map(|e| self.dpi_int_actual(e))
+                        .map(|e| self.dpi_int_actual_w(e, *width))
                         .unwrap_or_else(|| Value::zero(*width));
                     let buf = Self::dpi_value_to_logic_interleaved(&init, *width);
                     logic_aval.push(buf);
@@ -17540,7 +17546,7 @@ impl Simulator {
                     // ABI differs from VecLogicIn: no bval field.
                     let vv = args
                         .get(i)
-                        .map(|e| self.dpi_int_actual(e))
+                        .map(|e| self.dpi_int_actual_w(e, *width))
                         .unwrap_or_else(|| Value::zero(*width));
                     let (aval, _bval) = Self::dpi_value_to_logic_words(&vv, *width);
                     // Store in a dedicated Vec<Vec<u32>> to keep storage stable.
@@ -17553,7 +17559,7 @@ impl Simulator {
                 DpiArgKind::VecBitOut(width) => {
                     let init = args
                         .get(i)
-                        .map(|e| self.dpi_int_actual(e))
+                        .map(|e| self.dpi_int_actual_w(e, *width))
                         .unwrap_or_else(|| Value::zero(*width));
                     let (aval, _bval) = Self::dpi_value_to_logic_words(&init, *width);
                     logic_aval.push(aval);
@@ -140537,20 +140543,49 @@ impl Simulator {
     /// IEEE 1800-2017 §6.12.2: converting a real to an integral type ROUNDS to
     /// the nearest, ties away from zero. `f64 as u64` both truncated AND
     /// saturated a negative value to 0, so `int i = -5.0;` silently yielded 0.
+    /// The rounded integer then lands in the target like any integral value:
+    /// its two's-complement bits wrap modulo 2^width (a real 2^64 in a
+    /// `longint` is 0, -2^63-4096 is 2^63-4096), and a target wider than 64
+    /// bits keeps every bit (1.0e30 in `bit [127:0]`), as the reference does.
+    /// No real saturates: it is a 53-bit integer times a power of two.
     fn real_to_int(f: f64, width: u32) -> Value {
+        let width = width.max(1);
         if !f.is_finite() {
-            return Value::zero(width.max(1));
+            return Value::zero(width);
         }
         // `f64::round` is already ties-away-from-zero.
         let r = f.round();
-        // A value in [2^63, 2^64) fits an unsigned 64-bit target; the i64
-        // cast would saturate it (`longint unsigned` 1.0e19).
-        let bits = if (9.223_372_036_854_775_808e18..1.844_674_407_370_955_161_6e19).contains(&r) {
-            r as u64
-        } else {
-            r as i64 as u64
-        };
-        Value::from_u64(bits, width.max(1))
+        if width <= 64 && r.abs() < 9.223_372_036_854_775_808e18 {
+            return Value::from_u64(r as i64 as u64, width);
+        }
+        let nwords = width.div_ceil(64) as usize;
+        let mut words = vec![0u64; nwords];
+        if r != 0.0 {
+            // |r| = mant * 2^exp exactly (|r| >= 1, so `exp >= -52`).
+            let bits = r.abs().to_bits();
+            let exp = ((bits >> 52) & 0x7ff) as i64 - 1075;
+            let mant = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+            if exp < 0 {
+                words[0] = mant >> (-exp);
+            } else {
+                let (wi, sh) = ((exp / 64) as usize, (exp % 64) as u32);
+                if wi < nwords {
+                    words[wi] = mant << sh;
+                }
+                if sh > 0 && wi + 1 < nwords {
+                    words[wi + 1] = mant >> (64 - sh);
+                }
+            }
+            if r < 0.0 {
+                let mut carry = true;
+                for w in words.iter_mut() {
+                    let (v, c) = (!*w).overflowing_add(carry as u64);
+                    *w = v;
+                    carry = c;
+                }
+            }
+        }
+        Value::from_words(&words, width)
     }
 
     /// §13.4.1: how a function's value converts to its declared return type,

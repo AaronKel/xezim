@@ -418,6 +418,8 @@ mod packed_struct_pattern_compile;
 mod per_spec_static_singletons;
 #[path = "types/queue_literal_function_return.rs"]
 mod queue_literal_function_return;
+#[path = "types/real_to_int_wraps.rs"]
+mod real_to_int_wraps;
 #[path = "types/real_to_integral_local.rs"]
 mod real_to_integral_local;
 #[path = "types/ref_formal_element_write.rs"]
