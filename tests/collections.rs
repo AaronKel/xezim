@@ -167,3 +167,5 @@ mod nested_assoc_foreach;
 mod assoc_formal_struct_elems;
 #[path = "collections/function_collection_return.rs"]
 mod function_collection_return;
+#[path = "collections/struct_dynamic_members_instances.rs"]
+mod struct_dynamic_members_instances;

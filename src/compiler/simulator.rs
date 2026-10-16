@@ -110157,11 +110157,21 @@ impl Simulator {
     /// both the way a standalone `int q[$]` / `int aq[7:0][$]` is.
     fn register_struct_member_collections(&mut self) {
         use crate::ast::types::UnpackedDimension as UD;
+        // A root is a declared variable: a bare name, or one scoped by an
+        // instance path (`top2.h` when several top modules run) — not a
+        // member path below another declared variable.
+        fn is_root(vdt: &HashMap<String, DataType>, k: &str, extra: &[char]) -> bool {
+            !k.contains(['[', ':'])
+                && !k.contains(extra)
+                && k.rsplit_once('.').is_none_or(|(parent, _)| {
+                    !vdt.contains_key(parent) && !parent.contains(['[', ':', '#'])
+                })
+        }
         let roots: Vec<(String, DataType)> = self
             .module
             .var_decl_types
             .iter()
-            .filter(|(k, _)| !k.contains(['.', '[', ':']))
+            .filter(|(k, _)| is_root(&self.module.var_decl_types, k, &[]))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let params = self.module.parameters.clone();
@@ -110263,12 +110273,14 @@ impl Simulator {
         // exactly as its runtime classification would.
         let mut names: Vec<String> = Vec::new();
         let mut budget = 1usize << 16;
-        for (root, dt) in self
+        let roots2: Vec<(String, DataType)> = self
             .module
             .var_decl_types
             .iter()
-            .filter(|(k, _)| !k.contains(['.', '[', ':', '#']))
-        {
+            .filter(|(k, _)| is_root(&self.module.var_decl_types, k, &['#']))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (root, dt) in roots2.iter() {
             let Some(su) = self.unpacked_struct_of(dt) else {
                 continue;
             };
