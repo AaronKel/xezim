@@ -10908,6 +10908,28 @@ impl Simulator {
                 }
                 out
             }
+            // §26.3: module and package subroutine bodies spell `P::m` the
+            // way the process bodies do (see `flatten_pkg_member_refs`).
+            if !module.packages.is_empty() {
+                let pkgs: std::collections::HashSet<String> =
+                    module.packages.iter().cloned().collect();
+                let flat = |items: &[Statement]| -> Vec<Statement> {
+                    items
+                        .iter()
+                        .map(|s| super::elaborate::flatten_pkg_member_refs(s, &pkgs))
+                        .collect()
+                };
+                for td in module.tasks.values_mut() {
+                    td.items = flat(&td.items);
+                }
+                let fnames: Vec<String> = module.functions.keys().cloned().collect();
+                for n in fnames {
+                    if let Some(mut fd) = module.functions.remove(&n) {
+                        fd.items = flat(&fd.items);
+                        module.functions.insert(n, fd);
+                    }
+                }
+            }
             // §6.21/§9.3.4: a collection local of a NESTED block (or of a
             // module task / function body) that shadows a module item or a
             // local of an enclosing block is alpha-renamed too, innermost
@@ -125159,7 +125181,17 @@ impl Simulator {
             ExprKind::Ident(h)
                 if h.path.len() >= 2 && h.path.iter().all(|s| s.selects.is_empty()) =>
             {
-                let base = h.path[..h.path.len() - 1]
+                // §26.3: `P::q.max()` names the package queue `q`, stored
+                // under its bare name (see `flat_member_name`).
+                let skip = usize::from(
+                    h.path.len() >= 3
+                        && self.module.packages.contains(&h.path[0].name.name)
+                        && !self
+                            .signal_name_to_id
+                            .contains_key(h.path[0].name.name.as_str())
+                        && !self.signals.contains_key(&h.path[0].name.name),
+                );
+                let base = h.path[skip..h.path.len() - 1]
                     .iter()
                     .map(|s| s.name.name.as_str())
                     .collect::<Vec<_>>()

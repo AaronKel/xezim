@@ -159,3 +159,5 @@ mod block_local_shadow_module;
 mod pattern_equality;
 #[path = "collections/compiled_string_queue_element_compare.rs"]
 mod compiled_string_queue_element_compare;
+#[path = "collections/package_refs_in_subroutines.rs"]
+mod package_refs_in_subroutines;
