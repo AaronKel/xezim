@@ -142377,51 +142377,12 @@ impl Simulator {
     }
 
     /// IEEE 1800-2017 §6.12.2: converting a real to an integral type ROUNDS to
-    /// the nearest, ties away from zero. `f64 as u64` both truncated AND
-    /// saturated a negative value to 0, so `int i = -5.0;` silently yielded 0.
-    /// The rounded integer then lands in the target like any integral value:
-    /// its two's-complement bits wrap modulo 2^width (a real 2^64 in a
-    /// `longint` is 0, -2^63-4096 is 2^63-4096), and a target wider than 64
-    /// bits keeps every bit (1.0e30 in `bit [127:0]`), as the reference does.
-    /// No real saturates: it is a 53-bit integer times a power of two.
+    /// the nearest, ties away from zero, and the integer wraps to the target
+    /// width (a target wider than 64 bits keeps every bit). One rule for the
+    /// simulator and the elaborator: `Value::from_real_wrapped`.
+    #[inline]
     fn real_to_int(f: f64, width: u32) -> Value {
-        let width = width.max(1);
-        if !f.is_finite() {
-            return Value::zero(width);
-        }
-        // `f64::round` is already ties-away-from-zero.
-        let r = f.round();
-        if width <= 64 && r.abs() < 9.223_372_036_854_775_808e18 {
-            return Value::from_u64(r as i64 as u64, width);
-        }
-        let nwords = width.div_ceil(64) as usize;
-        let mut words = vec![0u64; nwords];
-        if r != 0.0 {
-            // |r| = mant * 2^exp exactly (|r| >= 1, so `exp >= -52`).
-            let bits = r.abs().to_bits();
-            let exp = ((bits >> 52) & 0x7ff) as i64 - 1075;
-            let mant = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
-            if exp < 0 {
-                words[0] = mant >> (-exp);
-            } else {
-                let (wi, sh) = ((exp / 64) as usize, (exp % 64) as u32);
-                if wi < nwords {
-                    words[wi] = mant << sh;
-                }
-                if sh > 0 && wi + 1 < nwords {
-                    words[wi + 1] = mant >> (64 - sh);
-                }
-            }
-            if r < 0.0 {
-                let mut carry = true;
-                for w in words.iter_mut() {
-                    let (v, c) = (!*w).overflowing_add(carry as u64);
-                    *w = v;
-                    carry = c;
-                }
-            }
-        }
-        Value::from_words(&words, width)
+        Value::from_real_wrapped(f, width)
     }
 
     /// §13.4.1: how a function's value converts to its declared return type,
