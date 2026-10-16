@@ -509,6 +509,21 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   are queues or associative arrays work in submodules and in a second top
   module (§6.18, §7.4.5, §7.8, §12.7.3, §13.4, §13.5, §26.3). (#312,
   reported by Ganesh-TNL)
+* `$typename` names the type of integral expressions (`i+1` is `int`, `1+i` is
+  `bit signed[31:0]`, `i/2` is `integer`), casts and function results, prints
+  unpacked dimensions (`int$[0:1]`, `int$[]`, `int$[string]`) and struct and
+  enum typedefs with their scope, and spells declared 4-state vectors as
+  `reg[7:0]` (§20.6.1).
+* Locals declared through a typedef of a string collection
+  (`typedef string q_t[$]`) compare their elements as strings in compiled
+  methods (§6.16).
+* Assigning an element of a virtual-interface queue, dynamic array, fixed
+  array or static array (`p = o.vq[0]`, `p = S::pa[1]`) binds the variable to
+  that element's interface, and `G#(virtual pif)::one.data` reads through the
+  specialization's static virtual interface (§25.10, §8.9).
+* `%p` prints an unwritten member of a static struct array at its type's
+  default (0 for 2-state types and for `T` bound to `int`), including
+  `C#(int)::fa` and `N::fa[1]` (§6.8, §21.2.1.7).
 
 **Performance**
 
