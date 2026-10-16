@@ -105704,7 +105704,15 @@ impl Simulator {
             self.module
                 .var_decl_types
                 .get(name)
-                .or_else(|| self.module.var_decl_types.get(leaf))?
+                .or_else(|| self.module.var_decl_types.get(leaf))
+                // §7.4.5: an element array of an array of associative arrays
+                // (`v[0]` of `int v[2][string][string]`) has the root's type.
+                .or_else(|| {
+                    let root = name.split('[').next().unwrap_or(name);
+                    (root.len() < name.len() && !root.contains('.'))
+                        .then(|| self.module.var_decl_types.get(root))
+                        .flatten()
+                })?
         };
         // §7.2.1: a packed struct or union is one integral value too.
         matches!(
@@ -105980,20 +105988,26 @@ impl Simulator {
         false
     }
 
-    /// Strip trailing `[key]` index segments from a possibly-indexed storage
-    /// name, returning the declaration base (module-level or `<h>#member`).
-    /// `foo[1]` -> `foo`; `h#m[1][2]` -> `h#m`.
-    fn assoc_decl_base(&self, name: &str) -> Option<String> {
+    /// The associative array a possibly-indexed storage name selects into:
+    /// strip trailing `[key]` segments (`h#m[1][2]` -> `h#m[1]` -> `h#m`) down
+    /// to the DEEPEST prefix registered as an associative array.
+    ///
+    /// §7.4.5: that is the declaration root for a multidimensional
+    /// associative array, and an element (`v[0]` of `int
+    /// v[2][string][string]`) under a non-associative outer dimension.
+    fn assoc_registered_prefix<'a>(&self, name: &'a str) -> Option<&'a str> {
         let mut b = name;
         loop {
             match b.rfind('[') {
                 Some(p) if b[p + 1..].ends_with(']') => {
                     b = &b[..p];
+                    if self.module.associative_arrays.contains_key(b) {
+                        return Some(b);
+                    }
                 }
-                _ => break,
+                _ => return None,
             }
         }
-        if b != name { Some(b.to_string()) } else { None }
     }
 
     /// Nested associative-array receiver: `name` is `base[K1]...[Kn]` (n >= 1),
@@ -106007,10 +106021,7 @@ impl Simulator {
     /// proven from a stored key, but `first`/`num`/`size` on an empty array
     /// return 0 anyway.
     fn is_nested_assoc_elem(&self, name: &str) -> bool {
-        let Some(base) = self.assoc_decl_base(name) else {
-            return false;
-        };
-        if !self.module.associative_arrays.contains_key(&base) {
+        if self.assoc_registered_prefix(name).is_none() {
             return false;
         }
         let nested_prefix = format!("{name}[");
@@ -106926,14 +106937,21 @@ impl Simulator {
     }
 
     fn is_string_keyed_array(&self, name: &str) -> bool {
-        if self
-            .module
-            .associative_arrays
-            .get(name)
-            .copied()
-            .unwrap_or(false)
-        {
-            return true;
+        match self.module.associative_arrays.get(name) {
+            Some(true) => return true,
+            // §7.8.1: a NESTED element of a multidimensional associative
+            // array (`v[0][A]` of `int v[2][string][string]`) is keyed like
+            // the array its compound key starts at (see
+            // `multidim_assoc_elem`), so `v[0]["A"].exists("B")` looks up the
+            // key the write stored.
+            None if name.ends_with(']') && !name.contains('#') => {
+                if let Some(base) = self.assoc_registered_prefix(name)
+                    && let Some(&is_str) = self.module.associative_arrays.get(base)
+                {
+                    return is_str;
+                }
+            }
+            _ => {}
         }
 
         // A per-specialization STATIC collection storage key
@@ -110296,11 +110314,19 @@ impl Simulator {
         if rev.is_empty() {
             return None; // not an Index expression
         }
-        // The root must be a plain Ident naming an associative array.
+        // The prefix with one key outside it (§7.4.5 fallback below).
+        let ExprKind::Index { expr: start, .. } = &expr.kind else {
+            return None;
+        };
+        // The root must be a plain Ident naming an associative array, or
+        // (§7.4.5) a prefix of the chain names one: `v[0]["A"]` of
+        // `int v[2][string][string]`, or `a[0].m["A"]` of a struct member.
         let bh = if let ExprKind::Ident(bh) = &cur.kind {
             bh
         } else {
-            return None;
+            return self
+                .inner_assoc_compound_key(start, &rev, 1)
+                .map(|(_, k)| k);
         };
         let mut bn = self.resolve_hier_name(bh);
         if let Some(s) = self.instance_assoc_member(&bn) {
@@ -110324,7 +110350,9 @@ impl Simulator {
             }
         }
         if !self.is_associative_array(&bn) {
-            return None;
+            return self
+                .inner_assoc_compound_key(start, &rev, 1)
+                .map(|(_, k)| k);
         }
         let mut name = bn.clone();
         // Build root→leaf so the string reads `base[K1][K2]...[Kn]`.
@@ -110398,9 +110426,17 @@ impl Simulator {
             None if matches!(&cur.kind, ExprKind::MemberAccess { .. })
                 || matches!(&cur.kind, ExprKind::Ident(h) if h.path.len() >= 2) =>
             {
-                self.handle_assoc_storage_name(cur)?
+                match self.handle_assoc_storage_name(cur) {
+                    Some(n) => n,
+                    None => return self.inner_assoc_compound_key(base, &rev, 2),
+                }
             }
-            None => return None,
+            // §7.4.5 / §7.8: the root is NOT associative but an element of it
+            // is (`int v[2][string][string]`, `q[$][string][string]`, a
+            // class property of that shape), or it is an associative struct
+            // member (`a[0].m`): the compound key starts at the prefix naming
+            // that associative array, `v[0]`.
+            None => return self.inner_assoc_compound_key(base, &rev, 2),
         };
         // Distinguish a true multidim assoc from an assoc-of-queue/
         // dynamic-array (`m[k1][i]`): if the first-level element `m[K1]` is a
@@ -110421,6 +110457,70 @@ impl Simulator {
             key = format!("{}[{}]", key, ks);
         }
         Some((base_name, key))
+    }
+
+    /// The associative array a multiply-indexed `e[k1]..[kn]` selects into
+    /// when its root is not one (`multidim_assoc_elem`, `nested_index_name`):
+    /// the shallowest prefix (`start` with `j` Index levels peeled, so `j + 1`
+    /// keys outside it, at least `min_outside`; `j == rev.len() - 1` is the
+    /// root itself) whose storage is a registered associative array, as
+    /// `(that array, compound key)` with the outer keys (`rev[..=j]`,
+    /// innermost last) rendered in its key format. None when no prefix is one, or when the element right below it
+    /// is a queue / dynamic array (an associative array of queues, handled
+    /// by the collection paths).
+    #[inline(never)]
+    fn inner_assoc_compound_key(
+        &mut self,
+        start: &Expression,
+        rev: &[&Expression],
+        min_outside: usize,
+    ) -> Option<(String, String)> {
+        if self.module.associative_arrays.is_empty() {
+            return None;
+        }
+        for j in (min_outside.max(1) - 1..rev.len()).rev() {
+            let mut p = start;
+            for _ in 0..j {
+                let ExprKind::Index { expr, .. } = &p.kind else {
+                    return None;
+                };
+                p = expr;
+            }
+            let name = match &p.kind {
+                ExprKind::Index { .. } => self
+                    .coll_elem_expr_key(p)
+                    .filter(|n| self.module.associative_arrays.contains_key(n))
+                    .or_else(|| self.flat_member_name(p)),
+                // A struct member root (`s.m`, `a[0].m`), registered on first
+                // sight like any struct member collection.
+                ExprKind::MemberAccess { .. } => self.flat_member_name(p),
+                ExprKind::Ident(h) if h.path.len() >= 2 => self.flat_member_name(p),
+                _ => None,
+            };
+            if let Some(n) = name.as_deref().filter(|n| n.contains('.')) {
+                self.ensure_struct_member_coll(n);
+            }
+            let Some(name) = name.filter(|n| self.is_associative_array(n)) else {
+                continue;
+            };
+            let mut key = name.clone();
+            for (n, idx) in rev[..=j].iter().rev().enumerate() {
+                let kv = self.eval_expr(idx);
+                let ks = self.assoc_key_str(&name, &kv);
+                key.push('[');
+                key.push_str(&ks);
+                key.push(']');
+                if n == 0
+                    && j > 0
+                    && (self.module.dynamic_arrays.contains(&key)
+                        || self.module.arrays.contains_key(&key))
+                {
+                    return None;
+                }
+            }
+            return Some((name, key));
+        }
+        None
     }
 
     /// All randomizable property names across an object's class hierarchy.
@@ -118957,17 +119057,30 @@ impl Simulator {
         // array of collections (`s.sp[1]` of `T sp[4][$]`): every
         // dimension but the trailing collection one selected.
         let n = dims.len();
-        if n == 0 || nidx != n - 1 {
+        if n == 0 {
             return None;
         }
-        let kind = Self::coll_kind_of(&dims[n - 1..])?;
-        if dims[..n - 1]
+        // §7.8.1: an associative dimension with more after it (`int
+        // m[string][string]`) makes the member (or its element) an
+        // associative array of collections, stored under compound keys.
+        let k = match dims
+            .iter()
+            .position(|d| matches!(d, crate::ast::types::UnpackedDimension::Associative { .. }))
+        {
+            Some(k) if k + 1 < n => k,
+            _ => n - 1,
+        };
+        if nidx != k {
+            return None;
+        }
+        let kind = Self::coll_kind_of(&dims[k..=k])?;
+        if dims[..k]
             .iter()
             .any(|d| Self::coll_kind_of(std::slice::from_ref(d)).is_some())
         {
             return None;
         }
-        Some((kind, mdt, self.string_keyed_dim(&dims[n - 1])))
+        Some((kind, mdt, self.string_keyed_dim(&dims[k])))
     }
 
     /// The declaration of the struct member the flattened path `flat` ends
@@ -127862,9 +127975,22 @@ impl Simulator {
             // paths and reads 0 for a true assoc array — sv_22.)
             if self.is_associative_array(obj_name) {
                 let prefix = Self::name_with_suffix(obj_name, "[");
-                let c1 = self.signals.keys_with_elem_prefix(&prefix).len();
+                let keys = self.signals.keys_with_elem_prefix(&prefix);
+                // §7.8.1: an associative array of associative arrays (or of
+                // queues) stores its elements under compound keys
+                // (`m[A][B]`); size() counts the distinct first-level keys,
+                // as num() does, not the stored leaves.
+                // Every stored key of such an array is compound, so the first
+                // one tells.
+                if keys
+                    .first()
+                    .is_some_and(|k| k[prefix.len()..].contains("]["))
+                {
+                    let n = self.assoc_top_level_keys(obj_name).len();
+                    return Some(Self::int_count(n as u64));
+                }
                 let c2 = self.assoc_static_keys(&prefix).len();
-                return Some(Self::int_count((c1 + c2) as u64));
+                return Some(Self::int_count((keys.len() + c2) as u64));
             }
             if let Some(v) = self.signals.get(&Self::name_with_suffix(obj_name, ".size")) {
                 return Some(Self::int_count(v.to_u64().unwrap_or(0)));
