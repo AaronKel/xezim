@@ -36659,6 +36659,8 @@ impl Simulator {
         // The array table is snapshotted because the loop below needs `&mut
         // self`; it is names→ranges only, not ASTs.
         let arrays_snapshot = self.module.arrays.clone();
+        let descending_snapshot = self.module.descending_arrays.clone();
+        let decl_dims_snapshot = self.module.unpacked_decl_dims.clone();
         // §23.9/§6.10: a HIERARCHICAL continuous assign can target a
         // sub-instance INPUT PORT (`assign uut.mid.core.i_clk = tb_clk;`
         // with the port chain above unconnected). Identity port connects
@@ -36699,11 +36701,13 @@ impl Simulator {
                     .map(move |p| p.materialize(&params_snapshot))
             })
             .flat_map(|ca| {
-                match crate::compiler::elaborate::whole_array_assign_parts(
+                match crate::compiler::elaborate::whole_array_assign_parts_dir(
                     &ca.lhs,
                     &ca.rhs,
                     ca.delay,
                     &arrays_snapshot,
+                    Some(&descending_snapshot),
+                    Some(&decl_dims_snapshot),
                 ) {
                     Some(parts) => parts,
                     None => vec![ca],
