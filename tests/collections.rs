@@ -169,3 +169,5 @@ mod assoc_formal_struct_elems;
 mod function_collection_return;
 #[path = "collections/struct_dynamic_members_instances.rs"]
 mod struct_dynamic_members_instances;
+#[path = "collections/typedef_alias_dims.rs"]
+mod typedef_alias_dims;
