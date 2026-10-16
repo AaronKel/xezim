@@ -4432,6 +4432,13 @@ enum DpiArgKind {
     /// `svLogic*` for output and inout.
     LogicIn,
     LogicOut,
+    /// §35.5.6.1: a scalar two-state `bit` is an `svBit` (`unsigned char`)
+    /// by value, or an `svBit*` for output and inout. Unlike `int`/`byte`/
+    /// `shortint` (pass-by-value i32 whose low byte the C side reads) the
+    /// value must be reduced to its single meaningful bit (0/1) before
+    /// crossing the boundary — a 1-bit formal is not the low 8 bits.
+    BitIn,
+    BitOut,
     Int64In,
     Int64Out,
     Real32In,
@@ -16469,8 +16476,8 @@ impl Simulator {
                     // `logic`/`reg` is svLogic and carries x and z.
                     let is_2state = matches!(kind, crate::ast::types::IntegerVectorType::Bit);
                     Some(match (out_dir, is_2state) {
-                        (true, true) => DpiArgKind::Int32Out,
-                        (false, true) => DpiArgKind::Int32In,
+                        (true, true) => DpiArgKind::BitOut,
+                        (false, true) => DpiArgKind::BitIn,
                         (true, false) => DpiArgKind::LogicOut,
                         (false, false) => DpiArgKind::LogicIn,
                     })
@@ -16758,6 +16765,8 @@ impl Simulator {
                 DpiArgKind::Int32Out => Type::pointer(),
                 DpiArgKind::LogicIn => Type::u8(),
                 DpiArgKind::LogicOut => Type::pointer(),
+                DpiArgKind::BitIn => Type::u8(),
+                DpiArgKind::BitOut => Type::pointer(),
                 DpiArgKind::Int64In => Type::i64(),
                 DpiArgKind::Int64Out => Type::pointer(),
                 DpiArgKind::Real32In => Type::f32(),
@@ -17356,6 +17365,37 @@ impl Simulator {
                         writebacks.push((i32_vals.len() - 1, *kind, expr.clone()));
                     }
                 }
+                DpiArgKind::BitIn => {
+                    // A scalar two-state `bit` is a 1-bit value crossed as an
+                    // svBit (`unsigned char`): the actual converts as an
+                    // assignment to the 1-bit formal would (a real rounds
+                    // first), so only bit 0 crosses — not the low 8 bits an
+                    // i32 pass-through would send (2 -> svBit 0, not 2).
+                    let v = Box::new(
+                        args.get(i)
+                            .map(|e| (self.dpi_int_actual(e).get_bit(0) == LogicBit::One) as u8)
+                            .unwrap_or(0),
+                    );
+                    u8_vals.push(v);
+                    arg_refs.push(Arg::new(u8_vals.last().unwrap().as_ref()));
+                }
+                DpiArgKind::BitOut => {
+                    // inout/out: seed byte 0 with the actual's bit 0; C writes
+                    // an svBit byte. The slot is an i32 so a C side that
+                    // wrongly writes an int stays inside it.
+                    let bit = args
+                        .get(i)
+                        .map(|e| (self.dpi_int_actual(e).get_bit(0) == LogicBit::One) as u8)
+                        .unwrap_or(0);
+                    let b = Box::new(i32::from_ne_bytes([bit, 0, 0, 0]));
+                    let p = Box::new((&*b as *const i32 as *mut i32).cast::<c_void>());
+                    i32_vals.push(b);
+                    ptr_vals.push(p);
+                    arg_refs.push(Arg::new(ptr_vals.last().unwrap().as_ref()));
+                    if let Some(expr) = args.get(i) {
+                        writebacks.push((i32_vals.len() - 1, *kind, expr.clone()));
+                    }
+                }
                 DpiArgKind::Int64In => {
                     let v = Box::new(
                         args.get(i)
@@ -17787,6 +17827,15 @@ impl Simulator {
                         let w = self.infer_lhs_width(&expr);
                         let out = Self::dpi_svlogic_value(v.to_ne_bytes()[0]);
                         self.assign_value(&expr, &out.resize(w));
+                    }
+                }
+                DpiArgKind::BitOut => {
+                    if let Some(v) = i32_vals.get(idx) {
+                        let w = self.infer_lhs_width(&expr);
+                        // An svBit carries 0 or 1: keep bit 0 of the byte C
+                        // wrote, then widen to the actual.
+                        let out = Value::from_u64((v.to_ne_bytes()[0] & 1) as u64, 1);
+                        self.assign_value(&expr, &out.resize(w.max(1)));
                     }
                 }
                 DpiArgKind::Int64Out => {
