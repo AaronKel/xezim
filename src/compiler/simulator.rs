@@ -6940,6 +6940,9 @@ pub struct Simulator {
     /// value when the caller assigned it to a queue variable — an EMPTY `'{}`
     /// returned size 1 (one phantom element), and `'{a,b}` kept only `a`.
     fn_ret_collection_stack: Vec<bool>,
+    /// Parallel to `fn_ret_collection_stack`: the running function returns
+    /// an associative array (§13.4).
+    fn_ret_assoc_stack: Vec<bool>,
     /// Stable instance scope of the process currently running (for `%m`).
     /// Unlike `name_resolve_hint`, this is not mutated by name resolution.
     current_scope: String,
@@ -13033,6 +13036,7 @@ impl Simulator {
             vm_ret_coll: None,
             vm_ret_vals: None,
             fn_ret_collection_stack: Vec::new(),
+            fn_ret_assoc_stack: Vec::new(),
             current_scope: String::new(),
             m_block_scope: String::new(),
             m_block_active: false,
@@ -79664,6 +79668,15 @@ impl Simulator {
         let Some(src) = self.take_pending_ret_collection() else {
             return false;
         };
+        // §13.4, §7.9.9: an associative array returned by the call.
+        if src == Self::RET_ASSOC_SNAP {
+            let Some(dst) = self.ret_assoc_operand_name(lvalue) else {
+                return false;
+            };
+            self.copy_assoc_entries(&dst, &src);
+            self.settle_after_proc_write();
+            return true;
+        }
         let dst: Option<String> = self.pending_coll_dst(lvalue);
         let Some(dst) = dst else {
             return false;
@@ -87626,6 +87639,17 @@ impl Simulator {
                             if !self.is_associative_array(&an) {
                                 self.pending_ret_collection = Some(an);
                             }
+                        }
+                    }
+                    // §13.4, §7.9.9: `return aa;` from a function whose return
+                    // type is an associative array. The frame teardown wipes
+                    // a local array before the caller's assignment reads it,
+                    // so snapshot its entries under a reserved name.
+                    if self.pending_ret_collection.is_none()
+                        && self.fn_ret_assoc_stack.last().copied().unwrap_or(false)
+                    {
+                        if let Some(src) = self.ret_assoc_operand_name(e) {
+                            self.snapshot_ret_assoc(&src);
                         }
                     }
                     // §13.4: `return '{}`/`return '{...}` — a whole-collECTION
@@ -120068,6 +120092,12 @@ impl Simulator {
                         }
                         true
                     }
+                    // §13.4, §7.9.9: an associative array returned by a
+                    // function (see `snapshot_ret_assoc`).
+                    Some(src) if src == Self::RET_ASSOC_SNAP => {
+                        self.copy_assoc_entries(name, &src);
+                        true
+                    }
                     _ => false,
                 }
             }
@@ -120103,6 +120133,43 @@ impl Simulator {
 
     /// §7.9.9: `dst = src` between associative arrays — `dst` ends up with
     /// exactly `src`'s entries.
+    /// Reserved storage for an associative array a function returns.
+    const RET_ASSOC_SNAP: &'static str = "__xz_ret_aa__";
+
+    /// Copy the returned associative array `src` to the reserved snapshot,
+    /// register it and hand it to the caller via `pending_ret_collection`.
+    fn snapshot_ret_assoc(&mut self, src: &str) {
+        let snap = Self::RET_ASSOC_SNAP;
+        if src != snap {
+            let is_str = self.is_string_keyed_array(src);
+            self.module
+                .associative_arrays
+                .insert(snap.to_string(), is_str);
+            self.copy_assoc_entries(snap, src);
+        }
+        self.pending_ret_collection = Some(snap.to_string());
+    }
+
+    /// The storage of an associative-array operand (`aa`, a renamed local,
+    /// an instance member), `None` when `e` is not one.
+    fn ret_assoc_operand_name(&mut self, e: &Expression) -> Option<String> {
+        let name = match &e.kind {
+            ExprKind::Ident(h) => {
+                let bare = h.path.last().map(|s| s.name.name.as_str()).unwrap_or("");
+                let mut nm = match self.dyn_name_lookup(bare) {
+                    Some(r) if h.path.len() == 1 => r.to_string(),
+                    _ => self.resolve_hier_name(h).into_owned(),
+                };
+                if let Some(sc) = self.instance_assoc_member(&nm) {
+                    nm = sc;
+                }
+                nm
+            }
+            _ => self.expr_assoc_name(e)?,
+        };
+        self.is_associative_array(&name).then_some(name)
+    }
+
     fn copy_assoc_entries(&mut self, dst: &str, src: &str) {
         self.eval_builtin_method(dst, "delete", &[]);
         // §7.9.9: every element, including the member leaves of an
@@ -137387,6 +137454,38 @@ impl Simulator {
     }
 
     fn eval_call_inner(&mut self, func: &Expression, args: &[Expression]) -> Value {
+        // §7.5.2, §7.9.1, §7.10.2: a collection method on a function's
+        // returned queue, dynamic or associative array (`f().size()`).
+        if let ExprKind::MemberAccess { expr: recv, member } = &func.kind
+            && let ExprKind::Call {
+                func: rf,
+                args: rargs,
+            } = &recv.kind
+            && matches!(
+                member.name.as_str(),
+                "size"
+                    | "num"
+                    | "sum"
+                    | "product"
+                    | "and"
+                    | "or"
+                    | "xor"
+                    | "exists"
+                    | "first"
+                    | "last"
+                    | "min"
+                    | "max"
+            )
+            && self.call_returns_collection(rf)
+        {
+            self.pending_ret_collection = None;
+            let _ = self.eval_call(rf, rargs);
+            if let Some(src) = self.take_pending_ret_collection()
+                && let Some(v) = self.eval_builtin_method(&src, &member.name, args)
+            {
+                return v;
+            }
+        }
         // Normalize away Specialization wrappers for dispatch shape-matching
         // (the `#(...)` text is retained in the original AST + `current_spec`
         // for per-spec static keying). Keeps pre-Specialization dispatch exact.
@@ -144160,6 +144259,39 @@ impl Simulator {
         // ordered.
         self.fn_ret_collection_stack
             .push(self.fn_returns_collection(&fd.return_type));
+        // §13.4.1: a function returning a queue, dynamic or associative
+        // array (through a typedef) has a return VARIABLE of that type: the
+        // body may fill it in place (`f.push_back(v)`, `f[k] = v`, `f = new[n]`,
+        // `f = {a, b}`). Declare it as a collection local; falling off the end
+        // returns it like `return f;`.
+        let ret_coll = self.fn_ret_coll_dims(&fd.return_type);
+        let ret_is_assoc = matches!(
+            ret_coll.as_ref().and_then(|d| d.first()),
+            Some(crate::ast::types::UnpackedDimension::Associative { .. })
+        );
+        self.fn_ret_assoc_stack.push(ret_is_assoc);
+        if ret_coll.is_some() {
+            // The scalar return variable seeded above gives way to the
+            // collection (an element write `f[i] = v` must not bit-select it).
+            if let Some(frame) = self.local_stack.last_mut() {
+                frame.remove(&ret_name);
+            }
+            self.widths.remove(&ret_name);
+            let decl = Statement::new(
+                StatementKind::VarDecl {
+                    data_type: fd.return_type.clone(),
+                    lifetime: None,
+                    declarators: vec![crate::ast::stmt::VarDeclarator {
+                        name: fd.name.name.clone(),
+                        dimensions: Vec::new(),
+                        init: None,
+                        span: fd.span,
+                    }],
+                },
+                fd.span,
+            );
+            self.exec_statement(&decl);
+        }
         self.pkg_scope_stack.push(pkg_scope.clone());
         let m_fn_entry = self.subroutine_m_entry(
             &fd.name.name.name,
@@ -144195,6 +144327,26 @@ impl Simulator {
                 }
             }
         }
+        if ret_coll.is_some() && self.return_value.is_none() {
+            // Hand the return variable's elements over as `return f;` does
+            // (evaluating the bare name would call the function again).
+            let n = self
+                .dyn_name_lookup(&ret_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| ret_name.clone());
+            if self.module.dynamic_arrays.contains(&n) || self.is_associative_array(&n) {
+                if ret_is_assoc {
+                    self.snapshot_ret_assoc(&n);
+                } else if self.queue_elem_struct(&n).is_none() {
+                    const RET_SNAP: &str = "__xz_ret_coll__";
+                    self.copy_whole_queue(RET_SNAP, &n);
+                    self.pending_ret_collection = Some(RET_SNAP.to_string());
+                } else {
+                    self.pending_ret_collection = Some(n);
+                }
+                self.return_value = Some(Value::zero(32));
+            }
+        }
         // §23.8: stop leaking this frame's string formal names into the
         // global set now that the body is done (see frame_string_signals).
         // §6.21/§23.8: also restore the frame-scoped snapshot (see the push
@@ -144212,6 +144364,7 @@ impl Simulator {
         self.local_iface_aliases.pop();
         self.func_call_stack.pop();
         self.fn_ret_collection_stack.pop();
+        self.fn_ret_assoc_stack.pop();
         self.pkg_scope_stack.pop();
         self.m_scope_stack = saved_m_scope_fn;
         self.this_stack.pop();
@@ -144582,6 +144735,55 @@ impl Simulator {
     /// (`return '{a,b}` / `return '{}`) through the whole-collection snapshot
     /// so the caller's `q = f()` copies the full queue (an empty `'{}` must
     /// yield size 0, and `'{a,b}` must keep both elements).
+    /// The unpacked dimensions of a function return type that names a
+    /// queue, dynamic or associative array typedef; `None` otherwise.
+    fn fn_ret_coll_dims(&self, dt: &DataType) -> Option<Vec<crate::ast::types::UnpackedDimension>> {
+        use crate::ast::types::UnpackedDimension as UD;
+        let DataType::TypeReference {
+            name, dimensions, ..
+        } = dt
+        else {
+            return None;
+        };
+        // A class type is never a collection.
+        if !dimensions.is_empty()
+            || (name.scopes.is_empty() && self.module.classes.contains_key(&name.name.name))
+        {
+            return None;
+        }
+        let start = self
+            .class_context_stack
+            .last()
+            .and_then(|c| c.as_deref())
+            .unwrap_or("");
+        let dims = if name.scopes.is_empty() {
+            Self::typedef_dims_via_tables(&self.module, start, &name.name.name)
+        } else {
+            Self::typedef_dims_via_tables(&self.module, start, &name.qualified())
+                .or_else(|| Self::typedef_dims_via_tables(&self.module, start, &name.name.name))
+        }?;
+        matches!(
+            dims.first(),
+            Some(UD::Queue { .. } | UD::Unsized(_) | UD::Associative { .. })
+        )
+        .then_some(dims)
+    }
+
+    /// Is `func` a call of a module/package function whose return type is
+    /// a queue, dynamic or associative array typedef?
+    fn call_returns_collection(&self, func: &Expression) -> bool {
+        let ExprKind::Ident(h) = &func.kind else {
+            return false;
+        };
+        let Some(seg) = h.path.last() else {
+            return false;
+        };
+        self.module
+            .functions
+            .get(&seg.name.name)
+            .is_some_and(|fd| self.fn_ret_coll_dims(&fd.return_type).is_some())
+    }
+
     fn fn_returns_collection(&self, dt: &DataType) -> bool {
         use crate::ast::types::{DataType, UnpackedDimension};
         let mut cur: &DataType = dt;

@@ -165,3 +165,5 @@ mod package_refs_in_subroutines;
 mod nested_assoc_foreach;
 #[path = "collections/assoc_formal_struct_elems.rs"]
 mod assoc_formal_struct_elems;
+#[path = "collections/function_collection_return.rs"]
+mod function_collection_return;
