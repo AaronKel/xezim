@@ -416,7 +416,8 @@ typedef PLI_UINT32 *vpiHandle;
 
 /* s_vpi_vecval — 4-state vector element (IEEE 1800-2017 §38.10.1).
  * Layout-compatible with svLogicVecVal (§35.5.5), so UVM's HDL backdoor
- * can assign between the two without translation.
+ * can assign between the two without translation. Both words are
+ * PLI_UINT32, as in the standard's vpi_user.h (Annex K).
  *
  * Bit encoding, per element bit i:
  *     aval bval   value
@@ -426,8 +427,8 @@ typedef PLI_UINT32 *vpiHandle;
  *       1    1      X
  */
 typedef struct t_vpi_vecval {
-    PLI_INT32 aval;
-    PLI_INT32 bval;
+    PLI_UINT32 aval;
+    PLI_UINT32 bval;
 } s_vpi_vecval, *p_vpi_vecval;
 
 /* s_vpi_time — time value. */

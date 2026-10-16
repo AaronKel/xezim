@@ -21,6 +21,11 @@
 #include "vpi_user.h"
 #include "svdpi.h"
 
+/* §38 / Annex K: s_vpi_vecval's aval and bval are PLI_UINT32. Declared
+ * signed, a client's `aval >> 31` sign-extended bit 31 across the word. */
+_Static_assert((__typeof__(((s_vpi_vecval *)0)->aval))-1 > 0, "s_vpi_vecval.aval is unsigned");
+_Static_assert((__typeof__(((s_vpi_vecval *)0)->bval))-1 > 0, "s_vpi_vecval.bval is unsigned");
+
 static int errors = 0;
 static vpiHandle g_start_sim_h = NULL;
 static vpiHandle g_end_sim_h = NULL;
