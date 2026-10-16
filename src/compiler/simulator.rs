@@ -128153,22 +128153,25 @@ impl Simulator {
             // paths and reads 0 for a true assoc array — sv_22.)
             if self.is_associative_array(obj_name) {
                 let prefix = Self::name_with_suffix(obj_name, "[");
-                let keys = self.signals.keys_with_elem_prefix(&prefix);
                 // §7.8.1: an associative array of associative arrays (or of
                 // queues) stores its elements under compound keys
                 // (`m[A][B]`); size() counts the distinct first-level keys,
-                // as num() does, not the stored leaves.
-                // Every stored key of such an array is compound, so the first
-                // one tells.
-                if keys
-                    .first()
-                    .is_some_and(|k| k[prefix.len()..].contains("]["))
-                {
+                // as num() does, not the stored leaves. Any compound key
+                // tells: an associative array of queues also stores the
+                // queue's own `m[A]` entry, and the key order is not fixed.
+                // One borrowing pass both counts and checks.
+                let mut count = 0usize;
+                let mut compound = false;
+                for k in self.signals.elem_keys_with_prefix(&prefix) {
+                    count += 1;
+                    compound = compound || k[prefix.len()..].contains("][");
+                }
+                if compound {
                     let n = self.assoc_top_level_keys(obj_name).len();
                     return Some(Self::int_count(n as u64));
                 }
                 let c2 = self.assoc_static_keys(&prefix).len();
-                return Some(Self::int_count((keys.len() + c2) as u64));
+                return Some(Self::int_count((count + c2) as u64));
             }
             if let Some(v) = self.signals.get(&Self::name_with_suffix(obj_name, ".size")) {
                 return Some(Self::int_count(v.to_u64().unwrap_or(0)));
