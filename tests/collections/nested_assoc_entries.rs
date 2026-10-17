@@ -8,12 +8,9 @@
 //!   int d[][string][string]    dynamic array-of-(assoc-of-assoc)
 //!   int m[string][string][string] assoc outer, assoc-of-assoc elements
 //!
-//! Symptoms before the fix: `two_fixed[0]["A"]["B"] = v` wrote nothing, so
-//! `two_fixed[0].size()` stayed 0, the outer entry `two_fixed[0]["A"]` was
-//! never created, and the inner key read the element default. After the fix
-//! each freshly-created / freshly-sized `name[i]` element is registered as an
-//! associative sub-array, so the multidim peel treats `name[i][K1][K2]` as a
-//! compound assoc key and matches the reference simulator byte-for-byte.
+//! Writing a leaf must create its associative entries and preserve isolation
+//! between outer elements. Query methods and subsequent reads must observe
+//! those entries, matching the reference simulator.
 //!
 //! The single-level cousin (`mem[2][string]`, array of assoc) and a
 //! single-key inner element are pinned as positive controls so the fix cannot

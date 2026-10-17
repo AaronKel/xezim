@@ -7,10 +7,9 @@
 //! signals nor registered in the array table, so a later output/ref call that
 //! bound that formal as its caller actual dropped the write-back.
 //!
-//! The fix materialises the default-valued unpacked-array formal exactly like a
-//! bound array actual (`bind_array_arg`): named `v[i]` element signals at the
-//! element width/signedness + a `module.arrays` entry. Expected lines come from
-//! the reference simulator.
+//! A default-bound aggregate must retain its declared element types when
+//! passed onward to an output formal. Expected lines come from the reference
+//! simulator.
 
 use xezim::simulate;
 
@@ -19,7 +18,7 @@ fn output_array_formal_default_writeback_is_not_truncated() {
     let out: Vec<String> = simulate(
         r#"
 module top;
-  // Variant A: 2-state byte, the issue's reproducer shape.
+  // Variant A: byte elements, the issue's reproducer shape.
   function automatic void ia(output byte v[2]); v[0] = 8'hA5; v[1] = 8'h5A; endfunction
   function automatic void ia_default(byte v[2] = '{8'h00, 8'h00});
     ia(v);
