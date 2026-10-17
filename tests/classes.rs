@@ -756,3 +756,6 @@ mod constraint_inside_cast_union;
 
 #[path = "classes/string_frame_teardown.rs"]
 mod string_frame_teardown;
+
+#[path = "classes/property_seed_order.rs"]
+mod property_seed_order;

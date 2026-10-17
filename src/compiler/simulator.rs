@@ -4215,6 +4215,9 @@ struct InstTemplate {
     /// Pre-seeded scalar/handle property map for the chain (cloned in one
     /// allocation per `new()` instead of inserting property-by-property).
     base_props: HashMap<String, Value>,
+    /// Per-class keys into `base_props` when a descendant property hides an
+    /// ancestor parameter. Such chains need property/parameter interleaving.
+    property_seed_keys: Option<Vec<Vec<String>>>,
     /// Property names redeclared along the chain (`seed & 3 == 2`).
     shadowed_props: Vec<String>,
     /// Whether any class in `chain` has `param_defaults` (value parameters).
@@ -152291,6 +152294,17 @@ impl Simulator {
         // other declarer stores under `"<Class>::<name>"`.
         // A chain from the class table has its per-property facts in a
         // template (see `InstTemplate`); an off-table definition derives them.
+        let leaf_declarer: HashMap<&str, &str> = if tpl.is_some() {
+            HashMap::default()
+        } else {
+            let mut names: HashMap<&str, &str> = HashMap::default();
+            for cdef in classes_to_init {
+                for name in cdef.properties.keys() {
+                    names.entry(name.as_str()).or_insert(cdef.name.as_str());
+                }
+            }
+            names
+        };
         if let Some(t) = tpl.as_ref() {
             for sp in &t.shadowed_props {
                 if !self.shadowed_prop_names.contains(sp.as_str()) {
@@ -152298,17 +152312,28 @@ impl Simulator {
                     self.shadowed_prop_names.insert(sp.clone());
                 }
             }
-            bump_store_gen();
-            instance.properties = PropMap(t.base_props.clone());
-        } else {
-            let mut leaf_declarer: HashMap<&str, &str> = HashMap::default();
-            for cdef in classes_to_init {
-                // leaf-first: the first declarer seen is the leaf-most.
-                for p in cdef.properties.keys() {
-                    leaf_declarer.entry(p.as_str()).or_insert(cdef.name.as_str());
-                }
+            if t.property_seed_keys.is_none() {
+                bump_store_gen();
+                instance.properties = PropMap(t.base_props.clone());
             }
-            for cdef in classes_to_init.iter().rev() {
+        }
+        for (ci, cdef) in classes_to_init
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|_| chain_has_params || tpl.is_none())
+        {
+            // §8.10/§8.25: seed this class AFTER its ancestors' parameters,
+            // so a derived property can hide a same-named base parameter.
+            if let Some(t) = tpl.as_ref() {
+                if let Some(keys) = &t.property_seed_keys {
+                    for key in &keys[ci] {
+                        instance
+                            .properties
+                            .insert(key.clone(), t.base_props[key].clone());
+                    }
+                }
+            } else {
                 for (prop_name, prop_sig) in cdef.properties.iter() {
                     if cdef.static_properties.contains(prop_name)
                         || cdef.assoc_properties.contains_key(prop_name)
@@ -152349,13 +152374,6 @@ impl Simulator {
                     instance.properties.insert(key, prop_sig.value.clone());
                 }
             }
-        }
-        for (ci, cdef) in classes_to_init
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|_| chain_has_params)
-        {
             // Bind class VALUE parameters (§8.25): each parameter gets the
             // specialization's argument (on the leaf class only, matched by
             // NAME through `arg_map` — never by raw slot, since type and
@@ -165056,9 +165074,22 @@ impl Simulator {
                     .or_insert(cdef.name.as_str());
             }
         }
+        let has_value_params = chain.iter().any(|c| !c.param_defaults.is_empty());
         let mut base_props: HashMap<String, Value> = HashMap::default();
         let mut shadowed_props: Vec<String> = Vec::new();
-        for cdef in chain.iter().rev() {
+        // Parameter defaults are evaluated in a frame of the declaring
+        // class's parameter names (§8.25). Only a descendant property with
+        // one of those names can change that frame or overwrite its seed.
+        let interleaved_seeds = has_value_params
+            && chain.iter().enumerate().any(|(ci, cdef)| {
+                cdef.param_defaults.iter().any(|(name, _)| {
+                    chain[..ci]
+                        .iter()
+                        .any(|derived| derived.properties.contains_key(name))
+                })
+            });
+        let mut property_seed_keys = interleaved_seeds.then(|| vec![Vec::new(); chain.len()]);
+        for (ci, cdef) in chain.iter().enumerate().rev() {
             for (prop_name, prop_sig) in cdef.properties.iter() {
                 if cdef.static_properties.contains(prop_name)
                     || cdef.assoc_properties.contains_key(prop_name)
@@ -165083,10 +165114,12 @@ impl Simulator {
                 } else {
                     prop_sig.value.clone()
                 };
+                if let Some(keys) = &mut property_seed_keys {
+                    keys[ci].push(key.clone());
+                }
                 base_props.insert(key, v);
             }
         }
-        let has_value_params = chain.iter().any(|c| !c.param_defaults.is_empty());
         let mut coll_candidates = Vec::new();
         for (ci, cdef) in chain.iter().enumerate() {
             for (prop, sig) in &cdef.properties {
@@ -165152,6 +165185,7 @@ impl Simulator {
         let t = std::rc::Rc::new(InstTemplate {
             chain: chain.to_vec(),
             base_props,
+            property_seed_keys,
             shadowed_props,
             has_value_params,
             coll_candidates,
