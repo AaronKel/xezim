@@ -38,6 +38,9 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   (§7.5, §7.8). Recompile saved designs to refresh their class metadata.
   (#337, reported by Dragon-Git)
 
+* Named blocking `case` branches retain their `%m` scope and `disable`
+  targets across suspension (§9.3, §9.6.2).
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
@@ -55,6 +58,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   paths, preserving comparison results, branch targets and X/Z fallback.
 * Event-reference checks borrow ordinary names and alias targets, reducing
   temporary string allocation during procedural assignments.
+
+* Class-heavy simulations share suspended process frames, reuse object
+  initialization templates, and avoid unnecessary interpreter lookups.
+  An explicit `XEZIM_METHOD_TIER` also attempts compilation on a later call
+  after enough interpreted loop iterations, including `foreach`; default
+  admission continues to use call counts. (#326, contributed by Thomasb81)
 
 **Maintenance**
 
