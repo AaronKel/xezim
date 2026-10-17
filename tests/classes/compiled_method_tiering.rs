@@ -451,6 +451,117 @@ endmodule
     );
 }
 
+// §12.7.3: all foreach collection shapes contribute executed iterations.
+// Calling twice crosses the heat threshold while remaining below call tier.
+#[test]
+fn foreach_iterations_cross_the_method_heat_threshold() {
+    for (tag, declaration, setup, loop_stmt, expected) in [
+        (
+            "queue",
+            "int q[$];",
+            "for (int i=0;i<2000;i++) c.q.push_back(i);",
+            "foreach(q[k]) n++;",
+            2000,
+        ),
+        (
+            "dynamic",
+            "int q[];",
+            "c.q = new[2000];",
+            "foreach(q[k]) n++;",
+            2000,
+        ),
+        ("fixed", "int q[2000];", "", "foreach(q[k]) n++;", 2000),
+        (
+            "assoc",
+            "int q[int];",
+            "for(int i=0;i<2000;i++) c.q[i*2]=i;",
+            "foreach(q[k]) n++;",
+            2000,
+        ),
+        ("matrix", "int q[40][50];", "", "foreach(q[j,k]) n++;", 2000),
+        (
+            "continue",
+            "int q[$];",
+            "for(int i=0;i<2000;i++) c.q.push_back(i);",
+            "foreach(q[k]) begin if(k%2==0) continue; n++; end",
+            1000,
+        ),
+    ] {
+        let source = format!(
+            r#"
+class C;
+  {declaration}
+  function int step();
+    int n = 0;
+    {loop_stmt}
+    return n;
+  endfunction
+endclass
+module top;
+  initial begin
+    C c = new;
+    {setup}
+    $display("TAG %0d", c.step());
+    $display("TAG %0d", c.step());
+  end
+endmodule
+"#
+        );
+        let output = format!("TAG {expected}\nTAG {expected}");
+        assert_eq!(
+            run_with_admission(&source, "1000000"),
+            (output.clone(), 0),
+            "{tag} cold"
+        );
+        assert_eq!(run_with_admission(&source, "100"), (output, 1), "{tag} hot");
+    }
+}
+
+#[test]
+fn foreach_heat_counts_executed_iterations_instead_of_collection_size() {
+    for (tag, setup, loop_stmt, expected) in [
+        ("empty", "", "foreach(q[k]) n++;", 0),
+        (
+            "break",
+            "for(int i=0;i<2000;i++) c.q.push_back(i);",
+            "foreach(q[k]) begin n++; if(k==1) break; end",
+            2,
+        ),
+        (
+            "return",
+            "for(int i=0;i<2000;i++) c.q.push_back(i);",
+            "foreach(q[k]) begin n++; if(k==1) return n; end",
+            2,
+        ),
+    ] {
+        let source = format!(
+            r#"
+class C;
+  int q[$];
+  function int step();
+    int n = 0;
+    {loop_stmt}
+    return n;
+  endfunction
+endclass
+module top;
+  initial begin
+    C c = new;
+    {setup}
+    $display("TAG %0d", c.step());
+    $display("TAG %0d", c.step());
+  end
+endmodule
+"#
+        );
+        assert_eq!(
+            run_with_admission(&source, "100"),
+            (format!("TAG {expected}\nTAG {expected}"), 0),
+            "{tag}"
+        );
+    }
+}
+
 /// Parse the method-profiler histogram for `step` and return its VM counter.
 /// The histogram line has the form `   AST  VM  step`; a positive VM count
 /// means the method was admitted to the compiled bytecode path.

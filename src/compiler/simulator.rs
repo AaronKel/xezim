@@ -84223,10 +84223,26 @@ impl Simulator {
     #[inline(never)]
     fn exec_stmt_foreach(
         &mut self,
+        stmt: &Statement,
+        array: &Expression,
+        vars: &[Option<crate::ast::Identifier>],
+        body: &Statement,
+    ) {
+        // Count executed bodies, including continue/break/return iterations
+        // (§12.7.3, §12.8), across every collection shape. Publish heat once
+        // after the inner runner has restored loop and method scopes.
+        let mut iterations = 0;
+        self.exec_stmt_foreach_inner(stmt, array, vars, body, &mut iterations);
+        self.record_ast_loop_heat(iterations);
+    }
+
+    fn exec_stmt_foreach_inner(
+        &mut self,
         _stmt: &Statement,
         array: &Expression,
         vars: &[Option<crate::ast::Identifier>],
         body: &Statement,
+        iterations: &mut u64,
     ) {
         // foreach index variables are loop-scoped (SV): save the outer
         // values and restore them when the loop exits so a same-named
@@ -84385,6 +84401,7 @@ impl Simulator {
                         self.set_loop_var(n, Self::signed_loop_val(j as i64));
                     }
                     self.continue_flag = false;
+                    *iterations = iterations.saturating_add(1);
                     self.exec_statement(body);
                     if self.break_flag {
                         break 'rows;
@@ -84433,6 +84450,7 @@ impl Simulator {
                                 self.set_loop_var(n, Value::from_u64(j, 32));
                             }
                             self.continue_flag = false;
+                            *iterations = iterations.saturating_add(1);
                             self.exec_statement(body);
                             if self.break_flag {
                                 break 'rows;
@@ -84456,7 +84474,13 @@ impl Simulator {
                 if vars.len() >= 2 {
                     if let Some(dims) = self.foreach_dims(&an) {
                         if dims.len() >= vars.len() {
-                            self.exec_foreach_nested(&dims[..vars.len()], vars, body, None);
+                            self.exec_foreach_nested(
+                                &dims[..vars.len()],
+                                vars,
+                                body,
+                                None,
+                                iterations,
+                            );
                             self.auto_loop_vars.truncate(fe_auto_len);
                             self.restore_loop_vars(&fe_saved);
                             return;
@@ -84470,7 +84494,7 @@ impl Simulator {
                 if vars.len() == 1 {
                     if let Some(dims) = self.foreach_dims(&an) {
                         if dims.len() >= 2 {
-                            self.exec_foreach_nested(&dims[..1], vars, body, None);
+                            self.exec_foreach_nested(&dims[..1], vars, body, None, iterations);
                             self.auto_loop_vars.truncate(fe_auto_len);
                             self.restore_loop_vars(&fe_saved);
                             if !self.return_flag && self.disable_target.is_none() {
@@ -84523,6 +84547,7 @@ impl Simulator {
                                     self.set_loop_var(n, Value::from_u64(j, 32));
                                 }
                                 self.continue_flag = false;
+                                *iterations = iterations.saturating_add(1);
                                 self.exec_statement(body);
                                 if self.break_flag {
                                     break 'akeys;
@@ -84543,7 +84568,7 @@ impl Simulator {
                 // each level's own keys. The single-var key scan below
                 // visited the outer keys only and left `j` unset.
                 if vars.len() >= 2 && self.is_assoc_of_assoc(&an) {
-                    self.foreach_assoc_levels(&an, &an, vars, 0, body);
+                    self.foreach_assoc_levels(&an, &an, vars, 0, body, iterations);
                     self.auto_loop_vars.truncate(fe_auto_len);
                     self.restore_loop_vars(&fe_saved);
                     if !self.return_flag && self.disable_target.is_none() {
@@ -84658,6 +84683,7 @@ impl Simulator {
                         };
                         self.set_loop_var(&var.name, kv);
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         // `continue` is per-iteration (clear it); a
                         // `break`/`return` (both set break_flag) exits
@@ -84710,7 +84736,7 @@ impl Simulator {
             if vars.len() >= 2 && self.is_associative_array(&name) && self.is_assoc_of_assoc(&name)
             {
                 let an = name.into_owned();
-                self.foreach_assoc_levels(&an, &an, vars, 0, body);
+                self.foreach_assoc_levels(&an, &an, vars, 0, body, iterations);
                 self.auto_loop_vars.truncate(fe_auto_len);
                 self.restore_loop_vars(&fe_saved);
                 if !self.return_flag && self.disable_target.is_none() {
@@ -84879,7 +84905,14 @@ impl Simulator {
                             .collect();
                         let descs: Vec<bool> =
                             lists[..n].iter().map(|l| l[0] > l[l.len() - 1]).collect();
-                        self.exec_foreach_nested_dir(&dims, vars, body, None, Some(&descs));
+                        self.exec_foreach_nested_dir(
+                            &dims,
+                            vars,
+                            body,
+                            None,
+                            Some(&descs),
+                            iterations,
+                        );
                         self.auto_loop_vars.truncate(fe_auto_len);
                         self.restore_loop_vars(&fe_saved);
                         if !self.return_flag && self.disable_target.is_none() {
@@ -84903,7 +84936,7 @@ impl Simulator {
             {
                 if let Some(dims) = self.foreach_dims(&name) {
                     if dims.len() >= 2 {
-                        self.exec_foreach_nested(&dims[..1], vars, body, None);
+                        self.exec_foreach_nested(&dims[..1], vars, body, None, iterations);
                         self.auto_loop_vars.truncate(fe_auto_len);
                         self.restore_loop_vars(&fe_saved);
                         if !self.return_flag && self.disable_target.is_none() {
@@ -84997,6 +85030,7 @@ impl Simulator {
                             body,
                             var_scope.as_deref(),
                             Some(&descs[..vars.len()]),
+                            iterations,
                         );
                         self.auto_loop_vars.truncate(fe_auto_len);
                         self.restore_loop_vars(&fe_saved);
@@ -85068,6 +85102,7 @@ impl Simulator {
                                     );
                                 }
                                 self.continue_flag = false;
+                                *iterations = iterations.saturating_add(1);
                                 self.exec_statement(body);
                                 if self.break_flag {
                                     break 'akeys;
@@ -85130,6 +85165,7 @@ impl Simulator {
                             Value::from_u64(i, 32),
                         );
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         if self.break_flag {
                             break;
@@ -85195,6 +85231,7 @@ impl Simulator {
                         };
                         self.set_loop_var_aliased(var_scope.as_deref(), &var.name, kv);
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         // `continue` is per-iteration (clear it); a
                         // `break`/`return` (both set break_flag) exits
@@ -85219,6 +85256,7 @@ impl Simulator {
                             Value::from_u64(i, 32),
                         );
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         // `continue` is per-iteration (clear it); a
                         // `break`/`return` (both set break_flag) exits
@@ -85243,6 +85281,7 @@ impl Simulator {
                             Self::signed_loop_val(v),
                         );
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         // `continue` is per-iteration (clear it); a
                         // `break`/`return` (both set break_flag) exits
@@ -85270,6 +85309,7 @@ impl Simulator {
                             Value::from_u64(i, 32),
                         );
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         if self.break_flag {
                             break;
@@ -85300,6 +85340,7 @@ impl Simulator {
                             Self::signed_loop_val(idx),
                         );
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         if self.break_flag {
                             break;
@@ -85320,6 +85361,7 @@ impl Simulator {
                             Value::from_u64(i, 32),
                         );
                         self.continue_flag = false;
+                        *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
                         // `continue` is per-iteration (clear it); a
                         // `break`/`return` (both set break_flag) exits
@@ -108780,6 +108822,7 @@ impl Simulator {
         vars: &[Option<crate::ast::Identifier>],
         level: usize,
         body: &Statement,
+        iterations: &mut u64,
     ) -> bool {
         let keys = self.assoc_top_level_keys(prefix);
         // An inner level's declared key type, when known: a string key
@@ -108816,8 +108859,9 @@ impl Simulator {
             .filter(|_| is_str)
             .map(|v| v.name.clone())
             .filter(|n| self.string_signals.insert(n.clone()));
-        let done =
-            self.foreach_assoc_level_keys(root, prefix, keys, vars, level, body, is_str, kw, ksign);
+        let done = self.foreach_assoc_level_keys(
+            root, prefix, keys, vars, level, body, iterations, is_str, kw, ksign,
+        );
         if let Some(n) = str_var {
             self.string_signals.remove(&n);
         }
@@ -108833,6 +108877,7 @@ impl Simulator {
         vars: &[Option<crate::ast::Identifier>],
         level: usize,
         body: &Statement,
+        iterations: &mut u64,
         is_str: bool,
         kw: u32,
         ksign: bool,
@@ -108879,11 +108924,12 @@ impl Simulator {
             }
             if level + 1 < vars.len() {
                 let inner = format!("{}[{}]", prefix, key);
-                if !self.foreach_assoc_levels(root, &inner, vars, level + 1, body) {
+                if !self.foreach_assoc_levels(root, &inner, vars, level + 1, body, iterations) {
                     return false;
                 }
             } else {
                 self.continue_flag = false;
+                *iterations = iterations.saturating_add(1);
                 self.exec_statement(body);
                 if self.break_flag {
                     return false;
@@ -110530,8 +110576,9 @@ impl Simulator {
         vars: &[Option<crate::ast::Identifier>],
         body: &Statement,
         scope: Option<&str>,
+        iterations: &mut u64,
     ) {
-        self.exec_foreach_nested_dir(all_dims, vars, body, scope, None)
+        self.exec_foreach_nested_dir(all_dims, vars, body, scope, None, iterations)
     }
 
     /// §12.7.3: the loop variable ranges LEFT bound → RIGHT bound. `desc`
@@ -110545,6 +110592,7 @@ impl Simulator {
         body: &Statement,
         scope: Option<&str>,
         desc: Option<&[bool]>,
+        iterations: &mut u64,
     ) {
         let iterated: Vec<((i64, i64), bool, &crate::ast::Identifier)> = all_dims
             .iter()
@@ -110597,6 +110645,7 @@ impl Simulator {
                 self.set_loop_var_aliased(scope, &id.name, Self::signed_loop_val(idx[k]));
             }
             self.continue_flag = false;
+            *iterations = iterations.saturating_add(1);
             self.exec_statement(body);
             if self.break_flag {
                 fe_done!();
