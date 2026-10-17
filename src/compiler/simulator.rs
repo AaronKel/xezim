@@ -27100,6 +27100,14 @@ impl Simulator {
                         continue;
                     }
                 }
+                TsInsn::EqCBrFalse { d, s, k, t } => {
+                    let rv = (regs[*s as usize] == *k) as u64;
+                    regs[*d as usize] = rv;
+                    if rv == 0 {
+                        pc = *t as usize;
+                        continue;
+                    }
+                }
                 TsInsn::Lt { d, a, b } => {
                     regs[*d as usize] = ((regs[*a as usize]) < (regs[*b as usize])) as u64;
                 }
@@ -28371,6 +28379,7 @@ impl Simulator {
                     | TsInsn::LoadSigBrNz { .. }
                     | TsInsn::BrFalseLoadSig { .. }
                     | TsInsn::EqBrFalse { .. }
+                    | TsInsn::EqCBrFalse { .. }
                     | TsInsn::Jmp { .. }
                     | TsInsn::JmpPoll { .. }
                     | TsInsn::CaseJmp { .. }
@@ -29480,6 +29489,14 @@ impl Simulator {
                     }
                     TsInsn::EqBrFalse { d, a, b, t } => {
                         let rv = ((*rp.add(*a as usize)) == (*rp.add(*b as usize))) as u64;
+                        (*rp.add(*d as usize)) = rv;
+                        if rv == 0 {
+                            pc = *t as usize;
+                            continue;
+                        }
+                    }
+                    TsInsn::EqCBrFalse { d, s, k, t } => {
+                        let rv = ((*rp.add(*s as usize)) == *k) as u64;
                         (*rp.add(*d as usize)) = rv;
                         if rv == 0 {
                             pc = *t as usize;

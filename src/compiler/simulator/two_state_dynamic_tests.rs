@@ -23,6 +23,72 @@ fn fixture() -> (Simulator, u32, u32) {
     (sim, data, wide)
 }
 
+#[test]
+fn constant_branch_preserves_scratch_and_paths_in_every_executor() {
+    let engines: [(&str, Executor); 3] = [
+        ("control", Simulator::exec_two_state_ctrl),
+        ("wide128", Simulator::exec_two_state_wide::<2>),
+        ("wide512", Simulator::exec_two_state_wide::<8>),
+    ];
+    for (engine, execute) in engines {
+        for input in [3, 4] {
+            for dest in [0, 1] {
+                let (mut sim, _, _) = fixture();
+                sim.ts_regs[0] = input;
+                let insns = [
+                    TsInsn::EqCBrFalse {
+                        d: dest,
+                        s: 0,
+                        k: 3,
+                        t: 3,
+                    },
+                    TsInsn::Const { d: 2, v: 11 },
+                    TsInsn::Jmp { t: 4 },
+                    TsInsn::Const { d: 2, v: 22 },
+                ];
+                assert!(execute(&mut sim, &insns, 3), "{engine}");
+                assert_eq!(
+                    sim.ts_regs[dest as usize],
+                    u64::from(input == 3),
+                    "{engine}"
+                );
+                assert_eq!(sim.ts_regs[2], if input == 3 { 11 } else { 22 }, "{engine}");
+            }
+        }
+    }
+}
+
+#[test]
+fn constant_branch_x_plane_preserves_unknown_result_and_in_place_source() {
+    for (value, unknown, result, result_unknown, tail) in [
+        (3, 0, 1, 0, 11),
+        (4, 0, 0, 0, 22),
+        (2, 1, 0, 1, 22),
+        (1, 4, 0, 0, 22),
+    ] {
+        for dest in [0, 1] {
+            let (mut sim, _, _) = fixture();
+            sim.ts_regs[0] = value;
+            sim.ts_xregs = vec![unknown, 0, 0];
+            let insns = [
+                TsInsn::EqCBrFalse {
+                    d: dest,
+                    s: 0,
+                    k: 3,
+                    t: 3,
+                },
+                TsInsn::Const { d: 2, v: 11 },
+                TsInsn::Jmp { t: 4 },
+                TsInsn::Const { d: 2, v: 22 },
+            ];
+            assert!(sim.exec_two_state_x(&insns, 3));
+            assert_eq!(sim.ts_regs[dest as usize], result);
+            assert_eq!(sim.ts_xregs[dest as usize], result_unknown);
+            assert_eq!(sim.ts_regs[2], tail);
+        }
+    }
+}
+
 // #334: a completed out-of-line instruction must continue the stream.
 // Check observable reads, blocking/NBA writes and save records, in addition
 // to the return code, so a fallback cannot hide a broken success dispatch.

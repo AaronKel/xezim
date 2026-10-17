@@ -470,6 +470,14 @@ impl Simulator {
                             continue;
                         }
                     }
+                    TsInsn::EqCBrFalse { d, s, k, t } => {
+                        let (rv, rx) = eq_p(v!(*s), x!(*s), *k, 0);
+                        set!(*d, (rv, rx));
+                        if t3(rv, rx) != Some(true) {
+                            pc = *t as usize;
+                            continue;
+                        }
+                    }
                     TsInsn::LoadSigLogOr { dl, sig, d, a, b } => {
                         set!(*dl, self.sig_planes(*sig));
                         set!(*d, from_t3(or3(t3(v!(*a), x!(*a)), t3(v!(*b), x!(*b)))));

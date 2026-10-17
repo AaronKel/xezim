@@ -21675,8 +21675,16 @@ mod tests {
             )
             .expect("constant comparison remains two-state lowerable");
             assert!(ts.has_ctrl);
-            assert!(matches!(ts.insns[1], TsInsn::EqC { d: 1, s: 0, k: 3 }));
-            assert!(matches!(ts.insns[2], TsInsn::BrFalse { s: 1, t: 4 }));
+            assert!(matches!(
+                ts.insns[1],
+                TsInsn::EqCBrFalse {
+                    d: 1,
+                    s: 0,
+                    k: 3,
+                    t: 3
+                }
+            ));
+            assert_eq!(ts.insns.len(), 3);
             assert_eq!(ts.tsx, kind == BinOpConstKind::Eq);
             // The existing signed widening, X/Z, fill, and wide-constant
             // admission rules must also govern the fused form.
@@ -21713,6 +21721,69 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn constant_two_state_branch_fusion_preserves_registers_and_entries() {
+        for dest in [0, 1] {
+            let mut stream = vec![
+                TsInsn::EqC {
+                    d: dest,
+                    s: 0,
+                    k: u64::MAX,
+                },
+                TsInsn::BrFalse { s: dest, t: 3 },
+                TsInsn::Const { d: 2, v: 19 },
+            ];
+            fuse_ts_pairs(&mut stream);
+            assert!(matches!(stream[0], TsInsn::EqCBrFalse {
+                d, s: 0, k: u64::MAX, t: 2
+            } if d == dest));
+            assert_eq!(stream.len(), 2);
+            assert!(tsx_insn_ok(&stream[0]));
+        }
+        for condition in [0, 1] {
+            let mut stream = vec![
+                TsInsn::Jmp { t: 2 },
+                TsInsn::EqC { d: 1, s: 0, k: 3 },
+                TsInsn::BrFalse { s: condition, t: 3 },
+            ];
+            fuse_ts_pairs(&mut stream);
+            assert_eq!(stream.len(), 3, "never erase an incoming branch entry");
+        }
+        let mut mismatched = vec![
+            TsInsn::EqC { d: 1, s: 0, k: 3 },
+            TsInsn::BrFalse { s: 0, t: 2 },
+        ];
+        fuse_ts_pairs(&mut mismatched);
+        assert_eq!(mismatched.len(), 2, "branch must consume the comparison");
+    }
+
+    #[test]
+    fn constant_two_state_branch_fusion_relocates_tables_backedges_and_exit() {
+        let mut stream = vec![
+            TsInsn::CaseJmp {
+                s: 0,
+                cj: Box::new(CaseJumpData {
+                    table: vec![1, 3, 5],
+                    default: 6,
+                }),
+            },
+            TsInsn::EqC { d: 1, s: 0, k: 3 },
+            TsInsn::BrFalse { s: 1, t: 6 },
+            TsInsn::Const { d: 2, v: 19 },
+            TsInsn::Jmp { t: 1 },
+            TsInsn::Const { d: 2, v: 23 },
+        ];
+        fuse_ts_pairs(&mut stream);
+        assert_eq!(stream.len(), 5);
+        let TsInsn::CaseJmp { cj, .. } = &stream[0] else {
+            panic!("case dispatch")
+        };
+        assert_eq!(cj.table, [1, 2, 4]);
+        assert_eq!(cj.default, 5);
+        assert!(matches!(stream[1], TsInsn::EqCBrFalse { t: 5, .. }));
+        assert!(matches!(stream[3], TsInsn::Jmp { t: 1 }));
     }
 
     /// §12.5: relocating a case preserves holes, duplicate targets and block exits.
@@ -22873,6 +22944,14 @@ pub enum TsInsn {
         b: u16,
         t: u32,
     },
+    /// Constant equality followed by a false branch. The comparison still
+    /// writes `d`, including when it aliases `s` or the branch is taken.
+    EqCBrFalse {
+        d: u16,
+        s: u16,
+        k: u64,
+        t: u32,
+    },
     LoadSigLogOr {
         dl: u16,
         sig: u32,
@@ -23748,6 +23827,7 @@ pub fn ts_read_masks(insns: &[TsInsn], widths: &[u32]) -> Option<(Vec<(u32, u64)
             | TsInsn::LogNotAnd { .. }
             | TsInsn::LogNotLogAnd { .. }
             | TsInsn::EqBrFalse { .. }
+            | TsInsn::EqCBrFalse { .. }
             | TsInsn::ConstEq { .. }
             | TsInsn::AndOr { .. }
             | TsInsn::Lt { .. }
@@ -24113,6 +24193,7 @@ fn fuse_ts_pairs(out: &mut Vec<TsInsn>) {
             TsInsn::BrSigFalse { t, .. }
             | TsInsn::BrFalse { t, .. }
             | TsInsn::BrNz { t, .. }
+            | TsInsn::EqCBrFalse { t, .. }
             | TsInsn::Jmp { t } => {
                 if (*t as usize) <= n {
                     is_tgt[*t as usize] = true;
@@ -24319,6 +24400,16 @@ fn fuse_ts_pairs(out: &mut Vec<TsInsn>) {
                         t: *t,
                     })
                 }
+                (TsInsn::EqC { d, s, k }, TsInsn::BrFalse { s: condition, t })
+                    if condition == d =>
+                {
+                    Some(TsInsn::EqCBrFalse {
+                        d: *d,
+                        s: *s,
+                        k: *k,
+                        t: *t,
+                    })
+                }
                 (TsInsn::LoadSig { d: dl, sig }, TsInsn::LogOr { d, a, b })
                     if a == dl || b == dl =>
                 {
@@ -24475,6 +24566,7 @@ fn fuse_ts_pairs(out: &mut Vec<TsInsn>) {
             | TsInsn::LoadSigBrNz { t, .. }
             | TsInsn::BrFalseLoadSig { t, .. }
             | TsInsn::EqBrFalse { t, .. }
+            | TsInsn::EqCBrFalse { t, .. }
             | TsInsn::Jmp { t } => *t = new_of[(*t as usize).min(n)],
             TsInsn::CaseMaskJmp { mj, .. } => {
                 let mj = &mut mj.mj;

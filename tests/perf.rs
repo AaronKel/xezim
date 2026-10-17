@@ -36,3 +36,6 @@ mod cmp_branch_const;
 
 #[path = "perf/named_event_intern.rs"]
 mod named_event_intern;
+
+#[path = "perf/eqc_branch.rs"]
+mod eqc_branch;

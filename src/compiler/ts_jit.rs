@@ -361,7 +361,12 @@ pub mod enabled {
                     },
                 },
             ],
-            T::LoadSigBrNz { .. } | T::BrFalseLoadSig { .. } | T::EqBrFalse { .. } => return None,
+            T::LoadSigBrNz { .. }
+            | T::BrFalseLoadSig { .. }
+            | T::EqBrFalse { .. }
+            // EqC + BrFalse was already outside the straight-line subset.
+            // Expanding the fusion here would also require target relocation.
+            | T::EqCBrFalse { .. } => return None,
             T::Concat2 { d, a, wa, b, wb } => vec![T::Concat {
                 d: *d,
                 parts: vec![(*a, *wa), (*b, *wb)].into_boxed_slice(),
@@ -952,6 +957,56 @@ pub mod enabled {
             }
             self.module.clear_context(&mut ctx);
             Ok(fid)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn constant_branch_fusion_preserves_native_eligibility() {
+            let Some(mut jit) = TsJitModule::new() else {
+                return; // Native code generation is unavailable on this target.
+            };
+            // Cover a live scratch, source/destination aliasing, a high-bit
+            // immediate and a backward target. Every control-flow stream
+            // remains with the executor, just as its unfused form did.
+            for (d, s, k, t) in [(1, 0, u64::MAX, 3), (0, 0, 0, 3), (1, 0, 7, 0)] {
+                let original = [
+                    TsInsn::Const { d: s, v: k },
+                    TsInsn::EqC { d, s, k },
+                    TsInsn::BrFalse { s: d, t },
+                ];
+                let fused = [
+                    TsInsn::Const { d: s, v: k },
+                    TsInsn::EqCBrFalse { d, s, k, t },
+                ];
+                assert!(!jit.compile(0, &original, 2));
+                assert!(!jit.compile(0, &fused, 2));
+                assert_eq!(jit.pending_len(), 0);
+            }
+            assert_eq!(jit.rejected, 6);
+            assert_eq!(jit.compiled, 0);
+
+            // Rejections must not affect an otherwise eligible stream.
+            assert!(jit.compile(
+                1,
+                &[
+                    TsInsn::Const { d: 0, v: 7 },
+                    TsInsn::EqC { d: 1, s: 0, k: 7 },
+                ],
+                2,
+            ));
+            let functions = jit.flush();
+            assert_eq!(functions.len(), 1);
+            assert_eq!(functions[0].0, 1);
+            // The constant-only stream accesses neither simulator nor table.
+            assert_eq!(
+                unsafe { functions[0].1(std::ptr::null_mut(), std::ptr::null()) },
+                0
+            );
+            assert_eq!(jit.compiled, 1);
         }
     }
 }
