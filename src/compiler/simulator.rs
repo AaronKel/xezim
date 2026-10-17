@@ -160445,18 +160445,21 @@ impl Simulator {
             })
         };
         let mut out = Vec::with_capacity(bounds.len());
+        let mut folded_all = true;
         for (lo, hi) in bounds {
             let Some(l) = at(self, &lo) else {
+                folded_all = false;
                 continue;
             };
             let Some(h) = hi.as_ref().map_or(Some(l), |b| at(self, b)) else {
+                folded_all = false;
                 continue;
             };
             if l <= h || lo.dollar || hi.as_ref().is_some_and(|b| b.dollar) {
                 out.push((l.min(h), l.max(h)));
             }
         }
-        (out, ws)
+        (out, folded_all.then_some(ws).flatten())
     }
 
     /// Map a comparison set into the target's representable domain before

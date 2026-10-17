@@ -57,3 +57,38 @@ fn interval_union_sampling_handles_full_i128_cardinality() {
     );
     assert!(sim.pick_i128_range(&[(2, 1)], 64, false).is_none());
 }
+
+#[test]
+fn deferred_bound_fold_failure_retains_evaluator_fallback() {
+    use crate::ast::expr::{NumberBase, NumberLiteral};
+    let num = |value: &str| {
+        Expression::new(
+            ExprKind::Number(NumberLiteral::Integer {
+                size: Some(64),
+                signed: false,
+                base: NumberBase::Decimal,
+                value: value.into(),
+                cached_val: std::cell::Cell::new(None),
+            }),
+            crate::ast::Span::dummy(),
+        )
+    };
+    let shift = Expression::new(
+        ExprKind::Binary {
+            op: BinaryOp::ShiftLeft,
+            left: Box::new(num("1")),
+            right: Box::new(num("64")),
+        },
+        crate::ast::Span::dummy(),
+    );
+    let mut sim = crate::simulate("module top; endmodule", 0).expect("simulate");
+    let (rs, ws) = sim.cons_ranges_i128_ws(
+        &[
+            ConstraintRange::Value(shift),
+            ConstraintRange::Value(num("2")),
+        ],
+        8,
+    );
+    assert_eq!(rs, vec![(2, 2)]);
+    assert!(ws.is_none(), "unsupported fold claimed an exact set");
+}
