@@ -6617,8 +6617,8 @@ pub struct Simulator {
     /// __deferred_init()`) must run once per specialization — not just once
     /// for the generic class with default params.
     initialized_spec_statics: std::collections::HashSet<(String, String)>,
-    /// Concrete module/package typedef references, captured before class-local
-    /// aliases are hoisted into the flat lookup table.
+    /// Concrete module/package typedef references, excluding aliases hoisted
+    /// from generic class definitions without an active specialization.
     referenced_class_typedefs: Vec<DataType>,
     /// Object handles currently mid-`register()` in a factory. Guards
     /// against RE-ENTRANT registration: a factory `register(obj)` whose
@@ -10813,7 +10813,45 @@ impl Simulator {
         // §18.3/§18.4: publish class-local `typedef enum`/`typedef struct`
         // types into the module type tables so a rand property declared with
         // one gets its enum-member domain / packed bit layout.
-        let referenced_class_typedefs = module.typedef_types.values().cloned().collect();
+        // The elaborator already publishes qualified (and sometimes bare)
+        // class-local aliases. A generic `typedef C#(N) own_type` is not a
+        // reference to C's DEFAULT specialization; resolve it only when its
+        // declaring class has concrete parameter bindings.
+        let referenced_class_typedefs = module
+            .typedef_types
+            .iter()
+            .filter_map(|(key, dt)| {
+                let DataType::TypeReference { span, .. } = dt else {
+                    return None;
+                };
+                let (owner, alias) = key
+                    .rsplit_once("::")
+                    .map_or((None, key.as_str()), |(o, a)| (Some(o), a));
+                let generic_local = module.classes.values().any(|cd| {
+                    if cd.param_order.is_empty() && cd.type_param_names.is_empty() {
+                        return false;
+                    }
+                    let Some(DataType::TypeReference {
+                        span: local_span, ..
+                    }) = cd.typedef_targets.get(alias)
+                    else {
+                        return false;
+                    };
+                    match owner {
+                        Some(owner) => {
+                            owner == cd.name
+                                || owner
+                                    .strip_suffix(&cd.name)
+                                    .is_some_and(|p| p.ends_with("::"))
+                        }
+                        // A colliding real module/package alias has its own span,
+                        // so it remains a concrete startup reference.
+                        None => span == local_span,
+                    }
+                });
+                (!generic_local).then(|| dt.clone())
+            })
+            .collect();
         Self::hoist_class_local_typedefs(&mut module);
         // §6.18/§7.2.1: struct members typed by a collection typedef take
         // the direct `elem m[$]` form every struct-collection path reads.
