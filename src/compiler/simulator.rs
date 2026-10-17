@@ -129752,7 +129752,15 @@ impl Simulator {
             },
             span: crate::ast::Span::dummy(),
         };
-        let (base, mut type_args) = self.resolve_typeref_class_with_type_args(&tref)?;
+        let (base, mut type_args) = if let Some((base, sig)) = self.extract_spec_from_string(&tn) {
+            let args = Self::split_spec_args(&sig)
+                .iter()
+                .map(|frag| self.static_spec_arg_expr(frag, tref.span))
+                .collect();
+            (base, Some(args))
+        } else {
+            self.resolve_typeref_class_with_type_args(&tref)?
+        };
         if let Some(ta) = self
             .get_class_def(cname)
             .and_then(|cd| cd.property_type_args.get(prop))
@@ -129761,33 +129769,67 @@ impl Simulator {
         }
         let target = self.module.classes.get(&base)?.clone();
         let type_args = type_args.map(|ta| {
-            ta.into_iter()
-                .enumerate()
-                .map(|(i, e)| {
-                    let pname = target.param_order.get(i);
-                    if pname.is_some_and(|p| target.type_param_names.contains(p)) {
-                        return e;
-                    }
-                    // Freeze VALUE parameters in the declaring specialization before
-                    // the constructor changes class context. Type args keep their AST.
-                    if let Some(frag) = self.expr_to_spec_fragment(&e) {
-                        let text = frag.trim();
-                        if let Some(text) = text.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
-                        {
-                            return Expression::new(
-                                ExprKind::StringLiteral(text.to_string()),
-                                e.span,
-                            );
-                        }
-                        if let Some(v) = self.eval_spec_arg_fragment(&frag) {
-                            return self.value_method_arg_expr(&v);
-                        }
-                    }
-                    e
-                })
+            ta.iter()
+                .map(|e| self.freeze_static_type_arg(e))
                 .collect::<Vec<_>>()
         });
         Some(self.instantiate_class_with_type_args(&target, args, type_args.as_deref()))
+    }
+
+    /// Freeze constructor type arguments while their declaring class is
+    /// active. Keep named assignments and type literals intact.
+    fn freeze_static_type_arg(&self, e: &Expression) -> Expression {
+        if let ExprKind::NamedArg { name, expr } = &e.kind {
+            return Expression::new(
+                ExprKind::NamedArg {
+                    name: name.clone(),
+                    expr: expr
+                        .as_ref()
+                        .map(|e| Box::new(self.freeze_static_type_arg(e))),
+                },
+                e.span,
+            );
+        }
+        if matches!(e.kind, ExprKind::TypeLiteral(_)) {
+            return e.clone();
+        }
+        self.expr_to_spec_fragment(e)
+            .map(|frag| self.static_spec_arg_expr(&frag, e.span))
+            .unwrap_or_else(|| e.clone())
+    }
+
+    /// Reconstitute a resolved type/value fragment without evaluating a type
+    /// name as a value, or losing a nested class specialization's arguments.
+    fn static_spec_arg_expr(&self, frag: &str, span: crate::ast::Span) -> Expression {
+        let text = frag.trim();
+        if let Some(text) = text.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            return Expression::new(ExprKind::StringLiteral(text.to_string()), span);
+        }
+        if let Some(number) = Self::parse_spec_number(text.trim_start_matches('-')) {
+            let literal = Expression::new(ExprKind::Number(number), span);
+            return if text.starts_with('-') {
+                Expression::new(
+                    ExprKind::Unary {
+                        op: UnaryOp::Minus,
+                        operand: Box::new(literal),
+                    },
+                    span,
+                )
+            } else {
+                literal
+            };
+        }
+        let ident = |name: &str| Self::hier_ident_expr(Self::iface_path_segs(name, span), span);
+        if let Some((base, sig)) = self.extract_spec_from_string(text) {
+            return Expression::new(
+                ExprKind::Specialization {
+                    base: Box::new(ident(&base)),
+                    type_args_text: sig,
+                },
+                span,
+            );
+        }
+        ident(text)
     }
 
     /// Compute the specialization signature for `ancestor_class` given a

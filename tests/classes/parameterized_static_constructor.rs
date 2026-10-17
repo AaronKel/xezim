@@ -220,6 +220,18 @@ class recursive_entry #(type T=int);
   function new(); if(inst==null) ledger::recursive++; endfunction
 endclass
 typedef recursive_entry#(int) recursive_int;
+class parameter_target #(int N=1);
+  int payload;
+  function new(int n); payload=N+n; endfunction
+endclass
+class typed_holder #(type T=parameter_target#(1));
+  static T inst=new(3);
+endclass
+typedef typed_holder#(parameter_target#(23)) held_target;
+class named_holder #(int N=1);
+  static parameter_target#(.N(N)) inst=new(4);
+endclass
+typedef named_holder#(31) held_named;
 module top;
   int checked=0;
   int failures=0;
@@ -237,6 +249,8 @@ module top;
     check("function initializer precedes initial",ledger::functions==1);
     check("function initializer value",function_seventeen::value==20);
     check("recursive static read sees default",ledger::recursive==1 && recursive_int::inst!=null);
+    check("type parameter retains target specialization",held_target::inst.payload==26);
+    check("named property specialization arguments",held_named::inst.payload==35);
     extra=new(2);
     check("explicit construction and one time statics",ledger::valued==9 && value_two::inst.payload==2 && ledger::typed==2 && ledger::functions==1);
     $display("T|SUMMARY checks=%0d failures=%0d",checked,failures);
@@ -252,9 +266,12 @@ fn static_constructor_specialization_neighbors() {
             .lines()
             .filter(|line| line.starts_with("T|PASS"))
             .count(),
-        8,
+        10,
         "{output}"
     );
-    assert!(output.contains("T|SUMMARY checks=8 failures=0"), "{output}");
+    assert!(
+        output.contains("T|SUMMARY checks=10 failures=0"),
+        "{output}"
+    );
     assert!(!output.contains("T|FAIL"), "{output}");
 }
