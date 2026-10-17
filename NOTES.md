@@ -28,6 +28,16 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   warning naming them, preserving the rest of the waveform (§6.16, §10.8).
   (#339, reported by Lramseyer)
 
+* Integer `inside` constraints evaluate size-cast bounds in the joint
+  comparison context and sample uniformly over distinct legal values,
+  including overlapping ranges and repeated items. Explicit `dist` weights
+  retain their meaning (§11.4.13, §18.5). (#336, reported by urbanij)
+* Indexed writes create associative entries below dynamic outer dimensions
+  in class properties, method locals and struct members, preserving declared
+  key types and independent rows through allocation, copying and resizing
+  (§7.5, §7.8). Recompile saved designs to refresh their class metadata.
+  (#337, reported by Dragon-Git)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
