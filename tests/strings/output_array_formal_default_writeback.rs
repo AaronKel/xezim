@@ -75,3 +75,60 @@ endmodule
     ];
     assert_eq!(out, want, "{out:?}");
 }
+
+/// §13.5.3: defaults retain their element type and automatic calls bind a
+/// fresh array even after an earlier call supplied an explicit actual.
+#[test]
+fn array_defaults_keep_context_and_reinitialize_each_call() {
+    let out: Vec<String> = simulate(
+        r#"
+module top;
+  byte supplied[2] = '{8'h33,8'h44};
+  function automatic void repeated(byte v[2] = '{8'h11,8'h22});
+    $display("T|repeat %h %h",v[0],v[1]);
+    v[0] = 8'h99;
+  endfunction
+  function automatic void unsized_values(byte u[2] = '{1,2});
+    $display("T|unsized %0d %0d",u[0],u[1]);
+  endfunction
+  function automatic void keyed_values(byte k[2] = '{default:8'hA5});
+    $display("T|keyed %h %h",k[0],k[1]);
+  endfunction
+  function automatic void string_values(string s[2] = '{"AA","BB"});
+    $display("T|strings '%s' '%s'",s[0],s[1]);
+  endfunction
+  function automatic void real_values(real r[2] = '{1.25,2.5});
+    $display("T|real %0.2f %0.2f",r[0],r[1]);
+  endfunction
+  function automatic void descending_values(byte d[1:0] = '{8'hA5,8'h5A});
+    $display("T|descending %h %h",d[1],d[0]);
+  endfunction
+  initial begin
+    repeated(); repeated(); repeated(supplied); repeated();
+    $display("T|actual %h %h",supplied[0],supplied[1]);
+    unsized_values(); keyed_values(); string_values(); real_values(); descending_values();
+  end
+endmodule
+"#,
+        100,
+    )
+    .expect("simulate failed")
+    .output
+    .iter()
+    .map(|o| o.message.clone())
+    .filter(|m| m.starts_with("T|"))
+    .collect();
+    let want = [
+        "T|repeat 11 22",
+        "T|repeat 11 22",
+        "T|repeat 33 44",
+        "T|repeat 11 22",
+        "T|actual 33 44",
+        "T|unsized 1 2",
+        "T|keyed a5 a5",
+        "T|strings 'AA' 'BB'",
+        "T|real 1.25 2.50",
+        "T|descending a5 5a",
+    ];
+    assert_eq!(out, want, "{out:?}");
+}
