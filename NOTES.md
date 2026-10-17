@@ -51,6 +51,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Repeated named-event triggers reuse resolved signal targets and dense
   trigger timestamps, reducing name allocation and lookup work while retaining
   event aliasing and scheduling behavior (§15.5).
+* Constant equality branches also execute as one instruction in the two-state
+  paths, preserving comparison results, branch targets and X/Z fallback.
+* Event-reference checks borrow ordinary names and alias targets, reducing
+  temporary string allocation during procedural assignments.
 
 **Maintenance**
 
