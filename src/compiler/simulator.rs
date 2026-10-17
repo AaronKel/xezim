@@ -10817,6 +10817,18 @@ impl Simulator {
         // class-local aliases. A generic `typedef C#(N) own_type` is not a
         // reference to C's DEFAULT specialization; resolve it only when its
         // declaring class has concrete parameter bindings.
+        let generic_alias_spans: HashSet<(&str, usize, usize)> = module
+            .classes
+            .values()
+            .filter(|cd| !cd.param_order.is_empty() || !cd.type_param_names.is_empty())
+            .flat_map(|cd| cd.typedef_targets.iter())
+            .filter_map(|(alias, dt)| match dt {
+                DataType::TypeReference { span, .. } => {
+                    Some((alias.as_str(), span.start, span.end))
+                }
+                _ => None,
+            })
+            .collect();
         let referenced_class_typedefs = module
             .typedef_types
             .iter()
@@ -10824,31 +10836,22 @@ impl Simulator {
                 let DataType::TypeReference { span, .. } = dt else {
                     return None;
                 };
-                let (owner, alias) = key
-                    .rsplit_once("::")
-                    .map_or((None, key.as_str()), |(o, a)| (Some(o), a));
-                let generic_local = module.classes.values().any(|cd| {
-                    if cd.param_order.is_empty() && cd.type_param_names.is_empty() {
-                        return false;
-                    }
-                    let Some(DataType::TypeReference {
-                        span: local_span, ..
-                    }) = cd.typedef_targets.get(alias)
-                    else {
-                        return false;
-                    };
-                    match owner {
-                        Some(owner) => {
-                            owner == cd.name
-                                || owner
-                                    .strip_suffix(&cd.name)
-                                    .is_some_and(|p| p.ends_with("::"))
-                        }
-                        // A colliding real module/package alias has its own span,
-                        // so it remains a concrete startup reference.
-                        None => span == local_span,
-                    }
-                });
+                let generic_local = match key.rsplit_once("::") {
+                    Some((owner, alias)) => module
+                        .classes
+                        .get(owner)
+                        .or_else(|| {
+                            module
+                                .classes
+                                .get(owner.rsplit("::").next().unwrap_or(owner))
+                        })
+                        .is_some_and(|cd| {
+                            (!cd.param_order.is_empty() || !cd.type_param_names.is_empty())
+                                && cd.typedef_targets.contains_key(alias)
+                        }),
+                    // A real module/package alias has a separate declaration span.
+                    None => generic_alias_spans.contains(&(key.as_str(), span.start, span.end)),
+                };
                 (!generic_local).then(|| dt.clone())
             })
             .collect();
@@ -105011,10 +105014,6 @@ impl Simulator {
         super::fst_sink::fst_format_declared_value(val, width)
     }
 
-    /// Open the FST file, write the hierarchy (scopes + vars), transition to
-    /// the body writer, and emit the t=0 snapshot. Mirrors `vcd_start_dump`:
-    /// same scope-filter semantics, tick_s-derived timescale, and net dedup
-    /// (aliased signal_table ids share one FST id via the `alias` parameter).
     /// Resolve string leaves without confusing indexed hierarchy scopes with
     /// variable selects. Unpacked struct leaves may have no type entry of
     /// their own, so start at the longest declared prefix and walk members.
@@ -105091,6 +105090,10 @@ impl Simulator {
         false
     }
 
+    /// Open the FST file, write the hierarchy (scopes + vars), transition to
+    /// the body writer, and emit the t=0 snapshot. Mirrors `vcd_start_dump`:
+    /// same scope-filter semantics, tick_s-derived timescale, and net dedup
+    /// (aliased signal_table ids share one FST id via the `alias` parameter).
     fn fst_start_dump(&mut self) {
         let filename = match self.fst_file.clone() {
             Some(f) => f,

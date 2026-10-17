@@ -297,3 +297,42 @@ fn static_constructor_specialization_neighbors() {
     );
     assert!(!output.contains("T|FAIL"), "{output}");
 }
+
+#[test]
+fn module_alias_with_generic_local_namesake_initializes_independently() {
+    let output = run(
+        r#"
+class ledger;
+  static int calls=0;
+  static int total=0;
+endclass
+class entry #(int N=1);
+  typedef entry#(N) own_type;
+  int payload;
+  function new(); payload=N; ledger::calls++; ledger::total+=N; endfunction
+  static own_type inst=new;
+endclass
+typedef entry#(7) own_type;
+typedef entry#(2) two_type;
+module top;
+  initial begin
+    own_type seven; two_type two;
+    $display("T|before %0d %0d",ledger::calls,ledger::total);
+    seven=own_type::inst; two=two_type::inst;
+    $display("T|payload %0d %0d",seven.payload,two.payload);
+    $display("T|after %0d %0d",ledger::calls,ledger::total);
+  end
+endmodule
+"#,
+        "alias_namesake",
+    );
+    let lines: Vec<_> = output
+        .lines()
+        .filter(|line| line.starts_with("T|"))
+        .collect();
+    assert_eq!(
+        lines,
+        ["T|before 2 9", "T|payload 7 2", "T|after 2 9"],
+        "{output}"
+    );
+}
