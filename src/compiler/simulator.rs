@@ -6617,6 +6617,9 @@ pub struct Simulator {
     /// __deferred_init()`) must run once per specialization — not just once
     /// for the generic class with default params.
     initialized_spec_statics: std::collections::HashSet<(String, String)>,
+    /// Concrete module/package typedef references, captured before class-local
+    /// aliases are hoisted into the flat lookup table.
+    referenced_class_typedefs: Vec<DataType>,
     /// Object handles currently mid-`register()` in a factory. Guards
     /// against RE-ENTRANT registration: a factory `register(obj)` whose
     /// first statement `obj.get_type_name()` triggers a parameterized
@@ -10810,6 +10813,7 @@ impl Simulator {
         // §18.3/§18.4: publish class-local `typedef enum`/`typedef struct`
         // types into the module type tables so a rand property declared with
         // one gets its enum-member domain / packed bit layout.
+        let referenced_class_typedefs = module.typedef_types.values().cloned().collect();
         Self::hoist_class_local_typedefs(&mut module);
         // §6.18/§7.2.1: struct members typed by a collection typedef take
         // the direct `elem m[$]` form every struct-collection path reads.
@@ -12973,6 +12977,7 @@ impl Simulator {
             static_cell_width_cache: std::cell::RefCell::new(HashMap::default()),
             type_id_create_in_progress: HashSet::default(),
             initialized_spec_statics: std::collections::HashSet::default(),
+            referenced_class_typedefs,
             factory_reg_in_progress: std::collections::HashSet::default(),
             ctor_class_stack: Vec::new(),
             reported_null_derefs: std::collections::HashSet::default(),
@@ -18523,28 +18528,14 @@ impl Simulator {
                 // A CLASS-typed static with `= new(...)`/`= new` constructs
                 // the shared instance once at startup (§8.9) — eval_expr of a
                 // bare `new` has no receiver class and yielded 0 (null).
-                let prop_cn = self
-                    .module
-                    .classes
-                    .get(&cn)
-                    .and_then(|cd| cd.properties.get(&prop))
-                    .and_then(|s| s.type_name.clone())
-                    .map(|tn| match self.lookup_typedef_target(&tn) {
-                        Some(crate::ast::types::DataType::TypeReference { name, .. }) => {
-                            name.name.name.clone()
-                        }
-                        _ => tn,
-                    });
-                if let Some(cd2) = prop_cn.and_then(|tn| self.module.classes.get(&tn).cloned()) {
-                    self.class_context_stack.push(Some(cn.clone()));
-                    self.this_stack.push(None);
-                    let v = self.instantiate_class(&cd2, &ctor_args);
-                    self.this_stack.pop();
-                    self.class_context_stack.pop();
-                    v
-                } else {
-                    Value::zero(32)
-                }
+                self.class_context_stack.push(Some(cn.clone()));
+                self.this_stack.push(None);
+                let v = self
+                    .construct_static_property(&cn, &prop, &ctor_args)
+                    .unwrap_or_else(|| Value::zero(32));
+                self.this_stack.pop();
+                self.class_context_stack.pop();
+                v
             } else {
                 self.class_context_stack.push(Some(cn.clone()));
                 self.this_stack.push(None);
@@ -18554,6 +18545,45 @@ impl Simulator {
                 v
             };
             self.class_statics.insert(format!("{}::{}", cn, prop), v);
+        }
+
+        // §6.8/§8.25: a referenced specialization's static initialization
+        // precedes initial processes, including a typedef whose only effect
+        // is a constructor registering its shared instance. Class-local
+        // aliases of a generic class are resolved only under a concrete spec.
+        let mut referenced = self.referenced_class_typedefs.clone();
+        for cd in self.module.classes.values() {
+            if !self.class_is_parameterized(&cd.name) {
+                referenced.extend(cd.typedef_targets.values().cloned());
+            }
+        }
+        let mut referenced_specs: Vec<(String, String)> = referenced
+            .iter()
+            .filter_map(|dt| self.spec_from_typedef_dt(dt))
+            .collect();
+        for (name, args) in &self.module.class_type_args {
+            if let Some(base) = self
+                .module
+                .signals
+                .get(name)
+                .and_then(|s| s.type_name.as_ref())
+            {
+                if self.class_is_parameterized(base) {
+                    let frags: Option<Vec<String>> =
+                        args.iter().map(|e| self.expr_to_spec_fragment(e)).collect();
+                    if let Some(frags) = frags {
+                        referenced_specs.push((
+                            base.clone(),
+                            self.canonicalize_spec_sig(base, &frags.join(",")),
+                        ));
+                    }
+                }
+            }
+        }
+        referenced_specs.sort();
+        referenced_specs.dedup();
+        for (base, sig) in referenced_specs {
+            self.ensure_spec_statics(&base, &sig);
         }
 
         // §8.25/§8.9: real simulators elaborate the static initializers of
@@ -129521,7 +129551,7 @@ impl Simulator {
         // Queue-based: add to pending queue and process iteratively to
         // avoid deep recursion on the Rust stack when initialization chains
         // dozens of specializations during init.
-        let key = (base.to_string(), sig.to_string());
+        let key = (base.to_string(), self.canonicalize_spec_sig(base, sig));
         if self.initialized_spec_statics.contains(&key) {
             return;
         }
@@ -129627,7 +129657,11 @@ impl Simulator {
             while let Some(cname) = cur {
                 if let Some(cd) = self.get_class_def(&cname) {
                     for (prop, expr) in &cd.property_inits {
-                        if cd.static_properties.contains(prop) && Self::expr_contains_call(expr) {
+                        if self.class_is_parameterized(&cd.name)
+                            && cd.static_properties.contains(prop)
+                            && (Self::expr_contains_call(expr)
+                                || Self::static_new_args(expr).is_some())
+                        {
                             acc.push((cd.name.clone(), prop.clone(), expr.clone()));
                         }
                     }
@@ -129647,33 +129681,113 @@ impl Simulator {
             if self.class_statics.contains_key(&spec_key) {
                 continue;
             }
-            let cont_kind = self
+            // Seed before evaluating: a constructor can read its own static
+            // handle (or re-enter this specialization) while it is still null.
+            let seed = self
                 .get_class_def(&cname)
                 .and_then(|cd| cd.properties.get(&prop))
-                .and_then(|s| s.type_name.as_deref())
-                .and_then(Self::container_base);
-            let is_new = matches!(&init.kind, ExprKind::Call { func, .. }
-                if matches!(&func.kind, ExprKind::Ident(h)
-                    if h.path.len() == 1 && h.path[0].name.name == "new"));
-            let v = if let (Some(kind), true) = (cont_kind, is_new) {
-                let ctor_args: &[Expression] = match &init.kind {
-                    ExprKind::Call { args, .. } => args.as_slice(),
-                    _ => &[],
-                };
-                let ch = self.alloc_builtin_container(kind, ctor_args);
-                Value::from_u64(ch as u64, 32)
+                .map(|p| p.value.clone())
+                .unwrap_or_else(|| Value::zero(32));
+            self.class_statics.insert(spec_key.clone(), seed);
+            self.class_context_stack.push(Some(cname.clone()));
+            self.this_stack.push(None);
+            let v = if let Some(args) = Self::static_new_args(&init) {
+                self.construct_static_property(&cname, &prop, args)
+                    .unwrap_or_else(|| Value::zero(32))
             } else {
-                self.class_context_stack.push(Some(cname.clone()));
-                self.this_stack.push(None);
-
-                let v = self.eval_expr(&init);
-                self.this_stack.pop();
-                self.class_context_stack.pop();
-                v
+                self.eval_expr(&init)
             };
+            self.this_stack.pop();
+            self.class_context_stack.pop();
             self.class_statics.insert(spec_key.clone(), v);
         }
+        let targets: Vec<DataType> = self
+            .get_class_def(base)
+            .map(|cd| cd.typedef_targets.values().cloned().collect())
+            .unwrap_or_default();
+        self.class_context_stack.push(Some(base.to_string()));
+        for dt in targets {
+            if let Some((b, s)) = self.spec_from_typedef_dt(&dt) {
+                self.ensure_spec_statics(&b, &s);
+            }
+        }
+        self.class_context_stack.pop();
         self.current_spec = saved_spec;
+    }
+
+    /// Bare class constructors need a declared destination type (§8.8).
+    fn static_new_args(init: &Expression) -> Option<&[Expression]> {
+        match &init.kind {
+            ExprKind::Call { func, args }
+                if matches!(&func.kind, ExprKind::Ident(h)
+                if h.path.len() == 1 && h.path[0].name.name == "new") =>
+            {
+                Some(args)
+            }
+            ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].name.name == "new" => Some(&[]),
+            _ => None,
+        }
+    }
+
+    /// Initialization-only typed dispatch, shared by concrete and generic
+    /// classes. Resolve aliases/parameters before entering the constructor.
+    fn construct_static_property(
+        &mut self,
+        cname: &str,
+        prop: &str,
+        args: &[Expression],
+    ) -> Option<Value> {
+        let cd = self.get_class_def(cname)?;
+        let tn = cd.properties.get(prop)?.type_name.clone()?;
+        if let Some(kind) = Self::container_base(&tn) {
+            let h = self.alloc_builtin_container(kind, args);
+            return Some(Value::from_u64(h as u64, 32));
+        }
+        let tn = self.resolve_type_param_binding(&tn).unwrap_or(tn);
+        let tref = crate::ast::types::TypeName {
+            scopes: Vec::new(),
+            name: crate::ast::Identifier {
+                name: tn.clone(),
+                span: crate::ast::Span::dummy(),
+            },
+            span: crate::ast::Span::dummy(),
+        };
+        let (base, mut type_args) = self.resolve_typeref_class_with_type_args(&tref)?;
+        if let Some(ta) = self
+            .get_class_def(cname)
+            .and_then(|cd| cd.property_type_args.get(prop))
+        {
+            type_args = Some(ta.clone());
+        }
+        let target = self.module.classes.get(&base)?.clone();
+        let type_args = type_args.map(|ta| {
+            ta.into_iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let pname = target.param_order.get(i);
+                    if pname.is_some_and(|p| target.type_param_names.contains(p)) {
+                        return e;
+                    }
+                    // Freeze VALUE parameters in the declaring specialization before
+                    // the constructor changes class context. Type args keep their AST.
+                    if let Some(frag) = self.expr_to_spec_fragment(&e) {
+                        let text = frag.trim();
+                        if let Some(text) = text.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                        {
+                            return Expression::new(
+                                ExprKind::StringLiteral(text.to_string()),
+                                e.span,
+                            );
+                        }
+                        if let Some(v) = self.eval_spec_arg_fragment(&frag) {
+                            return self.value_method_arg_expr(&v);
+                        }
+                    }
+                    e
+                })
+                .collect::<Vec<_>>()
+        });
+        Some(self.instantiate_class_with_type_args(&target, args, type_args.as_deref()))
     }
 
     /// Compute the specialization signature for `ancestor_class` given a

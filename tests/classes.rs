@@ -744,3 +744,6 @@ mod static_task_bare_call;
 mod static_class_event;
 #[path = "classes/member_shadows_package_var.rs"]
 mod member_shadows_package_var;
+
+#[path = "classes/parameterized_static_constructor.rs"]
+mod parameterized_static_constructor;
