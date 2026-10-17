@@ -54807,8 +54807,11 @@ impl Simulator {
                     child_pids.insert(pid_child);
                 }
                 for (pid_child, frame) in start_now.into_iter().rev() {
-                    self.event_queue
-                        .schedule_front(self.time, pid_child, ProcCont::from_frame(frame));
+                    self.event_queue.schedule_front(
+                        self.time,
+                        pid_child,
+                        ProcCont::from_frame(frame),
+                    );
                 }
                 self.auto_loop_vars.truncate(saved_auto_len);
                 if let Some(nm) = block_name {
@@ -81248,15 +81251,12 @@ impl Simulator {
             v
         };
         if let Some(dst) = &lflat {
-            let su_opt = self
-                .module
-                .var_decl_types
-                .get(dst)
-                .cloned()
-                .and_then(|dt| match self.resolve_dt(&dt) {
+            let su_opt = self.module.var_decl_types.get(dst).cloned().and_then(|dt| {
+                match self.resolve_dt(&dt) {
                     DataType::Struct(su) if Self::spreads_member_wise(&su) => Some(su),
                     _ => None,
-                });
+                }
+            });
             if let Some(su) = su_opt {
                 let dst = dst.clone();
                 if let Some(src) = eval_rflat(self, &mut rflat_cache)
@@ -98346,7 +98346,10 @@ impl Simulator {
         }
         if let Some((head, rest)) = raw.split_once('.') {
             if (self.module.classes.contains_key(head) || self.class_of_var(head).is_none())
-                && !self.local_stack.last().is_some_and(|f| f.contains_key(head))
+                && !self
+                    .local_stack
+                    .last()
+                    .is_some_and(|f| f.contains_key(head))
                 && (self.signal_name_to_id.contains_key(rest) || check_known_or_signal(rest, self))
             {
                 let out = rest.to_string();
@@ -110341,8 +110344,7 @@ impl Simulator {
         let ExprKind::Ident(h) = &e.kind else {
             return false;
         };
-        if h.path.iter().any(|s| !s.selects.is_empty())
-            || self.ident_shadowed_by_non_collection(h)
+        if h.path.iter().any(|s| !s.selects.is_empty()) || self.ident_shadowed_by_non_collection(h)
         {
             return false;
         }
@@ -152118,7 +152120,11 @@ impl Simulator {
             self.inst_templates
                 .borrow()
                 .get(class_def.name.as_str())
-                .filter(|t| t.chain.first().is_some_and(|c0| std::sync::Arc::ptr_eq(c0, la)))
+                .filter(|t| {
+                    t.chain
+                        .first()
+                        .is_some_and(|c0| std::sync::Arc::ptr_eq(c0, la))
+                })
                 .cloned()
         });
         let (tpl, owned_chain);

@@ -640,4 +640,3 @@ endmodule
     ];
     assert_eq!(t_lines(src), expected);
 }
-
