@@ -6,6 +6,31 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 # What's new in 0.11
 
+### Unreleased
+
+**Correctness**
+
+* The optional SoA signal store preserves X/Z when a four-state signal starts
+  with a known value, and converts both X and Z to zero for explicitly declared
+  two-state signals, including vectors wider than 64 bits (§6.11.2).
+* Native case equality sign-extends signed operands of different widths,
+  including comparisons against constants, matching four-state execution
+  (§11.4.5).
+
+**Performance**
+
+* Dense `case` statements with four to seven labels use jump tables, and
+  comparison and constant-operand fusion recognizes temporaries reused by
+  later case arms while preserving values still read on another control-flow
+  path. Jump-table targets are relocated when NBA-only edge blocks merge,
+  preserving that optimization for dense cases (§12.5).
+* Constant equality comparisons feeding a branch execute as one bytecode
+  instruction when their result is otherwise unused, preserving X/Z semantics
+  and native execution support (§11.4.5, §12.4).
+* Repeated named-event triggers reuse resolved signal targets and dense
+  trigger timestamps, reducing name allocation and lookup work while retaining
+  event aliasing and scheduling behavior (§15.5).
+
 ### 0.11.2 — class, collection and DPI parity fixes, `-uvm`, crash-safe FST dumps (October 2026)
 
 **Correctness**

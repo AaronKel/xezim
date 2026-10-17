@@ -164,6 +164,10 @@ pub static ENV_VARS: &[(&str, &str)] = &[
         "Census: form comb clusters and report how many written nets could stay local (native-clustering gate)",
     ),
     (
+        "XEZIM_CMP_BRANCH_CONST_OFF",
+        "Bytecode: disable constant equality-and-branch fusion when set (A/B comparison)",
+    ),
+    (
         "XEZIM_COACT_CENSUS",
         "Phase 2: per-dep-edge same-slot co-activation stats; sizes convex-cluster fusion (wants profiling on)",
     ),

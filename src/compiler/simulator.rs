@@ -22,8 +22,7 @@ use super::interrupt::{
     publish_sim_time,
 };
 use fst_writer::{
-    FstBodyWriter, FstHeaderWriter, FstScopeType, FstSignalId, FstSignalType, FstVarDirection,
-    FstVarType,
+    FstHeaderWriter, FstScopeType, FstSignalId, FstSignalType, FstVarDirection, FstVarType,
 };
 use libffi::middle::{Arg, Cif, CodePtr, Type};
 use libloading::Library;
@@ -88,14 +87,6 @@ impl SvRng {
         SvRng {
             state: seed ^ 0x9E37_79B9_7F4A_7C15,
         }
-    }
-
-    /// Non-reproducible stream, used only when the run explicitly asks for one
-    /// with `+seed=random`. It is NOT the default: a run whose seed varies with
-    /// each launch cannot be replayed, so a random failure cannot be debugged.
-    fn from_entropy() -> Self {
-        use rand::Rng;
-        SvRng::from_seed(rand::rngs::StdRng::from_entropy().r#gen::<u64>())
     }
 
     /// §18.14.2 `get_randstate`: the full state as an implementation-defined
@@ -291,7 +282,8 @@ fn method_tier_threshold() -> u32 {
 /// lowering, register allocation, block layout. Stale entries with an old
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3036;
+// CmpBranchConst changes the serialized instruction stream.
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3037;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -344,7 +336,6 @@ pub(crate) enum FastAccessor {
 /// registers.
 struct FastCallEntry {
     block: std::rc::Rc<super::bytecode::CompiledBlock>,
-    defining_class: Box<str>,
     this_reg: super::bytecode::RegId,
     result_reg: super::bytecode::RegId,
     /// Per formal: (name, resize width (0 = keep source), optional
@@ -1552,7 +1543,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB010";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB011";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -1584,39 +1575,6 @@ struct PreparedCombCache {
     time0_idx: Vec<usize>,
     time0_deferred: Vec<CombEntry>,
     cont_driven: HashSet<usize>,
-}
-
-/// Does `stmt` (transitively, through nested blocks/branches/loops/timing
-/// controls) contain a `$finish` or `$stop` system-task call?
-fn stmt_has_finish_or_stop(stmt: &Statement) -> bool {
-    use xezim_core::ast::stmt::StatementKind as SK;
-    match &stmt.kind {
-        SK::Expr(e) => matches!(&e.kind, ExprKind::SystemCall { name, .. }
-            if name == "$finish" || name == "$stop"),
-        SK::If {
-            then_stmt,
-            else_stmt,
-            ..
-        } => {
-            stmt_has_finish_or_stop(then_stmt)
-                || else_stmt
-                    .as_ref()
-                    .is_some_and(|s| stmt_has_finish_or_stop(s))
-        }
-        SK::Case { items, .. } => items.iter().any(|i| stmt_has_finish_or_stop(&i.stmt)),
-        SK::For { body, .. }
-        | SK::Foreach { body, .. }
-        | SK::While { body, .. }
-        | SK::DoWhile { body, .. }
-        | SK::Repeat { body, .. }
-        | SK::Forever { body }
-        | SK::Wait { stmt: body, .. }
-        | SK::TimingControl { stmt: body, .. } => stmt_has_finish_or_stop(body),
-        SK::SeqBlock { stmts, .. } | SK::ParBlock { stmts, .. } => {
-            stmts.iter().any(stmt_has_finish_or_stop)
-        }
-        _ => false,
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -2054,19 +2012,6 @@ struct InstanceEventWaiter {
     continuation: ProcCont,
 }
 
-/// Pad a string to a given width with spaces (or zeros if zero_pad).
-fn pad_string(s: &str, width: usize, zero_pad: bool) -> String {
-    if width == 0 || s.len() >= width {
-        return s.to_string();
-    }
-    let pad = width - s.len();
-    if zero_pad {
-        format!("{}{}", "0".repeat(pad), s)
-    } else {
-        format!("{}{}", " ".repeat(pad), s)
-    }
-}
-
 /// Timing wheel for O(1) near-future event scheduling.
 /// Events within WHEEL_SIZE ticks of current time use a circular array.
 /// Events further out fall back to a BTreeMap.
@@ -2476,7 +2421,7 @@ impl NbaFastIndex {
             self.dense_entries.resize(total, u32::MAX);
         }
     }
-
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.dirty_dense.is_empty() && self.sparse_entries.is_empty()
     }
@@ -2487,6 +2432,7 @@ mod code_cov;
 mod dpi_export;
 mod dpi_task;
 mod event_bits;
+mod event_stamps;
 mod module_paths;
 mod names;
 mod rand_csp;
@@ -2512,6 +2458,7 @@ pub use code_cov::{
     CodeCoverage, KIND_BRANCH, KIND_STATEMENT, KIND_TOGGLE,
     parse_kinds as parse_code_coverage_kinds, set_code_coverage,
 };
+use event_stamps::{EventId, EventStampStore, NamedEventPlan, NamedEventTarget};
 pub(crate) use names::{IdNames, NameMap};
 pub use timing_checks::{set_no_notifier, set_no_tchk_msg, set_no_timing_checks};
 
@@ -2811,11 +2758,6 @@ impl TimingWheel {
                     .push_front((pid, stmts));
             }
         }
-    }
-
-    /// Schedule multiple events at the given time.
-    fn schedule_push(&mut self, time: u64, entry: (usize, ProcCont)) {
-        self.schedule(time, entry.0, entry.1);
     }
 
     fn is_empty(&self) -> bool {
@@ -3412,10 +3354,7 @@ struct SvaClockedSite {
     edge: u8,
     /// `@(posedge clk iff g)`: the tick counts only while `g` holds.
     iff: Option<Expression>,
-    /// Property body as written (after named-sequence expansion); kept for
-    /// the `$past` argument walk.
-    body: Expression,
-    /// The bare signal names `$past` reads in `body` (sorted, unique), found
+    /// The bare signal names `$past` reads in the body (sorted, unique), found
     /// once at registration: the walk ran on every clock fire.
     past_names: Vec<String>,
     /// The body compiled to an evaluable property tree (see `SvaNode`).
@@ -3452,7 +3391,7 @@ struct SvaClockedSite {
     /// LRM §16.5.1 — signal ids referenced anywhere in `body`. Their
     /// slot-entry (Preponed) values are cached in `Simulator::sva_preponed`
     /// and swapped in while this site's predicate is evaluated, so the
-    /// property samples pre-edge values (see `eval_sva_sampled`).
+    /// property samples pre-edge values through the sampled-value overlay.
     sampled_ids: Vec<usize>,
     /// §16.10: the initial values of the attempt's local variable slots
     /// (empty when the property has none).
@@ -5168,7 +5107,6 @@ fn bytecode_array_first_id(
 /// `XEZIM_OOB_SELECT=whole`: a partially out-of-range select reads x as a
 /// whole and a partially out-of-range WRITE is discarded (some tools);
 /// default is the §11.5.1 per-bit form for both.
-#[inline]
 // ---- Wide two-state register word helpers (little-endian `[u64; N]`). ----
 
 /// Top word index of a `w`-bit value and the mask of its live bits.
@@ -5838,11 +5776,12 @@ enum CombPlan {
     /// (forces, X inputs); the plan then falls through JIT-then-interp,
     /// exactly like the unplanned dispatch.
     Ts(std::sync::Arc<super::bytecode::TwoStateBlock>),
+    /// Native slot; its function is stored in `comb_jit_fns`.
     #[cfg(feature = "jit")]
-    Jit(super::jit::JitFn),
-    /// Template-mode native fn plus the entry's mapping-blob window.
+    Jit,
+    /// Template slot; its function and mapping window are in `comb_tpl_fns`.
     #[cfg(feature = "jit")]
-    Tpl(super::aot::AotTplFn, u32, u32),
+    Tpl,
     Interp,
 }
 
@@ -7012,11 +6951,14 @@ pub struct Simulator {
     ts_jit: Option<Box<super::ts_jit::enabled::TsJitModule>>,
     #[cfg(feature = "jit")]
     ts_jit_fns: Vec<Option<super::ts_jit::enabled::TsJitFn>>,
+    #[cfg(feature = "jit")]
     ts_jit_on: bool,
     /// Per comb entry: two-state evaluations so far (native path only);
     /// a stream is compiled once it crosses `ts_jit_hot`, so only the hot
     /// set turns into machine code and the code stays cache-resident.
+    #[cfg(feature = "jit")]
     ts_jit_evals: Vec<u32>,
+    #[cfg(feature = "jit")]
     ts_jit_hot: u32,
     is_clock_tree_signal: Vec<bool>,
     prof_clock_tree_evals: u64,
@@ -7422,13 +7364,6 @@ pub struct Simulator {
     /// than static fanout because it counts only the signals that
     /// CAUSED a wakeup, not all readers.
     cross_block_wakeup_count: Vec<u64>,
-    /// Phase-4 counter: per-partition cross-boundary packet count.
-    /// Indexed by `edge_block_partition_count`-sized vector;
-    /// `boundary_packet_count[p]` = number of NBA writes from
-    /// partition p whose target signal is read by a different
-    /// partition. Computed lazily from cross_block_wakeup_count when
-    /// dumping the profile (no per-write hot-path cost).
-    boundary_packet_count: Vec<u64>,
     /// Phase-4 counter: per-partition local-quiescence iteration
     /// count — how many settle iterations were resolved within the
     /// partition before any cross-partition signal had to be
@@ -7462,7 +7397,6 @@ pub struct Simulator {
     /// The cursor is a `u32` (never `usize::MAX`-sentinel — the executor
     /// compares against `keys.len()`).
     foreach_arena: Vec<(Vec<Value>, u32)>,
-    foreach_arena_saved: Vec<(Vec<Value>, u32)>,
     /// Built-in clock generators (optimized always #N clk = ~clk)
     clock_generators: Vec<ClockGen>,
     /// Source position of every clock generator, for its time-0 rank:
@@ -7902,8 +7836,6 @@ pub struct Simulator {
     /// proceeds). The condition-waiter fixpoint uses it to detect "no progress
     /// this round" and stop (genuine stall).
     cond_progress: u64,
-    /// SV-2023: real-precision time tracker (parallel to integer `time`).
-    real_time: f64,
     /// SV-2023: blocked mailbox `get`/`peek` proxies keyed by mailbox handle.
     /// Each waiter records the suspended process pid, the destination lvalue
     /// expression to receive the value, and the post-get continuation
@@ -7943,10 +7875,10 @@ pub struct Simulator {
     /// `VC_CHANGED_MARKER`); removed when the wait resumes.
     vc_saved: HashMap<u64, (usize, Value)>,
     /// LRM §15.5.3: per-named-event last-trigger time. `e.triggered`
-    /// returns 1 iff this map's `time` matches the current simulation time
+    /// returns 1 iff its dense stamp matches the current simulation time
     /// (i.e. the event has been triggered in the same time slot as the
     /// query). EventTrigger handler stamps this.
-    event_triggered_time: HashMap<String, u64>,
+    event_triggered_time: EventStampStore,
     /// Processes waiting for signal edge events (@(posedge clk), etc.)
     event_waiters: Vec<EventWaiter>,
     /// Processes parked on a class-field named event (`@m_event` inside a
@@ -7971,8 +7903,6 @@ pub struct Simulator {
     /// Class-embedded covergroups sampled on an event property of their
     /// object, by (object, event name).
     cg_instance_event_waiters: HashMap<(usize, String), Vec<(usize, Option<Expression>)>>,
-    /// Swap buffer for event_waiters filtering (avoids allocation per cycle)
-    event_waiters_swap: Vec<EventWaiter>,
     /// Reused per tick: the triggered continuations of
     /// `drain_triggered_event_waiters` and the clock generators' tree
     /// roots were fresh Vecs on every tick, and `drain_deferred_comb`
@@ -8348,6 +8278,7 @@ pub struct Simulator {
     /// an entry's scope hint. Null outside the settle.
     settle_entries_view: (*const CombEntry, usize),
     /// Census: x-read bails per comb entry (count, executor kind).
+    #[cfg(feature = "opcode-census")]
     ts_xbail_by_entry: HashMap<usize, (u64, u8)>,
     /// Per-slot mid-exec abort counts; at `TS_ABORT_DEMOTE` the slot flips
     /// to No / Interp for the rest of the run. (Re-promotion after init
@@ -8707,12 +8638,6 @@ pub struct Simulator {
     /// profiling so regression tests can prove the fast path was exercised.
     packed_blocking_fill_collapses: u64,
     // Profiling accumulators (nanoseconds)
-    prof_settle: u64,
-    prof_edges: u64,
-    prof_nba: u64,
-    prof_process: u64,
-    prof_snapshot: u64,
-    prof_vcd: u64,
     prof_edge_detect: u64,
     prof_edge_exec: u64,
     /// Phase-1 multicore observability: counts how many delta-cycles
@@ -8868,10 +8793,6 @@ pub struct Simulator {
     /// Track which entries were triggered (for selective clearing)
     settle_triggered_list: Vec<usize>,
     loop_iters: u64,
-    t_prevclone: std::time::Duration,
-    t_process: std::time::Duration,
-    t_settle_total: std::time::Duration,
-    t_edges: std::time::Duration,
     entry_evals: u64,
     settle_iters: u64,
     max_settle_iters: u64,
@@ -13035,8 +12956,11 @@ impl Simulator {
             ts_jit: None,
             #[cfg(feature = "jit")]
             ts_jit_fns: Vec::new(),
+            #[cfg(feature = "jit")]
             ts_jit_on: std::env::var_os("XEZIM_TS_JIT").is_some(),
+            #[cfg(feature = "jit")]
             ts_jit_evals: Vec::new(),
+            #[cfg(feature = "jit")]
             ts_jit_hot: std::env::var("XEZIM_TS_JIT_HOT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -13224,7 +13148,6 @@ impl Simulator {
             nba_count_per_block: Vec::new(),
             sensitivity_trigger_count: Vec::new(),
             cross_block_wakeup_count: Vec::new(),
-            boundary_packet_count: Vec::new(),
             local_quiescence_iterations: Vec::new(),
             edge_block_stats_enabled: std::env::var("XEZIM_PROFILE_REPORT").ok().as_deref()
                 == Some("1")
@@ -13235,7 +13158,6 @@ impl Simulator {
             edge_block_insn_len: Vec::new(),
             vm_regs: Vec::new(),
             foreach_arena: Vec::new(),
-            foreach_arena_saved: Vec::new(),
             clock_generators: Vec::new(),
             clock_gen_src: Vec::new(),
             t0_timing_free: HashSet::default(),
@@ -13369,7 +13291,6 @@ impl Simulator {
             inactive_queue: Vec::new(),
             nba_region_waiters: Vec::new(),
             cond_progress: 0,
-            real_time: 0.0,
             mailbox_get_waiters: HashMap::default(),
             fork_baselines: HashMap::default(),
             fork_signal_captures: HashMap::default(),
@@ -13377,7 +13298,7 @@ impl Simulator {
             intra_saved: HashMap::default(),
             intra_saved_next: 0,
             vc_saved: HashMap::default(),
-            event_triggered_time: HashMap::default(),
+            event_triggered_time: EventStampStore::default(),
             event_waiters: Vec::new(),
             instance_event_waiters: Vec::new(),
             late_resume_epoch: 0,
@@ -13386,7 +13307,6 @@ impl Simulator {
             cg_event_waiters: Vec::new(),
             cg_named_event_waiters: HashMap::default(),
             cg_instance_event_waiters: HashMap::default(),
-            event_waiters_swap: Vec::new(),
             triggered_conts_buf: Vec::new(),
             sig_wake_rank: HashMap::default(),
             wake_rank_built: false,
@@ -13502,6 +13422,7 @@ impl Simulator {
             ts_save_list: Vec::new(),
             ts_cur_eidx: u32::MAX,
             settle_entries_view: (std::ptr::null(), 0),
+            #[cfg(feature = "opcode-census")]
             ts_xbail_by_entry: HashMap::default(),
             ts_edge_abortn: Vec::new(),
             ts_sleep: std::collections::BinaryHeap::new(),
@@ -13649,12 +13570,6 @@ impl Simulator {
             settle_prev_values: Vec::new(),
             settle_triggered_list: Vec::new(),
             loop_iters: 0,
-            prof_settle: 0,
-            prof_edges: 0,
-            prof_nba: 0,
-            prof_process: 0,
-            prof_snapshot: 0,
-            prof_vcd: 0,
             prof_edge_detect: 0,
             prof_edge_exec: 0,
             prof_par_dispatch_partition: 0,
@@ -13714,10 +13629,6 @@ impl Simulator {
             cone_chains: Vec::new(),
             prof_settle_ca_count: 0,
             prof_settle_ab_count: 0,
-            t_prevclone: std::time::Duration::ZERO,
-            t_process: std::time::Duration::ZERO,
-            t_settle_total: std::time::Duration::ZERO,
-            t_edges: std::time::Duration::ZERO,
             entry_evals: 0,
             settle_iters: 0,
             max_settle_iters: 0,
@@ -13778,6 +13689,14 @@ impl Simulator {
             pending_t0_triggers: Vec::new(),
             in_pre_process_settle: false,
         };
+        // Static event names get stable IDs before simulation; class, local
+        // and selected event identities can still be interned on first use.
+        // Interning alone must not make an event appear already triggered.
+        let mut event_names: Vec<_> = sim.module.events.iter().collect();
+        event_names.sort_unstable();
+        for name in event_names {
+            sim.event_triggered_time.intern(name);
+        }
         let total_ms = phase_total.elapsed().as_secs_f64() * 1000.0;
         if total_ms > 100.0 {
             chatter!(
@@ -14098,10 +14017,10 @@ impl Drop for Simulator {
     }
 }
 
-/// Per-thread path of value-parameter names currently being resolved by
-/// `Simulator::resolve_value_param_from_spec`. Used to break cyclic value-param
-/// references (a specialization argument that names a value param of the same
-/// class, which would otherwise recurse infinitely and overflow the stack).
+// Per-thread path of value-parameter names currently being resolved by
+// `Simulator::resolve_value_param_from_spec`. Used to break cyclic value-param
+// references (a specialization argument that names a value param of the same
+// class, which would otherwise recurse infinitely and overflow the stack).
 thread_local! {
     static VALPARAM_RESOLVING: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::new());
@@ -15636,10 +15555,6 @@ impl Simulator {
         }
     }
 
-    fn write_file_handle(&mut self, args: &[Expression], newline: bool) -> Value {
-        self.write_file_handle_named(args, newline, "$write")
-    }
-
     fn write_file_handle_named(&mut self, args: &[Expression], newline: bool, tn: &str) -> Value {
         if args.is_empty() {
             return Value::zero(32);
@@ -16632,7 +16547,7 @@ impl Simulator {
             } else {
                 DpiArgKind::LogicIn
             }),
-            DataType::Implicit { dimensions, .. } => {
+            DataType::Implicit { dimensions: _, .. } => {
                 // Implicitly-typed with a packed range (`[N:0] x`) is a 4-state
                 // packed vector -> svLogicVecVal* pointer at every width
                 // (Annex H.10.2), same as an explicit `logic [N:0]`.
@@ -18377,7 +18292,7 @@ impl Simulator {
         // from each declaring class's `static_assoc_key_types` so a
         // `static T map[string]` gets string storage (hashing the bare name
         // as NUMERIC would corrupt foreach()/first()/next()).
-        let static_cols: Vec<(String, bool, u32, bool)> = self
+        let _static_cols: Vec<(String, bool, u32, bool)> = self
             .module
             .classes
             .values()
@@ -20959,28 +20874,6 @@ impl Simulator {
         }
     }
 
-    /// Advance all clock generators to the given time, toggling signals as needed.
-    /// Returns the next toggle time across all clock generators (for time advancement).
-    #[inline]
-    fn advance_clock_generators(&mut self) -> Option<u64> {
-        let mut next_time = u64::MAX;
-        for cg in &mut self.clock_generators {
-            while cg.next_toggle_time <= self.time {
-                // Should not happen in normal operation, but guard against it
-                cg.next_toggle_time += cg.half_period;
-            }
-            if cg.next_toggle_time == self.time {
-                // Toggle at current time (handled below)
-            }
-            next_time = next_time.min(cg.next_toggle_time);
-        }
-        if next_time == u64::MAX {
-            None
-        } else {
-            Some(next_time)
-        }
-    }
-
     /// Toggle clock generators that fire at the current time.
     /// Toggle every clock generator whose next_toggle_time matches the
     /// current sim time.  Fills `toggled_clock_positions` with the
@@ -21821,7 +21714,6 @@ impl Simulator {
                         !id.name.starts_with("__xz_")
                     }
                     TimingControl::Event(_) => true,
-                    _ => false,
                 };
                 ok && self.stmt_is_plain_stimulus(stmt)
             }
@@ -23530,7 +23422,7 @@ impl Simulator {
         }
         fn canon_arr(
             map: &mut HashMap<usize, u32>,
-            smap: &mut HashMap<u32, u32>,
+            _smap: &mut HashMap<u32, u32>,
             a: &ArrayOperand,
         ) -> (u32, i64, i64) {
             match a {
@@ -24802,7 +24694,7 @@ impl Simulator {
         let mut frontier: Vec<usize> = Vec::new();
         let dep_off = &self.comb_dep_offsets;
         let dep_ent = &self.comb_dep_entries;
-        let mut push_readers = |sig: usize, frontier: &mut Vec<usize>, in_cone: &mut Vec<bool>| {
+        let push_readers = |sig: usize, frontier: &mut Vec<usize>, in_cone: &mut Vec<bool>| {
             if sig + 1 < dep_off.len() {
                 for &e in &dep_ent[dep_off[sig] as usize..dep_off[sig + 1] as usize] {
                     let e = e as usize;
@@ -25260,7 +25152,7 @@ impl Simulator {
         }
         let widths = &self.signal_widths;
         let mut out: Vec<(u32, u64)> = Vec::new();
-        let mut add_bit = |out: &mut Vec<(u32, u64)>, b: BitRef| {
+        let add_bit = |out: &mut Vec<(u32, u64)>, b: BitRef| {
             let w = widths.get(b.sig_id as usize).copied().unwrap_or(0);
             let m = super::bytecode::sig_span_mask(w, b.bit, 1);
             if let Some(e) = out.iter_mut().find(|e| e.0 == b.sig_id) {
@@ -25269,7 +25161,7 @@ impl Simulator {
                 out.push((b.sig_id, m));
             }
         };
-        let mut add_gate = |out: &mut Vec<(u32, u64)>, g: &FusedGate| match g {
+        let add_gate = |out: &mut Vec<(u32, u64)>, g: &FusedGate| match g {
             FusedGate::Buf1 { src, .. } => add_bit(out, *src),
             FusedGate::Bin2 { a, b, .. } => {
                 add_bit(out, *a);
@@ -25442,7 +25334,7 @@ impl Simulator {
         if !self.ctl_on || !self.sdf_delays.is_empty() {
             return;
         }
-        let n = self.comb_entries.len();
+        let _n = self.comb_entries.len();
         let nsig = self.comb_dep_offsets.len().saturating_sub(1);
         let offs = &self.comb_dep_offsets;
         let fanout = |s: u32| -> u32 {
@@ -25615,15 +25507,6 @@ impl Simulator {
         r
     }
 
-    /// The fused gate behind a gate entry (`FusedGate` or `CtlGate`).
-    fn comb_item_gate<'a>(&'a self, item: &'a CombItem) -> Option<&'a FusedGate> {
-        match item {
-            CombItem::FusedGate { op } => Some(op),
-            CombItem::CtlGate { slot } => self.ctl_gates.get(*slot as usize).map(|g| &g.op),
-            _ => None,
-        }
-    }
-
     /// An external write (deposit) to signal `id`: a `CtlGate` driving it
     /// must see its high-fanout input again, so the next toggle re-evaluates
     /// the gate and overwrites the deposit exactly as an unmasked gate does.
@@ -25749,12 +25632,12 @@ impl Simulator {
             }
         }
         #[cfg(feature = "jit")]
-        if let Some(Some(f)) = self.comb_jit_fns.get(eidx).copied() {
-            return CombPlan::Jit(f);
+        if matches!(self.comb_jit_fns.get(eidx), Some(Some(_))) {
+            return CombPlan::Jit;
         }
         #[cfg(feature = "jit")]
-        if let Some(Some((f, off, len))) = self.comb_tpl_fns.get(eidx).copied() {
-            return CombPlan::Tpl(f, off, len);
+        if matches!(self.comb_tpl_fns.get(eidx), Some(Some(_))) {
+            return CombPlan::Tpl;
         }
         CombPlan::Interp
     }
@@ -25819,7 +25702,7 @@ impl Simulator {
                 self.run_comb_jit_slot(eidx)
             }
             #[cfg(feature = "jit")]
-            CombPlan::Jit(_) | CombPlan::Tpl(..) => self.run_comb_jit_slot(eidx),
+            CombPlan::Jit | CombPlan::Tpl => self.run_comb_jit_slot(eidx),
             CombPlan::Interp | CombPlan::Unresolved => false,
         }
     }
@@ -25902,11 +25785,12 @@ impl Simulator {
 
     /// A JIT slot died: re-plan without it (Ts entries keep their island —
     /// only a Jit plan decays to Interp).
+    #[cfg(feature = "jit")]
     fn downgrade_comb_plan(&mut self, eidx: usize) {
         #[cfg(feature = "jit")]
         if matches!(
             self.comb_plan.get(eidx),
-            Some(CombPlan::Jit(_)) | Some(CombPlan::Tpl(..))
+            Some(CombPlan::Jit) | Some(CombPlan::Tpl)
         ) {
             self.comb_plan[eidx] = CombPlan::Interp;
         }
@@ -26098,10 +25982,6 @@ impl Simulator {
         for (op, n) in oh.into_iter().take(25) {
             eprintln!("[COMBPATH]   {op}: {n}");
         }
-    }
-
-    fn try_two_state(&mut self, eidx: usize, compiled: &super::bytecode::CompiledBlock) -> bool {
-        self.try_two_state_in(eidx, compiled, false)
     }
 
     fn try_two_state_in(
@@ -27384,7 +27264,7 @@ impl Simulator {
                     // The window is fully defined on an X-free selector, so
                     // `xz_path` (the wildcard compare chain) cannot be taken.
                     let v = regs[*s as usize] & *mask;
-                    pc = mj.table[(((v >> *lo) & *wmask) as usize)] as usize;
+                    pc = mj.table[((v >> *lo) & *wmask) as usize] as usize;
                     continue;
                 }
                 TsInsn::ElemLoad(op) => {
@@ -27707,7 +27587,7 @@ impl Simulator {
                     }
                 } else {
                     debug_assert!(__s < self.signal_table.len());
-                    unsafe { self.signal_table.get_unchecked(__s) }.raw_bits()
+                    self.signal_table.get_unchecked(__s).raw_bits()
                 }
             }};
         }
@@ -28162,7 +28042,7 @@ impl Simulator {
                     | TsInsn::SaveSigW { .. }
                     | TsInsn::WNbaFromElem(..)
                     | TsInsn::RangeFillXW { .. }
-                    | TsInsn::LoopPoll => match unsafe { self.ts_exec_dyn(insn, rp) } {
+                    | TsInsn::LoopPoll => match self.ts_exec_dyn(insn, rp) {
                         0 => {}
                         1 => return false,
                         _ => xbail!(),
@@ -28886,9 +28766,9 @@ impl Simulator {
                 w,
                 sw,
                 mask,
-            } => match self.ts_sig_range_dyn(*sig, *regs.add(*i as usize), *w, *sw) {
+            } => match self.ts_sig_range_dyn(*sig, unsafe { *regs.add(*i as usize) }, *w, *sw) {
                 TsDyn::Ok(v) => {
-                    *regs.add(*d as usize) = v & mask;
+                    unsafe { *regs.add(*d as usize) = v & mask };
                     0
                 }
                 TsDyn::Oob => 1,
@@ -28902,7 +28782,7 @@ impl Simulator {
                 sw,
                 mask,
             } => {
-                let (lo, v) = (*regs.add(*i as usize), *regs.add(*s as usize) & mask);
+                let (lo, v) = unsafe { (*regs.add(*i as usize), *regs.add(*s as usize) & mask) };
                 (!self.ts_range_store_dyn(*sig, lo, v, *w, *sw, false)) as u8
             }
             TsInsn::RangeStoreNbaDyn {
@@ -28913,7 +28793,7 @@ impl Simulator {
                 sw,
                 mask,
             } => {
-                let (lo, v) = (*regs.add(*i as usize), *regs.add(*s as usize) & mask);
+                let (lo, v) = unsafe { (*regs.add(*i as usize), *regs.add(*s as usize) & mask) };
                 (!self.ts_range_store_dyn(*sig, lo, v, *w, *sw, true)) as u8
             }
             TsInsn::WNbaFromElem(op) => {
@@ -29087,7 +28967,7 @@ impl Simulator {
                     }
                 } else {
                     debug_assert!(__s < self.signal_table.len());
-                    unsafe { self.signal_table.get_unchecked(__s) }.raw_bits()
+                    self.signal_table.get_unchecked(__s).raw_bits()
                 }
             }};
         }
@@ -29185,9 +29065,9 @@ impl Simulator {
                     }
                     TsInsn::Sel { d, c, a, b, .. } => {
                         (*rp.add(*d as usize)) = if (*rp.add(*c as usize)) != 0 {
-                            (*rp.add(*a as usize))
+                            *rp.add(*a as usize)
                         } else {
-                            (*rp.add(*b as usize))
+                            *rp.add(*b as usize)
                         };
                     }
                     TsInsn::Not { d, s, mask } => {
@@ -29204,13 +29084,13 @@ impl Simulator {
                     }
                     TsInsn::Add { d, a, b, mask } => {
                         (*rp.add(*d as usize)) =
-                            (*rp.add(*a as usize)).wrapping_add((*rp.add(*b as usize))) & mask;
+                            (*rp.add(*a as usize)).wrapping_add(*rp.add(*b as usize)) & mask;
                     }
                     TsInsn::AddC { d, s: sr, k, mask } => {
                         (*rp.add(*d as usize)) = (*rp.add(*sr as usize)).wrapping_add(*k) & mask;
                     }
                     TsInsn::Shl { d, a, b, w, mask } => {
-                        let amt = (*rp.add(*b as usize));
+                        let amt = *rp.add(*b as usize);
                         (*rp.add(*d as usize)) = if amt >= *w as u64 {
                             0
                         } else {
@@ -29218,7 +29098,7 @@ impl Simulator {
                         };
                     }
                     TsInsn::Shr { d, a, b, w } => {
-                        let amt = (*rp.add(*b as usize));
+                        let amt = *rp.add(*b as usize);
                         (*rp.add(*d as usize)) = if amt >= *w as u64 {
                             0
                         } else {
@@ -29227,7 +29107,7 @@ impl Simulator {
                     }
                     TsInsn::Sub { d, a, b, mask } => {
                         (*rp.add(*d as usize)) =
-                            (*rp.add(*a as usize)).wrapping_sub((*rp.add(*b as usize))) & mask;
+                            (*rp.add(*a as usize)).wrapping_sub(*rp.add(*b as usize)) & mask;
                     }
                     TsInsn::Eq { d, a, b } => {
                         (*rp.add(*d as usize)) =
@@ -29255,14 +29135,14 @@ impl Simulator {
                         } as u64;
                     }
                     TsInsn::BitStoreNbaDyn { sig, i, s, w } => {
-                        let idx = (*rp.add(*i as usize));
+                        let idx = *rp.add(*i as usize);
                         if idx < *w as u64 {
                             let bit = (*rp.add(*s as usize)) & 1;
                             self.ts_bit_store_nba(*sig as usize, idx as u32, bit);
                         }
                     }
                     TsInsn::BitDyn { d, s, i, w } => {
-                        let idx = (*rp.add(*i as usize));
+                        let idx = *rp.add(*i as usize);
                         if idx >= *w as u64 {
                             return false;
                         }
@@ -29582,7 +29462,7 @@ impl Simulator {
                     TsInsn::BitStoreDyn { sig, i, s, w } => {
                         // §11.5.1: an out-of-range dynamic bit-select target
                         // drops the write (`Value::set_bit` is a no-op there).
-                        let idx = (*rp.add(*i as usize));
+                        let idx = *rp.add(*i as usize);
                         if idx < *w as u64 {
                             let b = (*rp.add(*s as usize)) & 1;
                             if *w > 64 {
@@ -29602,7 +29482,7 @@ impl Simulator {
                     | TsInsn::SaveSigW { .. }
                     | TsInsn::WNbaFromElem(..)
                     | TsInsn::RangeFillXW { .. }
-                    | TsInsn::LoopPoll) => match unsafe { self.ts_exec_dyn(insn, rp) } {
+                    | TsInsn::LoopPoll) => match self.ts_exec_dyn(insn, rp) {
                         0 => {}
                         1 => return false,
                         _ => xbail!(),
@@ -29680,10 +29560,10 @@ impl Simulator {
                     }
                     TsInsn::Mul { d, a, b, mask } => {
                         (*rp.add(*d as usize)) =
-                            (*rp.add(*a as usize)).wrapping_mul((*rp.add(*b as usize))) & mask;
+                            (*rp.add(*a as usize)).wrapping_mul(*rp.add(*b as usize)) & mask;
                     }
                     TsInsn::Repl { d, s, w, count } => {
-                        let part = (*rp.add(*s as usize));
+                        let part = *rp.add(*s as usize);
                         (*rp.add(*d as usize)) = replicate_narrow(part, *w, *count);
                     }
                     TsInsn::WSigRange { .. } => {
@@ -29756,7 +29636,7 @@ impl Simulator {
                         // The window is fully defined on an X-free selector, so
                         // `xz_path` (the wildcard compare chain) cannot be taken.
                         let v = (*rp.add(*s as usize)) & *mask;
-                        pc = mj.table[(((v >> *lo) & *wmask) as usize)] as usize;
+                        pc = mj.table[((v >> *lo) & *wmask) as usize] as usize;
                         continue;
                     }
                     TsInsn::ElemLoad(op) => {
@@ -32407,6 +32287,19 @@ impl Simulator {
                         sv.clone()
                     };
                 }
+                Insn::CmpBranchConst(kind, src, k, _tmp, target) => {
+                    use super::bytecode::BinOpConstKind as K;
+                    let a = &vm_regs[*src as usize];
+                    let res = match kind {
+                        K::Eq => a.is_equal(k),
+                        K::CaseEq => a.case_eq(k),
+                        _ => unreachable!("constant branch requires an equality comparison"),
+                    };
+                    if !res.is_true() {
+                        pc = *target as usize;
+                        continue;
+                    }
+                }
                 Insn::CmpBranch(kind, l, r, _tmp, target) => {
                     use super::bytecode::CmpKind as CK;
                     let a = &vm_regs[*l as usize];
@@ -32946,6 +32839,19 @@ impl Simulator {
                     } else {
                         sv.clone()
                     };
+                }
+                Insn::CmpBranchConst(kind, src, k, _tmp, target) => {
+                    use super::bytecode::BinOpConstKind as K;
+                    let a = &vm_regs[*src as usize];
+                    let res = match kind {
+                        K::Eq => a.is_equal(k),
+                        K::CaseEq => a.case_eq(k),
+                        _ => unreachable!("constant branch requires an equality comparison"),
+                    };
+                    if !res.is_true() {
+                        pc = *target as usize;
+                        continue;
+                    }
                 }
                 Insn::CmpBranch(kind, l, r, _tmp, target) => {
                     use super::bytecode::CmpKind as CK;
@@ -35438,6 +35344,19 @@ impl Simulator {
                         sv.clone()
                     };
                     self.vm_regs[*d as usize] = nv;
+                }
+                Insn::CmpBranchConst(kind, src, k, _tmp, target) => {
+                    use super::bytecode::BinOpConstKind as K;
+                    let a = &self.vm_regs[*src as usize];
+                    let res = match kind {
+                        K::Eq => a.is_equal(k),
+                        K::CaseEq => a.case_eq(k),
+                        _ => unreachable!("constant branch requires an equality comparison"),
+                    };
+                    if !res.is_true() {
+                        pc = *target as usize;
+                        continue;
+                    }
                 }
                 Insn::CmpBranch(kind, l, r, _tmp, target) => {
                     use super::bytecode::CmpKind as CK;
@@ -38158,7 +38077,7 @@ impl Simulator {
                         }
                     }
                 };
-                let is_pure_observer = wids.is_empty();
+                let _is_pure_observer = wids.is_empty();
                 entries.push(CombEntry {
                     item,
                     cold: Box::new(CombEntryCold {
@@ -45758,58 +45677,6 @@ impl Simulator {
         }
     }
 
-    /// Edge check against an EXPLICIT prior value (the waiter's arm-time
-    /// snapshot) rather than `prev_val`. Used for a waiter registered in the
-    /// current snapshot generation: comparing against the value the signal had
-    /// when the waiter armed distinguishes a genuine post-arm change (fire)
-    /// from a pre-arm edge the tick-start snapshot would otherwise report
-    /// (a `forever @(posedge clk)` loop re-arming against the edge it just
-    /// consumed, or time-0 init pseudo-edges — both read as no change).
-    fn check_edge_vs(&self, id: usize, edge: EdgeKind, prev_v: u64, prev_x: u64) -> bool {
-        let (cur_v, cur_x) = self.signal_table[id].raw_bits();
-        let cb_one = (cur_v & 1) == 1 && (cur_x & 1) == 0;
-        let cb_zero = (cur_v & 1) == 0 && (cur_x & 1) == 0;
-        let pb_one = (prev_v & 1) == 1 && (prev_x & 1) == 0;
-        let pb_zero = (prev_v & 1) == 0 && (prev_x & 1) == 0;
-        match edge {
-            EdgeKind::Posedge => (pb_zero && !cb_zero) || (!pb_one && cb_one),
-            EdgeKind::Negedge => (pb_one && !cb_one) || (!pb_zero && cb_zero),
-            EdgeKind::AnyEdge => cur_v != prev_v || cur_x != prev_x,
-            EdgeKind::LsbEdge => {
-                (pb_zero && !cb_zero)
-                    || (!pb_one && cb_one)
-                    || (pb_one && !cb_one)
-                    || (!pb_zero && cb_zero)
-            }
-        }
-    }
-
-    /// Drain every process scheduled at `self.time` in the event_queue,
-    /// running each to its next suspension point. Used inside
-    /// `drain_edge_cascade` to honour the IEEE 1800-2023 §4.4.5 active-
-    /// region drain: after check_edges has woken event_waiters at the
-    /// current time, their continuations must run BEFORE apply_nba so
-    /// they see the pre-NBA state of this cycle's NBA-driven signals.
-    ///
-    /// The loop body mirrors the main event_loop's batch-drain shape:
-    /// pop a batch, run each (pid, stmts), re-fetch new processes at the
-    /// same time (a continuation may itself schedule more at self.time),
-    /// loop until quiescent.
-    fn drain_active_processes_at_current_time(&mut self) {
-        while self.event_queue.next_time() == Some(self.time) {
-            if self.finished {
-                return;
-            }
-            let Some((pid, stmts)) = self.event_queue.pop_front(self.time) else {
-                break;
-            };
-            self.run_scheduled_process(pid, &stmts);
-            if !self.is_pid_suspended(pid) {
-                self.child_finished(pid);
-            }
-        }
-    }
-
     fn collect_condition_read_names(e: &Expression, out: &mut HashSet<String>) {
         match &e.kind {
             ExprKind::Ident(h) => {
@@ -49493,6 +49360,7 @@ impl Simulator {
             Insn::CaseJump(..) => "CaseJump",
             Insn::CaseMaskJump(..) => "CaseMaskJump",
             Insn::CmpBranch(..) => "CmpBranch",
+            Insn::CmpBranchConst(..) => "CmpBranchConst",
             Insn::MoveResize(..) => "MoveResize",
             Insn::Format(..) => "Format",
             Insn::StrOp(..) => "StrOp",
@@ -49977,26 +49845,6 @@ impl Simulator {
         eprintln!();
     }
 
-    /// Extract signal name from an expression (for display).
-    fn expr_signal_name(&self, expr: &Expression) -> String {
-        match &expr.kind {
-            ExprKind::Ident(hier) => hier
-                .path
-                .iter()
-                .map(|s| s.name.name.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
-            ExprKind::Index { expr, index } => {
-                format!(
-                    "{}[{}]",
-                    self.expr_signal_name(expr),
-                    self.expr_signal_name(index)
-                )
-            }
-            _ => "?".to_string(),
-        }
-    }
-
     fn snapshot_process_context(&self) -> ProcessContext {
         ProcessContext {
             this_stack: self.this_stack.clone(),
@@ -50145,27 +49993,7 @@ impl Simulator {
         self.task_string_formals = ctx.task_string_formals;
     }
 
-    fn inherit_current_process_context(&mut self, pid: usize) {
-        let ctx = self.snapshot_process_context();
-        if ctx.this_stack.is_empty()
-            && ctx.local_stack.is_empty()
-            && ctx.class_context_stack.is_empty()
-            && ctx.cg_this.is_none()
-            && ctx.return_value.is_none()
-            && !ctx.break_flag
-            && !ctx.continue_flag
-            && !ctx.return_flag
-            && ctx.local_dyn.is_empty()
-            && ctx.static_local_syncs.is_empty()
-            && ctx.method_local_base.is_empty()
-        {
-            self.process_contexts.remove(&pid);
-        } else {
-            self.process_contexts.insert(pid, ctx);
-        }
-    }
-
-    /// Like `inherit_current_process_context`, but also captures the current
+    /// Capture the current process context, including the current
     /// values of automatic `for`-loop variables (`auto_loop_vars`) by value into
     /// the child's context so each fork child sees the loop index at fork time
     /// (LRM §9.3.2). Used when spawning fork children.
@@ -52986,7 +52814,7 @@ impl Simulator {
                 };
                 if let Some(call) = rewritten {
                     let call_stmt = Statement::new(StatementKind::Expr(call), stmt.span);
-                    let mut cont = vec![call_stmt];
+                    let cont = vec![call_stmt];
                     // Chain the caller's tail instead of copying it onto the end of
                     // the spliced body (ProcCont::pushed).
                     self.run_process_stmts(pid, &pc.pushed(cont, pc.start + i + 1));
@@ -53726,7 +53554,7 @@ impl Simulator {
                     let val = self.eval_expr(rhs);
                     let delay = self.eval_delay_ticks(d_expr);
                     let saved = self.make_intra_saved_expr(val, rvalue.span);
-                    let mut cont = vec![Statement::new(
+                    let cont = vec![Statement::new(
                         StatementKind::BlockingAssign {
                             lvalue: lvalue.clone(),
                             rvalue: saved,
@@ -53834,7 +53662,7 @@ impl Simulator {
                             .collect();
                         let sens =
                             self.event_to_sens(&crate::ast::stmt::EventControl::EventExpr(evs));
-                        let mut cont = vec![Statement::new(
+                        let cont = vec![Statement::new(
                             StatementKind::WaitOrder {
                                 events: events.clone(),
                                 pass: pass.clone(),
@@ -53896,7 +53724,7 @@ impl Simulator {
                             && !matches!(d.kind, ExprKind::Number(_))
                             && self.t0_delay_deferred.insert(pid)
                         {
-                            let mut whole = vec![Statement::new(
+                            let whole = vec![Statement::new(
                                 StatementKind::TimingControl {
                                     control: TimingControl::Delay(d.clone()),
                                     stmt: body.clone(),
@@ -53908,7 +53736,7 @@ impl Simulator {
                             self.inactive_queue.push((pid, whole));
                             return;
                         }
-                        let mut cont = vec![*body.clone()];
+                        let cont = vec![*body.clone()];
                         // Chain the caller's tail rather than copying it (ProcCont::pushed).
                         let cont = pc.pushed(cont, pc.start + i + 1);
                         if delay == 0 {
@@ -53964,7 +53792,7 @@ impl Simulator {
                         // so accept both shapes.
                         if let Some(fname) = self.event_control_field_name(event) {
                             if let Some(key) = self.resolve_this_event_field(&fname) {
-                                let mut cont = vec![*body.clone()];
+                                let cont = vec![*body.clone()];
                                 // Chain the caller's tail rather than copying it (ProcCont::pushed).
                                 let cont = pc.pushed(cont, pc.start + i + 1);
                                 self.instance_event_waiters.push(InstanceEventWaiter {
@@ -54110,7 +53938,7 @@ impl Simulator {
                             return;
                         }
                         if !sens.is_empty() {
-                            let mut cont = vec![*body.clone()];
+                            let cont = vec![*body.clone()];
                             // Chain the caller's tail rather than copying it (ProcCont::pushed).
                             let cont = pc.pushed(cont, pc.start + i + 1);
                             // Late-bind virtual-interface / handle-chained
@@ -54192,7 +54020,7 @@ impl Simulator {
                     // peer process writing `sig` at the same simtime. Level-sensitive
                     // condition handoffs depend on exactly this delta-cycle
                     // handoff. Always park in condition_waiters.
-                    let mut cont = vec![stmt.clone()];
+                    let cont = vec![stmt.clone()];
                     // Chain the caller's tail rather than copying it (ProcCont::pushed).
                     let cont = pc.pushed(cont, pc.start + i + 1);
                     self.park_condition_waiter(pid, cont, condition);
@@ -54506,7 +54334,7 @@ impl Simulator {
                     match chosen {
                         Some(arm) if self.stmt_is_blocking(arm) => {
                             let arm_stmts: Vec<Statement> = Self::spliced_body(arm);
-                            let mut cont = arm_stmts;
+                            let cont = arm_stmts;
                             // Chain the caller's tail instead of copying it onto the end of
                             // the spliced body (ProcCont::pushed).
                             self.run_process_stmts(pid, &pc.pushed(cont, pc.start + i + 1));
@@ -54632,7 +54460,7 @@ impl Simulator {
                         },
                         stmt.span,
                     );
-                    let mut cont = vec![while_stmt];
+                    let cont = vec![while_stmt];
                     // Chain the caller's tail rather than copying it (ProcCont::pushed).
                     let cont = pc.pushed(cont, pc.start + i + 1);
                     self.continue_stmts_or_trampoline(pid, cont);
@@ -55073,7 +54901,7 @@ impl Simulator {
                 let is_foreach_fallback = matches!(&stmt.kind, StatementKind::Foreach { .. });
                 if is_foreach_fallback {
                     self.exec_park_cont = Some({
-                        let mut c = vec![stmt.clone()];
+                        let c = vec![stmt.clone()];
                         // Chain the caller's tail rather than copying it (ProcCont::pushed).
                         let c = pc.pushed(c, pc.start + i + 1);
                         c
@@ -56885,7 +56713,7 @@ impl Simulator {
                             && !matches!(d.kind, ExprKind::Number(_))
                             && self.t0_delay_deferred.insert(pid)
                         {
-                            let mut restart = vec![Statement::new(
+                            let restart = vec![Statement::new(
                                 StatementKind::Forever {
                                     body: Box::new(body.clone()),
                                 },
@@ -62382,7 +62210,7 @@ impl Simulator {
         let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
         let mut reads: Vec<String> = Vec::new();
         let mut writes: Vec<String> = Vec::new();
-        let mut link = |reads: &[String], writes: &[String], adj: &mut Vec<Vec<u32>>| {
+        let link = |reads: &[String], writes: &[String], adj: &mut Vec<Vec<u32>>| {
             let rs: Vec<usize> = reads
                 .iter()
                 .filter_map(|r| pos.get(r.as_str()).copied())
@@ -63257,11 +63085,17 @@ impl Simulator {
                 // bail falls through to the ordinary path below, which
                 // re-dispatches (and demotes) exactly as before.
                 let mut ts_fast = false;
+                #[cfg(feature = "jit")]
                 let mut ts_native_bailed = false;
+                #[cfg(not(feature = "jit"))]
+                let ts_native_bailed = false;
                 // A native x-read bail keeps its write records: the stores it
                 // made before the bail are already in the table, and the
                 // executor's re-run below finds them unchanged.
+                #[cfg(feature = "jit")]
                 let mut ts_keep_recs = false;
+                #[cfg(not(feature = "jit"))]
+                let ts_keep_recs = false;
                 #[cfg(feature = "jit")]
                 if self.proc_depth == 0 && self.ts_jit_on {
                     if let Some(Some(f)) = self.ts_jit_fns.get(eidx) {
@@ -72238,76 +72072,6 @@ impl Simulator {
                 }
                 Value::from_u64(u32::MAX as u64, 32)
             }
-            // §21.3.4.2 `$fgets(str, fd)`: read a line into the string
-            // variable; returns the count of chars read, or 0 on EOF/error.
-            "$fgets" => {
-                use std::io::Read;
-                let dest = args.first();
-                let fd = args
-                    .get(1)
-                    .map(|a| self.eval_file_handle_arg(a))
-                    .unwrap_or(0);
-                let mut line = Vec::new();
-                let mut got_eof = true;
-                let mut hit_end = false;
-                if let Some(f) = self.file_handles.get_mut(&fd) {
-                    let mut b = [0u8; 1];
-                    loop {
-                        // Check ungetc buffer first
-                        if let Some(buf) = self.ungetc_buf.get_mut(&fd) {
-                            if let Some(c) = buf.pop() {
-                                got_eof = false;
-                                if c == b'\n' {
-                                    line.push(c);
-                                    break;
-                                }
-                                line.push(c);
-                                continue;
-                            }
-                        }
-                        match f.read(&mut b) {
-                            Ok(0) => {
-                                hit_end = true;
-                                break;
-                            }
-                            Ok(_) => {
-                                got_eof = false;
-                                if b[0] == b'\n' {
-                                    line.push(b[0]);
-                                    break;
-                                }
-                                line.push(b[0]);
-                            }
-                            Err(_) => {
-                                hit_end = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if hit_end {
-                    self.file_eof.insert(fd);
-                }
-                // §21.3.4.2: the line's raw BYTES — a byte >= 0x80 is one
-                // string character, not part of a UTF-8 sequence.
-                if let Some(d) = dest {
-                    self.assign_value(d, &Self::sv_string_from_bytes(&line));
-                }
-                if got_eof && line.is_empty() {
-                    Value::zero(32)
-                } else {
-                    Value::from_u64(line.len() as u64, 32)
-                }
-            }
-            // §21.3.8 `$feof(fd)`: returns nonzero if the file is at EOF.
-            "$feof" => {
-                let fd = args
-                    .first()
-                    .map(|a| self.eval_file_handle_arg(a))
-                    .unwrap_or(0);
-                let flag = self.file_eof.contains(&fd) || !self.file_handles.contains_key(&fd);
-                Value::from_u64(flag as u64, 32)
-            }
             // §21.3.7 `$ferror(fd, str)`: returns 0 if no error, writes a
             // description string to the 2nd argument.
             "$ferror" => {
@@ -76788,7 +76552,7 @@ impl Simulator {
                     // method), a local, a `this` property, or a signal.
                     // `eval_ident_handle` covers local/this/static; signals
                     // need an explicit fallback.
-                    let mut cur_handle = self
+                    let cur_handle = self
                         .eval_ident_handle(obj_name)
                         .filter(|&h| h != 0 && h < self.heap.len())
                         .or_else(|| {
@@ -76805,10 +76569,9 @@ impl Simulator {
                                 .map(|h| h as usize)
                                 .filter(|&h| h != 0 && h < self.heap.len())
                         });
-                    while let Some(h) = cur_handle {
+                    if let Some(h) = cur_handle {
                         for i in 1..hier.path.len() {
                             if h == 0 || h >= self.heap.len() {
-                                cur_handle = None;
                                 break;
                             }
                             let member_name = &hier.path[i].name.name;
@@ -76824,13 +76587,10 @@ impl Simulator {
                                 if i == hier.path.len() - 1 {
                                     return mval;
                                 }
-                                cur_handle = Some(mval.to_u64().unwrap_or(0) as usize);
                             } else {
-                                cur_handle = None;
                                 break;
                             }
                         }
-                        break;
                     }
                 }
                 // §26.3: `pkg::MEMBER` reaching here is an enum member of a
@@ -78029,7 +77789,7 @@ impl Simulator {
                 // element 0 and an unknown index returned real array data.
                 // Only for a side-effect-free index, so the extra evaluation
                 // cannot run a call twice.
-                if let ExprKind::Ident(h) = &expr.kind
+                if let ExprKind::Ident(_h) = &expr.kind
                     && Self::cond_expr_is_effect_free(index, false)
                 {
                     let nm = base_nm.as_deref().unwrap_or("");
@@ -78100,7 +77860,7 @@ impl Simulator {
                 // Guarded on the base NOT being an unpacked array: for
                 // `wire [1:0][7:0] w [0:1]`, `w[0]` indexes the UNPACKED
                 // dimension first and must stay on the existing path.
-                if let ExprKind::Ident(h) = &expr.kind {
+                if let ExprKind::Ident(_h) = &expr.kind {
                     let nm = base_nm.as_deref().unwrap_or("");
                     if !self.module.arrays.contains_key(nm)
                         && self.signal_name_to_id.contains_key(nm)
@@ -78323,7 +78083,7 @@ impl Simulator {
                 // Ascending packed vector bit-select (`logic [0:7] pa; pa[i]`):
                 // label i is the MSB end, so it reads internal bit (W-1)-i
                 // (LRM §7.4.1, §11.5.1). Whole-value storage is normal.
-                if let ExprKind::Ident(h) = &expr.kind {
+                if let ExprKind::Ident(_h) = &expr.kind {
                     let nm = base_nm.as_deref().unwrap_or("");
                     if let Some((lo_l, hi_l)) = self.module.ascending_packed.get(nm).copied() {
                         // §11.5.1: unknown or out-of-range label reads x.
@@ -78742,7 +78502,7 @@ impl Simulator {
                 // fixed-width container (e.g. 1024 bits), so `width/8` is the
                 // container size, not the string length — indexing that read
                 // the empty leading bytes and always returned 0.
-                if let ExprKind::Ident(hier) = &expr.kind {
+                if let ExprKind::Ident(_hier) = &expr.kind {
                     let nm = base_nm.as_deref().unwrap_or("");
                     if self.string_signals.contains(nm) {
                         let content = self.eval_expr(expr).sv_string_bytes();
@@ -81842,23 +81602,22 @@ impl Simulator {
                                     .or_else(|| self.this_property_type_args(&bname))
                                     .or_else(|| self.var_type_args.get(&bname).cloned());
                             }
-                            let mut v = None;
-                            if let Some(ta_args) = ta {
-                                v = Some(self.instantiate_class_with_type_args(
+                            let v = if let Some(ta_args) = ta {
+                                self.instantiate_class_with_type_args(
                                     &cd,
                                     ctor_args,
                                     Some(ta_args.as_slice()),
-                                ));
+                                )
                             } else if let Some((b, s)) = spec {
                                 let saved = self.current_spec.take();
                                 self.current_spec = Some((b, s));
                                 let r = self.instantiate_class(&cd, ctor_args);
                                 self.current_spec = saved;
-                                v = Some(r);
+                                r
                             } else {
-                                v = Some(self.instantiate_class(&cd, ctor_args));
-                            }
-                            self.assign_value(lvalue, &v.unwrap());
+                                self.instantiate_class(&cd, ctor_args)
+                            };
+                            self.assign_value(lvalue, &v);
                             return;
                         }
                     }
@@ -83930,7 +83689,7 @@ impl Simulator {
     #[inline(never)]
     fn exec_stmt_foreach(
         &mut self,
-        stmt: &Statement,
+        _stmt: &Statement,
         array: &Expression,
         vars: &[Option<crate::ast::Identifier>],
         body: &Statement,
@@ -83947,7 +83706,7 @@ impl Simulator {
         // is a named type (`int cnt [sev_e];`), the index variable HAS
         // that type — `foreach (cnt[s]) s.name()` must resolve against
         // that enum. Without the binding the hint is absent and
-        // `enum_value_name` scans every enum and picks the largest, so
+        // the enum-name fallback scans every enum and picks the largest, so
         // the key printed as a member of an unrelated enum (UVM's report
         // summary listed `UVM_NORADIX` where a severity belonged).
         // Registered for the loop's duration; the loop-var restore below
@@ -85099,7 +84858,7 @@ impl Simulator {
     #[inline(never)]
     fn exec_stmt_var_decl(
         &mut self,
-        stmt: &Statement,
+        _stmt: &Statement,
         data_type: &DataType,
         lifetime: &Option<crate::ast::types::Lifetime>,
         declarators: &[VarDeclarator],
@@ -89396,14 +89155,18 @@ impl Simulator {
     /// Chase the §15.5.5 alias map to the canonical synchronization-object
     /// key for an event name (bounded, alias chains are user-built).
     fn resolve_event_key(&self, name: &str) -> String {
+        Self::resolve_event_key_ref(&self.event_aliases, name).to_string()
+    }
+
+    fn resolve_event_key_ref<'a>(aliases: &'a HashMap<String, String>, name: &'a str) -> &'a str {
         let mut cur = name;
         for _ in 0..16 {
-            match self.event_aliases.get(cur) {
+            match aliases.get(cur) {
                 Some(next) => cur = next,
                 None => break,
             }
         }
-        cur.to_string()
+        cur
     }
 
     /// A bare `-> e` / `->> e` inside a subroutine dispatched from ANOTHER
@@ -90360,83 +90123,90 @@ impl Simulator {
         }
     }
 
+    /// Resolve signal-backed event spellings once. Event signal IDs are stable
+    /// for the compiled design; aliases and covergroup listeners remain live.
+    fn named_event_plan(&mut self, event: EventId) -> std::rc::Rc<NamedEventPlan> {
+        if let Some(plan) = self.event_triggered_time.plan(event) {
+            return plan;
+        }
+        let raw = self.event_triggered_time.name(event).as_ref();
+        let trimmed = raw.trim_start_matches('.');
+        let mut candidates = vec![raw.to_string(), trimmed.to_string()];
+        candidates.push(format!("{}.{}", self.module.name, trimmed));
+        candidates.sort();
+        candidates.dedup();
+        let mut targets = Vec::new();
+        for candidate in candidates {
+            if let Some(&signal_id) = self.signal_name_to_id.get(candidate.as_str()) {
+                let stamp = self.event_triggered_time.intern(&candidate);
+                let name = self.event_triggered_time.name(stamp).clone();
+                targets.push(NamedEventTarget {
+                    name,
+                    signal_id,
+                    stamp,
+                });
+            }
+        }
+        // Preserve distinct spellings even when they map to the same signal:
+        // writes, trigger stamps and covergroup sampling occur in name order.
+        self.event_triggered_time.set_plan(
+            event,
+            NamedEventPlan {
+                targets: targets.into_boxed_slice(),
+            },
+        )
+    }
+
     /// Fire a named event NOW: toggle its 1-bit signal (the edge `@(e)`
     /// waiters arm on) and stamp `event_triggered_time` for `.triggered`.
     /// Shared by the blocking `-> e` statement and the NBA-region flush of
     /// deferred `->> e` triggers.
     fn fire_named_event(&mut self, raw_name: &str) {
-        // §15.5.5: the name is a handle — fire the object it references.
-        let canon = self.resolve_event_key(raw_name);
+        // §15.5.5: resolve the live handle at delivery, before consulting the
+        // cache. Rebinding an alias must never reuse its previous object's plan.
+        let canon = Self::resolve_event_key_ref(&self.event_aliases, raw_name);
         if canon == Self::EVENT_NULL_KEY {
-            return; // triggering a null handle is a no-op
-        }
-        if self.in_pre_process_settle {
-            // §9.2.2.2: no process has registered a waiter yet — deliver at
-            // the end of the time-0 active region instead.
-            self.pending_t0_triggers.push(canon);
             return;
         }
-        let raw_name: &str = &canon;
-        {
-            {
-                let raw = raw_name.to_string();
-                let trimmed = raw.trim_start_matches('.').to_string();
-                let mut candidates = Vec::new();
-                candidates.push(raw.clone());
-                if trimmed != raw {
-                    candidates.push(trimmed.clone());
+        if self.in_pre_process_settle {
+            // §9.2.2.2: waiters register during the time-0 active region.
+            // Keep the name, so deferred delivery follows the existing rules.
+            self.pending_t0_triggers.push(canon.to_string());
+            return;
+        }
+        let event = self.event_triggered_time.intern(canon);
+        let plan = self.named_event_plan(event);
+        for target in &plan.targets {
+            // Retain scope-aware reads: subroutine frames and scope hints can
+            // affect the old name lookup even though its write ID is fixed.
+            let cur = self
+                .get_signal_value_by_name(&target.name)
+                .unwrap_or(Value::zero(1));
+            let new_val = if cur.bits_first() == LogicBit::One {
+                Value::zero(1)
+            } else {
+                Value::ones(1)
+            };
+            sim_dbg_eprintln!(
+                "[DEBUG] firing event {} (new_val={:?}) at time {}",
+                target.name,
+                new_val,
+                self.time
+            );
+            self.fast_signal_write_id(target.signal_id, &new_val);
+            self.event_triggered_time.mark(target.stamp, self.time);
+            if !self.cg_named_event_waiters.is_empty() {
+                let waiters = self.cg_named_event_waiters.get(&target.signal_id).cloned();
+                if let Some(waiters) = waiters {
+                    self.sample_event_covergroups(waiters);
                 }
-                let top_prefixed = format!("{}.{}", self.module.name, trimmed);
-                if top_prefixed != raw && top_prefixed != trimmed {
-                    candidates.push(top_prefixed);
-                }
-                candidates.sort();
-                candidates.dedup();
-
-                for sig_name in candidates {
-                    if self.signal_name_to_id.contains_key(sig_name.as_str()) {
-                        let cur = self
-                            .get_signal_value_by_name(&sig_name)
-                            .unwrap_or(Value::zero(1));
-                        let new_val = if cur.bits_first() == LogicBit::One {
-                            Value::zero(1)
-                        } else {
-                            Value::ones(1)
-                        };
-                        sim_dbg_eprintln!(
-                            "[DEBUG] firing event {} (new_val={:?}) at time {}",
-                            sig_name,
-                            new_val,
-                            self.time
-                        );
-                        self.fast_signal_write(&sig_name, new_val);
-                        // LRM §15.5.3: stamp last-trigger time so
-                        // `e.triggered` returns 1 in the same time slot.
-                        self.event_triggered_time
-                            .insert(sig_name.clone(), self.time);
-                        if !self.cg_named_event_waiters.is_empty() {
-                            let waiters = self
-                                .signal_name_to_id
-                                .get(sig_name.as_str())
-                                .and_then(|id| self.cg_named_event_waiters.get(id))
-                                .cloned();
-                            if let Some(w) = waiters {
-                                self.sample_event_covergroups(w);
-                            }
-                        }
-                    }
-                }
-                // Also stamp the bare name (covers cases where the signal
-                // lookup failed because the event was never registered as a
-                // signal — `.triggered` still reads correctly).
-                self.event_triggered_time
-                    .insert(raw_name.to_string(), self.time);
-                // Settle combinatorial logic but defer edge-triggered blocks
-                // (always @(e)) to the main event loop so the triggering
-                // process sees pre-event state until its next delay/wait.
-                self.settle_combinatorial();
             }
         }
+        // Unregistered and dynamic names still have a .triggered stamp.
+        self.event_triggered_time.mark(event, self.time);
+        // Preserve scheduler, force, VPI and combinational checkpoints. A
+        // listener-only guard would skip work unrelated to this event's fanout.
+        self.settle_combinatorial();
     }
 
     /// IEEE 1800-2017 §6.16 string methods that MUTATE the receiver
@@ -92384,7 +92154,7 @@ impl Simulator {
             )
     }
 
-    /// Like `struct_var_member_is_string`, but `base` may be a DOTTED path
+    /// Check whether a struct member is a string; `base` may be a DOTTED path
     /// (`o.in`) — each segment is resolved through its struct type in turn.
     fn dotted_member_is_string(&self, base: &str, member: &str) -> bool {
         use crate::ast::types::{DataType, SimpleType};
@@ -92418,28 +92188,6 @@ impl Simulator {
                 ..
             }
         )
-    }
-
-    /// Does variable `base`'s declared type resolve to an unpacked struct
-    /// with a `string`-typed member named `member`?
-    fn struct_var_member_is_string(&self, base: &str, member: &str) -> bool {
-        use crate::ast::types::{DataType, SimpleType};
-        let Some(dt) = self.module.var_decl_types.get(base) else {
-            return false;
-        };
-        let resolved = self.resolve_dt(&dt.clone());
-        let DataType::Struct(su) = &resolved else {
-            return false;
-        };
-        su.members.iter().any(|m| {
-            matches!(
-                m.data_type,
-                DataType::Simple {
-                    kind: SimpleType::String,
-                    ..
-                }
-            ) && m.declarators.iter().any(|d| d.name.name == member)
-        })
     }
 
     /// Determine whether `expr` denotes a CLASS PROPERTY whose declared type
@@ -92967,11 +92715,7 @@ impl Simulator {
             .map(|inst| inst.class_name.clone())
     }
 
-    fn format_string(&mut self, fmt: &str, args: &[Expression], tn: &str) -> String {
-        self.format_string_consumed(fmt, args, tn).0
-    }
-
-    /// Like `format_string`, but also reports how many of `args` the format
+    /// Format a string and report how many of `args` the format
     /// specifiers consumed, so `format_args` can continue the LRM §21.2.1.2
     /// argument walk (several format strings may interleave in one call).
     fn format_string_consumed(
@@ -95010,7 +94754,7 @@ impl Simulator {
         }
         // LRM §16.5.1: collect the ids of every signal referenced in the
         // property body so their Preponed (slot-entry) values can be sampled
-        // when the assertion fires (see eval_sva_sampled).
+        // when the assertion fires using the sampled-value overlay.
         let mut sampled_ids = Vec::new();
         self.collect_sva_signal_ids(&body_expanded, &mut sampled_ids);
         sampled_ids.sort_unstable();
@@ -95085,7 +94829,6 @@ impl Simulator {
             clock_signal,
             edge,
             iff,
-            body: body_expanded,
             past_names,
             node: std::sync::Arc::new(node),
             disable,
@@ -95370,20 +95113,6 @@ impl Simulator {
         }
     }
 
-    /// LRM §16.5.1/§16.9 — evaluate a clocked-assertion predicate against the
-    /// Preponed sampled values. Temporarily swaps each referenced signal's
-    /// live (post-NBA) value in `signal_table` for its slot-entry value from
-    /// `sva_preponed`, evaluates, then restores. A signal that has NOT changed
-    /// this slot has an identical preponed/live value, so this is a no-op for
-    /// the common case and only shifts sampling for signals that change on the
-    /// same edge as the clock (the off-by-one-cycle bug this fixes).
-    fn eval_sva_sampled(&mut self, sampled_ids: &[usize], expr: &Expression) -> bool {
-        let saved = self.install_preponed(sampled_ids);
-        let r = self.eval_expr(expr).is_true();
-        self.restore_preponed(saved);
-        r
-    }
-
     /// Swap in the Preponed sample for each `id` that has one cached; returns
     /// the saved live values for `restore_preponed`.
     fn install_preponed(&mut self, ids: &[usize]) -> Vec<(usize, Value)> {
@@ -95472,7 +95201,7 @@ impl Simulator {
             // evaluator needs `&mut self`) and put back below, not cloned.
             let disable = self.sva_sites[i].disable.take();
             // LRM §16.5.1: the referenced-signal ids whose Preponed samples
-            // this fire's predicates must read (see eval_sva_sampled).
+            // this fire's predicates must read through the sampled-value overlay.
             let sampled_ids = std::mem::take(&mut self.sva_sites[i].sampled_ids);
             let prev_active = self.active_sva_site.replace(i);
             // LRM §16.9.3: refresh the past-value snapshots BEFORE anything
@@ -98327,16 +98056,6 @@ impl Simulator {
         v
     }
 
-    /// Sync a signal from the HashMap to the signal_table (after in-place mutation).
-    #[inline]
-    fn sync_signal_to_table(&mut self, name: &str) {
-        if let Some(&id) = self.signal_name_to_id.get(name) {
-            if let Some(val) = self.signals.get(name) {
-                write_sig!(self, id, val.clone());
-            }
-        }
-    }
-
     #[inline(always)]
     fn vector_ref_bits(&self, src: VectorRef, width: u8) -> (u64, u64) {
         let value = &self.signal_table[src.sig_id as usize];
@@ -98630,7 +98349,7 @@ impl Simulator {
     /// direct plane update, and only the write notes the destination needs
     /// (`obs` bits from `build_gate_lane`). Falls back to the generic commit
     /// when any global observer is active.
-    #[inline(always)]
+
     /// Whether a gate-lane commit must take the full `fused_bit_commit`
     /// path because a global observer is active. Nothing a lane commit does
     /// changes any of these, so the lane tests it once per drain.
@@ -100488,16 +100207,6 @@ impl Simulator {
         }
     }
 
-    /// Width of a cell by id, across both stores.
-    #[inline]
-    fn cell_width(&self, id: usize) -> u32 {
-        if is_packed_id(id) {
-            self.packed.width(id)
-        } else {
-            self.signal_widths[id]
-        }
-    }
-
     /// Write a cell by id; returns true when it changed. A packed cell has no
     /// comb dependents of its own (admission requires an unnamed bulk array),
     /// so only the table-modified flag needs updating.
@@ -100615,9 +100324,9 @@ impl Simulator {
                     return Some("real const".to_string());
                 }
             }
-            if let Insn::BinOpConst(_, _, v, _) = insn {
-                if v.is_fill || v.is_real {
-                    return Some("fill/real BinOpConst".to_string());
+            if let Insn::BinOpConst(_, _, v, _) | Insn::CmpBranchConst(_, _, v, _, _) = insn {
+                if v.is_fill || v.is_real || v.width > 64 {
+                    return Some("fill/real/wide constant operand".to_string());
                 }
             }
         }
@@ -100644,7 +100353,7 @@ impl Simulator {
             }
         }
         let mut sigs: Vec<usize> = Vec::new();
-        let mut push = |id: u32, out: &mut Vec<usize>| out.push(id as usize);
+        let push = |id: u32, out: &mut Vec<usize>| out.push(id as usize);
         match insn {
             Insn::LoadSignal(_, id)
             | Insn::LoadSignalSigned(_, id)
@@ -100864,13 +100573,11 @@ impl Simulator {
             }
             // Same constant, just folded into the ALU op that consumes it —
             // the peephole moves the `Value` out of the `LoadConst` and into
-            // `BinOpConst`, where the check above no longer sees it.
-            // Unreachable today (`JitModule::is_supported` rejects
-            // `BinOpConst` outright, as it does `NbaAssignArrayRead`), but
-            // keeping the guard here means this invariant does not silently
-            // depend on that allowlist.
-            if let Insn::BinOpConst(_, _, v, _) = insn {
-                if v.is_fill || v.is_real {
+            // `BinOpConst` or `CmpBranchConst`, where the LoadConst check
+            // no longer sees it. JIT codegen accepts embedded constants, so
+            // validate their width and value kind before native lowering.
+            if let Insn::BinOpConst(_, _, v, _) | Insn::CmpBranchConst(_, _, v, _, _) = insn {
+                if v.is_fill || v.is_real || v.width > 64 {
                     return false;
                 }
             }
@@ -101535,14 +101242,6 @@ impl Simulator {
         self.signals.get(name).cloned()
     }
 
-    /// True if the named signal exists in either the indexed table or
-    /// the dynamic-overflow HashMap. Use in place of
-    /// `self.signals.contains_key(name)`.
-    #[inline]
-    fn has_signal(&self, name: &str) -> bool {
-        self.signal_name_to_id.contains_key(name) || self.signals.contains_key(name)
-    }
-
     /// Look up declared width by signal name.
     #[inline]
     fn lookup_signal_width(&self, name: &str) -> Option<u32> {
@@ -101570,101 +101269,6 @@ impl Simulator {
         self.real_signals.contains(name)
     }
 
-    /// Extract all signal names referenced in an expression (for wait statement).
-    fn extract_signal_names(&self, expr: &Expression) -> Vec<String> {
-        let mut names = Vec::new();
-        self.collect_signal_names(expr, &mut names);
-        names.sort();
-        names.dedup();
-        names
-    }
-    fn collect_signal_names(&self, expr: &Expression, names: &mut Vec<String>) {
-        match &expr.kind {
-            ExprKind::Ident(hier) => {
-                // LRM §15.5.3: `<event>.triggered` — the wakeable signal
-                // is the event itself, not the synthetic "triggered" field.
-                // Strip the trailing segment so `wait(e.triggered)`
-                // registers an edge watcher on `e`.
-                if hier.path.len() >= 2
-                    && hier.path.last().map(|s| s.name.name.as_str()) == Some("triggered")
-                {
-                    let head = hier_prefix(hier);
-                    names.push(self.resolve_hier_name(&head).into_owned());
-                    return;
-                }
-                names.push(self.resolve_hier_name(hier).into_owned());
-            }
-            // Virtual-interface member access (`vif.signal`) and other dotted
-            // refs to interface signals. Flatten the chain into a dotted name
-            // and let the signal table's hierarchical/aliased lookup find it.
-            ExprKind::MemberAccess { expr: base, member } => {
-                // §15.5.3 again for the MemberAccess parse shape:
-                // `@(ev.triggered)` must wake on `ev`, not on a nonexistent
-                // "ev.triggered" signal — the latter fell into the no-signal
-                // fallback and woke immediately at t=0 (issue #68).
-                if member.name == "triggered" {
-                    if let ExprKind::Ident(h) = &base.kind {
-                        let ev = self.resolve_hier_name(h);
-                        if self.module.events.contains(&*ev)
-                            || self
-                                .module
-                                .events
-                                .contains(ev.rsplit('.').next().unwrap_or(&ev))
-                        {
-                            names.push(ev.to_string());
-                            return;
-                        }
-                    }
-                }
-                let mut parts: Vec<String> = vec![member.name.clone()];
-                let mut cur = base.as_ref();
-                loop {
-                    match &cur.kind {
-                        ExprKind::MemberAccess { expr: b, member: m } => {
-                            parts.push(m.name.clone());
-                            cur = b.as_ref();
-                        }
-                        ExprKind::Ident(h) => {
-                            for seg in h.path.iter().rev() {
-                                parts.push(seg.name.name.clone());
-                            }
-                            break;
-                        }
-                        _ => break,
-                    }
-                }
-                parts.reverse();
-                names.push(parts.join("."));
-                // Also recurse on the base — covers the case where the base
-                // itself is a non-trivial expression that should be watched.
-                self.collect_signal_names(base, names);
-            }
-            ExprKind::Unary { operand, .. } => {
-                self.collect_signal_names(operand, names);
-            }
-            ExprKind::Binary { left, right, .. } => {
-                self.collect_signal_names(left, names);
-                self.collect_signal_names(right, names);
-            }
-            ExprKind::Conditional {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_signal_names(condition, names);
-                self.collect_signal_names(then_expr, names);
-                self.collect_signal_names(else_expr, names);
-            }
-            ExprKind::Index { expr, index } => {
-                self.collect_signal_names(expr, names);
-                self.collect_signal_names(index, names);
-            }
-            ExprKind::Paren(inner) => {
-                self.collect_signal_names(inner, names);
-            }
-            _ => {}
-        }
-    }
     /// The LRM §11.6.1 SELF-determined width of an expression — the "max of
     /// operand widths" rule with NO carry headroom. `infer_width` deliberately
     /// over-reports (`a+a` -> 9) so temporaries never truncate, but the width
@@ -102192,8 +101796,6 @@ impl Simulator {
     /// existing evaluation fallback), so this only ever widens the set of
     /// calls whose width is taken statically. See `call_return_width`.
     fn class_method_return_width(&self, func: &Expression) -> Option<u32> {
-        use crate::ast::decl::ClassMethodKind;
-        use crate::ast::types::DataType;
         // Extract the receiver expression + method name. `infer_width` probes
         // every arithmetic/bitwise operand each evaluation, so keep this free
         // of allocations.
@@ -103827,37 +103429,6 @@ impl Simulator {
             let _ = w.flush();
         }
         self.vcd_writer = None;
-    }
-
-    /// §21.7.1.4 `$dumpall`: emit a checkpoint of ALL current signal values,
-    /// regardless of whether they changed.
-    fn vcd_dump_checkpoint(&mut self) {
-        if !self.vcd_enabled || self.vcd_writer.is_none() {
-            return;
-        }
-        let mut changes: Vec<(Arc<str>, Value)> = Vec::new();
-        for idx in 0..self.vcd_trace.len() {
-            let id = self.vcd_trace[idx].0;
-            let val = self.signal_table[id].clone();
-            changes.push((self.vcd_trace[idx].1.clone(), val.clone()));
-            self.vcd_prev_signals[idx] = val;
-        }
-        let time_marker = if self.time != self.vcd_last_time {
-            self.vcd_last_time = self.time;
-            Some(self.time)
-        } else {
-            None
-        };
-        if let Some(sink) = self.vcd_writer.as_mut() {
-            sink.post_vcd_changes(time_marker, changes);
-        }
-    }
-
-    /// §21.7.1.6 `$dumpflush`: flush the VCD writer buffer to disk.
-    fn vcd_flush(&mut self) {
-        if let Some(ref mut w) = self.vcd_writer {
-            let _ = w.flush();
-        }
     }
 
     /// Hand a put/try_put value to a parked mailbox get/peek waiter. The assign
@@ -105916,27 +105487,6 @@ impl Simulator {
         false
     }
 
-    /// Does `name` resolve to a signal under the active process scope
-    /// (`<hint>.<name>`, walking up parent scopes)?
-    fn scoped_signal_exists(&self, name: &str) -> bool {
-        let hint = self.name_resolve_hint.borrow();
-        let Some(mut scope) = hint.as_deref() else {
-            return false;
-        };
-        loop {
-            let scoped = format!("{}.{}", scope, name);
-            if self.signal_name_to_id.contains_key(scoped.as_str())
-                || self.signals.contains_key(&scoped)
-            {
-                return true;
-            }
-            match scope.rsplit_once('.') {
-                Some((parent, _)) => scope = parent,
-                None => return false,
-            }
-        }
-    }
-
     /// §7.9.1: `aa.size` / `aa.num` written without parentheses on an
     /// associative array counts its keys. The collection's `aa.size` signal
     /// is only a comb-dependency proxy for an associative array (it always
@@ -106958,7 +106508,7 @@ impl Simulator {
                             return Some(format!("{}#({})", b, s));
                         }
                     }
-                    let mut frag = self.substitute_spec_params(&frag);
+                    let frag = self.substitute_spec_params(&frag);
                     // Check if frag is a type/value param of the spec base
                     if let Some((b, s)) = &self.current_spec {
                         if let Some(cd) = self.get_class_def(b) {
@@ -108661,7 +108211,7 @@ impl Simulator {
     }
 
     fn restore_loop_vars(&mut self, saved: &[LoopVarSnapshot]) {
-        for (n, cur, had_frame, prior_td, was_trusted, prior_ps) in saved {
+        for (n, _cur, _had_frame, prior_td, was_trusted, prior_ps) in saved {
             self.meta_note(n);
             match prior_td {
                 Some(t) => {
@@ -109399,33 +108949,6 @@ impl Simulator {
                 | "atooct"
                 | "atobin"
         )
-    }
-
-    /// Simple glob match for string pattern matching (`*` = any run, `?` =
-    /// any single char). Patterns/scopes are short, so simple recursion is
-    /// fine.
-    fn cfg_glob_match(pat: &str, text: &str) -> bool {
-        fn m(p: &[u8], t: &[u8]) -> bool {
-            if p.is_empty() {
-                return t.is_empty();
-            }
-            if p[0] == b'*' {
-                for i in 0..=t.len() {
-                    if m(&p[1..], &t[i..]) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            if t.is_empty() {
-                return false;
-            }
-            if p[0] == b'?' || p[0] == t[0] {
-                return m(&p[1..], &t[1..]);
-            }
-            false
-        }
-        m(pat.as_bytes(), text.as_bytes())
     }
 
     /// `<call> with { constraints }`. For `std::randomize(vars) with {...}` the
@@ -117379,35 +116902,8 @@ impl Simulator {
                 .is_some_and(super::elaborate::is_type_signed)
     }
 
-    /// Packed-aggregate field layout of a CALL's declared return type:
-    /// `(fields, total_width)`, fields as `(name, offset, width)`.
-    ///
-    /// `func` is the callee expression of the `Call` node. A free function
-    /// resolves through `module.functions`; a method (`obj.rd()`) walks the
-    /// receiver instance's class chain. A method return type that names a
-    /// TYPE PARAMETER of its class resolves through the instance's bindings,
-    /// so `drv#(msg_t)` (declared `T read_payload();`) projects `msg_t`'s
-    /// fields. The receiver is re-evaluated to find the instance, so only
-    /// side-effect-free receiver shapes (a name or `this`) are accepted.
-    fn call_return_packed_layout(
-        &mut self,
-        func: &Expression,
-    ) -> Option<(Vec<(String, u32, u32)>, u32)> {
-        let ret = self.call_return_type(func)?;
-        let resolved = Self::resolve_type_ref(&ret, &self.module.typedef_types);
-        let DataType::Struct(su) = resolved else {
-            return None;
-        };
-        // An unpacked struct spreads member-wise; there is no bit slice to
-        // take from the call's single packed value.
-        if Self::spreads_member_wise(&su) {
-            return None;
-        }
-        Some(self.packed_agg_layout(&su))
-    }
-
     /// Declared (post-type-parameter-resolution) return type of a call's
-    /// callee — see [`call_return_packed_layout`] for the receiver rules.
+    /// callee, resolving the receiver with the same rules as the result layout.
     fn call_return_type(&mut self, func: &Expression) -> Option<DataType> {
         // Split the callee into (receiver expression, method name). A method
         // call parses as EITHER `MemberAccess(recv, m)` OR a flat hier ident
@@ -126617,19 +126113,6 @@ impl Simulator {
         }
     }
 
-    /// Indices of the elements a locator method selects. `item` binds to each
-    /// element — by value for scalars and class handles, by NAME for unpacked
-    /// structs (see `item_alias`). Without a `with` clause the element's own
-    /// value is the key.
-    fn locator_indices(
-        &mut self,
-        arr: &str,
-        method: &str,
-        filter: Option<&Expression>,
-    ) -> Vec<usize> {
-        self.locator_indices_named(arr, method, filter, None)
-    }
-
     fn locator_indices_named(
         &mut self,
         arr: &str,
@@ -127369,7 +126852,7 @@ impl Simulator {
         queue_data_type: &crate::ast::types::DataType,
         dir: PortDirection,
     ) -> Option<(String, String)> {
-        use crate::ast::types::{DataType, UnpackedDimension};
+        use crate::ast::types::UnpackedDimension;
         self.meta_note(pname);
         if !matches!(
             dims.first(),
@@ -129793,7 +129276,7 @@ impl Simulator {
         // hop early and loses the base's members/methods. Rewrite it to the
         // concrete key (`"base"`) so the walks see the real ancestor.
         for cname in &names {
-            let mut resolved_extends = None;
+            let resolved_extends;
             let mut resolved_args: Vec<String> = Vec::new();
             {
                 let cd = self.module.classes.get(cname);
@@ -136094,30 +135577,6 @@ impl Simulator {
                 }
                 None
             }
-            ExprKind::MemberAccess { expr: base, member } => {
-                if let ExprKind::Ident(bh) = &base.kind {
-                    if bh.path.len() == 1 {
-                        return obj_member(self, &bh.path[0].name.name, &member.name);
-                    }
-                }
-                // Indexed base (`arr[i].member`, e.g. `main_program[hart].q`):
-                // evaluate the element's handle and scope the member to it.
-                if let Some(handle) = self.eval_handle_expr(base) {
-                    if handle != 0 {
-                        if let Some(cn) = self
-                            .heap
-                            .get(handle)
-                            .and_then(|x| x.as_ref())
-                            .map(|i| i.class_name.clone())
-                        {
-                            if self.class_assoc_member(&cn, &member.name) {
-                                return Some(format!("{}#{}", handle, member.name));
-                            }
-                        }
-                    }
-                }
-                None
-            }
             // Gated by name first: resolving evaluates the selects.
             ExprKind::Index { .. } if self.indexed_colls_live() => {
                 self.indexed_coll_name_gated(expr)
@@ -138553,44 +138012,6 @@ impl Simulator {
         }
     }
 
-    /// Internal helper: execute static method without config_db interception
-    fn exec_static_method_internal(
-        &mut self,
-        class_name: &str,
-        method_name: &str,
-        args: &[Expression],
-    ) -> Option<Value> {
-        if method_name == "new" {
-            return None;
-        }
-        let mut cur = Some(class_name.to_string());
-        while let Some(cname) = cur {
-            let Some((has_method, parent)) = self
-                .module
-                .classes
-                .get(&cname)
-                .map(|cd| (cd.methods.contains_key(method_name), cd.extends.clone()))
-            else {
-                break;
-            };
-            if has_method {
-                // §8.25: same generic receiver-specialization seeding as
-                // exec_static_method (see above).
-                if let Some(spec) = self.derive_static_spec(class_name, &cname) {
-                    let saved = self.current_spec.clone();
-                    self.current_spec = Some(spec);
-                    let v = self.exec_method_in_class_hierarchy(0, &cname, method_name, args);
-                    self.current_spec = saved;
-                    return Some(v);
-                }
-                let v = self.exec_method_in_class_hierarchy(0, &cname, method_name, args);
-                return Some(v);
-            }
-            cur = parent;
-        }
-        None
-    }
-
     /// Strip `Specialization` wrappers from the call/member shape so dispatch
     /// matching (which looks for Ident/MemberAccess chains) sees the same shape
     /// as before the `Specialization` AST node existed. The `#(...)` spec text
@@ -139008,7 +138429,7 @@ impl Simulator {
                             *self.name_resolve_hint.borrow_mut() = Some(sc.clone());
                         }
                         let saved_ts = self.timescale_scope_override.take();
-                        if let Some(sc) = &scope {
+                        if let Some(_sc) = &scope {
                             self.timescale_scope_override = scope.clone();
                         }
                         self.exec_task_call(&td, args);
@@ -143527,19 +142948,6 @@ impl Simulator {
         Some(backs)
     }
 
-    /// §13.4.2: the call-frame key for `<base>.<member>` when the innermost
-    /// frame owns that member. Members of a subroutine-local or formal UNPACKED
-    /// struct live in the frame under their dotted name — that is where formal
-    /// binding puts them (see `bind_unpacked_struct_arg`) and where a local
-    /// declaration now seeds them. Without consulting the frame, a member
-    /// reference fell through to the module signal table and found an outer
-    /// scope's same-named variable instead.
-    fn frame_struct_member_key(&self, base: &str, member: &str) -> Option<String> {
-        let locals = self.local_stack.last()?;
-        let key = format!("{}.{}", base, member);
-        locals.contains_key(&key).then_some(key)
-    }
-
     /// The frame key for a struct-member reference of ANY depth — `s.a`,
     /// `s.inner.x`, `s.arr[2]`, `s.arr[2].x` — or `None` when the innermost
     /// frame does not own that leaf. Keyed on the flattened name, because a
@@ -145111,7 +144519,7 @@ impl Simulator {
             *self.name_resolve_hint.borrow_mut() = Some(sc.clone());
         }
         let saved_ts = self.timescale_scope_override.take();
-        if let Some(sc) = &scope {
+        if let Some(_sc) = &scope {
             self.timescale_scope_override = scope.clone();
         }
         let r = self.exec_function_call(fd, args);
@@ -145306,7 +144714,7 @@ impl Simulator {
         // `o.a`, `o.b`), so they bypass the whole-value `output_bindings`
         // path — collect their `(local_key, caller_lvalue)` pairs to copy
         // each member back to the caller's actual on return.
-        let mut struct_output_writebacks: Vec<(String, Expression)> = Vec::new();
+        let struct_output_writebacks: Vec<(String, Expression)> = Vec::new();
         for (i, port) in fd.ports.iter().enumerate() {
             let is_out = matches!(
                 port.direction,
@@ -148074,18 +147482,6 @@ impl Simulator {
         (covered, shape.2)
     }
 
-    /// §19.8 `cg.item.get_coverage()` / `cg.item.get_inst_coverage()`: the
-    /// coverage (percent) of ONE coverpoint or cross, over `insts`.
-    fn cg_named_item_coverage(
-        &self,
-        cg_name: &str,
-        item_name: &str,
-        insts: &[&CovergroupInstance],
-    ) -> Option<f64> {
-        self.cg_named_item_counts(cg_name, item_name, insts)
-            .map(|(c, t)| Self::cg_fraction(c, t) * 100.0)
-    }
-
     /// Covered and total bins of ONE coverpoint or cross.
     fn cg_named_item_counts(
         &self,
@@ -149118,10 +148514,6 @@ impl Simulator {
             combos = next;
         }
         combos
-    }
-
-    fn sample_covergroup(&mut self, handle: usize) {
-        self.sample_covergroup_with(handle, HashMap::default(), None);
     }
 
     /// Sample on the covergroup's event, whose `iff` term is `guard`.
@@ -150351,7 +149743,7 @@ impl Simulator {
                 // then resolve the corresponding type arg from the extends
                 // clause. The arg is often `this_type` (a typedef for the
                 // current specialization) or another type param of `base`.
-                let mut cur_name = cd.name.clone();
+
                 let mut cur_extends = cd.extends.clone();
                 let mut cur_type_args = cd.extends_type_args.clone();
                 let mut level = 0;
@@ -150425,7 +149817,6 @@ impl Simulator {
                         }
                         break;
                     }
-                    cur_name = ancestor.clone();
                     cur_extends = acd.extends.clone();
                     cur_type_args = acd.extends_type_args.clone();
                 }
@@ -150933,7 +150324,7 @@ impl Simulator {
         }
         let names = self.unpacked_typedef_names.get_or_init(|| {
             let mut set: HashSet<String> = HashSet::default();
-            let mut add = |n: &str, set: &mut HashSet<String>| {
+            let add = |n: &str, set: &mut HashSet<String>| {
                 set.insert(n.to_string());
                 if let Some((_, leaf)) = n.rsplit_once("::") {
                     set.insert(leaf.to_string());
@@ -153066,80 +152457,6 @@ impl Simulator {
             }
         }
         self.exec_method_in_class_hierarchy(handle, &class_name, method_name, args)
-    }
-
-    fn spawn_method_task_process(
-        &mut self,
-        handle: usize,
-        method_name: &str,
-        args: &[Expression],
-    ) -> bool {
-        let mut cur_class = if let Some(Some(inst)) = self.heap.get(handle) {
-            Some(inst.class_name.clone())
-        } else {
-            None
-        };
-        while let Some(cname) = cur_class {
-            if let Some(class_def) = self.module.classes.get(&cname).cloned() {
-                if let Some(method) = class_def.methods.get(method_name) {
-                    if let crate::ast::decl::ClassMethodKind::Task(t) = &method.kind {
-                        let mut locals = HashMap::default();
-                        for (i, port) in t.ports.iter().enumerate() {
-                            let val = if i < args.len() {
-                                self.eval_expr(&args[i])
-                            } else {
-                                Value::zero(32)
-                            };
-                            locals.insert(port.name.name.clone(), val);
-                        }
-                        let pid = self.next_pid;
-                        self.next_pid += 1;
-                        let fgen = self.next_frame_gen();
-                        if let Some(first) = t.items.first() {
-                            self.process_origin.insert(pid, (first.span, "class task"));
-                        }
-                        let string_formals = self.task_frame_strings(fgen, &t.ports);
-                        self.process_contexts.insert(
-                            pid,
-                            ProcessContext {
-                                this_stack: vec![Some(handle)],
-                                local_stack: vec![locals],
-                                block_scope_saves: Vec::new(),
-                                local_gen_stack: vec![fgen],
-                                local_type_stack: vec![(HashMap::default(), HashMap::default())],
-                                class_context_stack: vec![Some(cname.clone())],
-                                cg_this: self.cg_this,
-                                return_value: None,
-                                break_flag: false,
-                                continue_flag: false,
-                                return_flag: false,
-                                local_iface_aliases: Vec::new(),
-                                ref_binding_stack: Vec::new(),
-                                ref_alias_stack: Vec::new(),
-                                ref_identity_stack: Vec::new(),
-                                queue_frame_saves: Vec::new(),
-                                task_cleanup: Vec::new(),
-                                local_dyn: Vec::new(),
-                                formal_dyn: Vec::new(),
-                                static_local_syncs: Vec::new(),
-                                method_local_base: Vec::new(),
-                                current_static_task: None,
-                                current_auto_task: None,
-                                task_string_formals: string_formals.into_iter().collect(),
-                            },
-                        );
-                        self.event_queue
-                            .schedule(self.time, pid, t.items.clone().into());
-                        return true;
-                    }
-                    return false;
-                }
-                cur_class = class_def.extends.clone();
-            } else {
-                break;
-            }
-        }
-        false
     }
 
     /// §18.4.3 Compute the domain of a randc property: every value the
@@ -156057,14 +155374,14 @@ impl Simulator {
             }
             None
         };
-        let full = |w: u32| -> i128 {
+        let _full = |w: u32| -> i128 {
             if w >= 127 {
                 i128::MAX
             } else {
                 (1i128 << w) - 1
             }
         };
-        let inside_ranges = |me: &mut Self, ranges: &[Expression]| -> Vec<(i128, i128)> {
+        let _inside_ranges = |me: &mut Self, ranges: &[Expression]| -> Vec<(i128, i128)> {
             let cr: Vec<ConstraintRange> = ranges
                 .iter()
                 .map(|r| match &r.kind {
@@ -156142,7 +155459,7 @@ impl Simulator {
         }
         let cands: Vec<i128> = ranges
             .iter()
-            .flat_map(|(lo, hi)| (*lo..=*hi))
+            .flat_map(|(lo, hi)| *lo..=*hi)
             .filter(|c| *c >= 0)
             .collect();
         let saved = self
@@ -160360,7 +159677,7 @@ impl Simulator {
     ) -> (Vec<(i128, i128)>, Option<(u32, bool)>) {
         let mut out: Vec<(i128, i128)> = Vec::new();
         let mut ws: Option<(u32, bool)> = Some((1, true));
-        let mut note = |ws: &mut Option<(u32, bool)>, w: u32, s: bool| {
+        let note = |ws: &mut Option<(u32, bool)>, w: u32, s: bool| {
             if let Some((aw, as_)) = ws {
                 *aw = (*aw).max(w);
                 *as_ &= s;
@@ -169180,7 +168497,6 @@ impl Simulator {
         };
         let entry = std::rc::Rc::new(FastCallEntry {
             block,
-            defining_class: dclass.to_string().into_boxed_str(),
             this_reg: rc_entry.this_reg,
             result_reg: rc_entry.result_reg,
             coerce,
@@ -169341,7 +168657,6 @@ impl Simulator {
         };
         let entry = std::rc::Rc::new(FastCallEntry {
             block,
-            defining_class: Box::from(cname),
             this_reg: rc_entry.this_reg,
             result_reg: rc_entry.result_reg,
             coerce,
@@ -169557,7 +168872,6 @@ impl Simulator {
         }
         let entry = std::rc::Rc::new(FastCallEntry {
             block,
-            defining_class: Box::from(dclass),
             this_reg: rc_entry.this_reg,
             result_reg: rc_entry.result_reg,
             coerce: Vec::new(), // no-arg only
@@ -169593,7 +168907,7 @@ impl Simulator {
         &mut self,
         dclass: &str,
         method: &str,
-        arg_base: usize,
+        _arg_base: usize,
         n: usize,
     ) -> Option<Value> {
         if !fast_calls_enabled() || n != 0 || method == "new" {
@@ -169786,7 +169100,6 @@ impl Simulator {
         arg_base: usize,
         n: usize,
     ) -> Option<Value> {
-        use super::bytecode::Insn;
         if !fast_calls_enabled() || handle == 0 || method == "new" {
             return None;
         }
@@ -170073,13 +169386,6 @@ impl Simulator {
         )
     }
 
-    fn resolve_expr_name(&self, expr: &Expression) -> String {
-        match &expr.kind {
-            ExprKind::Ident(hier) => self.resolve_hier_name(hier).into_owned(),
-            _ => "expr".to_string(),
-        }
-    }
-
     /// class-perf row 2: argument positions of `class_name::method` whose
     /// formals are NON-INPUT plain scalars (output / inout / ref; integral,
     /// string, enum or class-handle typed, no dimensions) — exactly the set
@@ -170204,30 +169510,7 @@ impl Simulator {
         }
     }
 
-    /// Declared class-type name of property `prop` on `class_name` or
-    /// any ancestor (e.g. `Foo` for `Foo inst;`). Empty type names and
-    /// non-class types yield None.
-    fn class_prop_type(&self, class_name: &str, prop: &str) -> Option<String> {
-        let mut cur = Some(class_name.to_string());
-        while let Some(cname) = cur {
-            if let Some(cd) = self.module.classes.get(&cname) {
-                if let Some(sig) = cd.properties.get(prop) {
-                    if let Some(t) = &sig.type_name {
-                        if self.module.classes.contains_key(t) {
-                            return Some(t.clone());
-                        }
-                    }
-                    return None;
-                }
-                cur = cd.extends.clone();
-            } else {
-                break;
-            }
-        }
-        None
-    }
-
-    /// Like `class_prop_type` but also returns ENUM type names (not just class
+    /// Return property type names, including ENUM type names as well as class
     /// handles). Used to give `field.name()` the correct enum type — e.g. an
     /// instruction's `rd` (riscv_reg_t) must reflect against the register enum,
     /// not the largest enum in the design (riscv_instr_name_t).
@@ -170546,11 +169829,7 @@ impl Simulator {
         }
     }
 
-    fn enum_value_name(&self, value: u64, type_hint: Option<&str>) -> Option<String> {
-        self.enum_value_name_keyed(value, type_hint, &[])
-    }
-
-    /// `enum_value_name` with the receiver's own storage names as extra list
+    /// Find an enum value name with the receiver's own storage names as extra list
     /// keys: an ANONYMOUS enum (or an inline-enum local) has no typedef, so
     /// its member list is keyed by the VARIABLE name (§6.19.6) — the
     /// `first/last/num` path already consulted it, `.name()` did not and
@@ -171857,6 +171136,7 @@ mod vpi {
     pub const INPUT: c_int = 1;
     pub const OUTPUT: c_int = 2;
     pub const INOUT: c_int = 3;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const MIXED_IO: c_int = 4;
     pub const NO_DIRECTION: c_int = 5;
 
@@ -171866,12 +171146,14 @@ mod vpi {
     pub const RESET: c_int = 68;
 
     // vpi_chk_error levels and states.
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const NOTICE: c_int = 1;
     pub const WARNING: c_int = 2;
     pub const ERROR: c_int = 3;
     pub const RUN_STATE: c_int = 3;
 
     // System-function return kinds (`s_vpi_systf_data.sysfunctype`).
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const INT_FUNC: c_int = 1;
     pub const REAL_FUNC: c_int = 2;
     pub const TIME_FUNC: c_int = 3;
@@ -171927,13 +171209,21 @@ mod vpi {
     pub const SYS_FUNC: c_int = 2;
 
     // Callback reasons (Table 38-49).
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_VALUE_CHANGE: c_int = 1;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_NEXT_SIM_TIME: c_int = 8;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_START_OF_SIMULATION: c_int = 11;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_END_OF_SIMULATION: c_int = 12;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_READ_WRITE_SYNCH: c_int = 6;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_READ_ONLY_SYNCH: c_int = 7;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_AFTER_DELAY: c_int = 9;
+    #[allow(dead_code)] // Reserved VPI ABI value; retained alongside supported values.
     pub const CB_START_OF_RESET: c_int = 19;
 }
 
@@ -172154,8 +171444,8 @@ fn vpi_radix_string(v: &Value, bits_per_digit: usize) -> String {
     s
 }
 
-/// Thread-local pointer to the current simulator instance.
-/// Set during DPI import calls so VPI C callbacks can access it.
+// Thread-local pointer to the current simulator instance.
+// Set during DPI import calls so VPI C callbacks can access it.
 thread_local! {
     static ACTIVE_SIMULATOR: std::cell::Cell<*mut Simulator> = const { std::cell::Cell::new(std::ptr::null_mut()) };
     /// Current DPI scope set by `svSetScope` and read by `svGetScope`.
@@ -173522,7 +172812,7 @@ pub fn vpi_run_startup_routines(libs: &mut Vec<Library>, paths: &[String]) {
         // pointers, not a function.
         let routines: *const Option<StartupFn> =
             match unsafe { lib.get::<*const Option<StartupFn>>(b"vlog_startup_routines\0") } {
-                Ok(sym) => unsafe { *sym },
+                Ok(sym) => *sym,
                 Err(_) => {
                     eprintln!(
                         "[VPI] '{}' has no vlog_startup_routines; nothing to register",
@@ -173590,7 +172880,7 @@ pub extern "C" fn vpi_get(property: libc::c_int, handle: *mut libc::c_void) -> l
                     prec
                 }
             }
-            None => Self_secs_to_exp(sim.module.tick_s),
+            None => secs_to_exp(sim.module.tick_s),
         });
         return exp.unwrap_or(vpi::UNDEFINED);
     }
@@ -173673,7 +172963,7 @@ pub extern "C" fn vpi_get(property: libc::c_int, handle: *mut libc::c_void) -> l
 
 /// Base-10 exponent of a seconds value, as VPI reports time unit/precision.
 /// Mirrors `Simulator::secs_to_exp`, which is a private associated fn.
-fn Self_secs_to_exp(s: f64) -> libc::c_int {
+fn secs_to_exp(s: f64) -> libc::c_int {
     if s <= 0.0 {
         -9
     } else {
@@ -174433,7 +173723,7 @@ pub extern "C" fn svSetScope(scope: *mut libc::c_void) -> *mut libc::c_void {
 
 fn dpi_scope_timescale(sim: &Simulator, scope: *mut libc::c_void) -> (i32, i32) {
     if scope.is_null() {
-        let exp = Self_secs_to_exp(sim.module.tick_s);
+        let exp = secs_to_exp(sim.module.tick_s);
         return (exp, exp);
     }
     let s = unsafe { &*(scope as *const DpiScope) };
@@ -175400,6 +174690,51 @@ impl ShapeFilter {
     fn may_contain(&self, s: &str) -> bool {
         let k = Self::key(s);
         self.bits[k >> 6] & (1u64 << (k & 63)) != 0
+    }
+}
+
+#[cfg(test)]
+mod named_event_plan_tests {
+    use std::rc::Rc;
+
+    #[test]
+    fn cached_targets_preserve_spelling_order_and_shared_signal_identity() {
+        let mut sim =
+            crate::simulate("module tb; event pulse; endmodule", 0).expect("elaborate event");
+        let signal_id = *sim.signal_name_to_id.get("pulse").expect("event signal");
+        // Two names may address one event signal. Both writes and their
+        // covergroup callbacks must survive candidate deduplication.
+        for name in [".pulse", "tb.pulse"] {
+            sim.signal_name_to_id.insert(name.into(), signal_id);
+        }
+        let event = sim.event_triggered_time.intern(".pulse");
+        let plan = sim.named_event_plan(event);
+        let names: Vec<_> = plan
+            .targets
+            .iter()
+            .map(|target| target.name.as_ref())
+            .collect();
+        assert_eq!(names, [".pulse", "pulse", "tb.pulse"]);
+        for target in &plan.targets {
+            assert_eq!(target.signal_id, signal_id);
+            assert_eq!(sim.event_triggered_time.get(&target.name), None);
+        }
+        assert!(Rc::ptr_eq(&plan, &sim.named_event_plan(event)));
+
+        let bare = sim.event_triggered_time.intern("pulse");
+        let bare_plan = sim.named_event_plan(bare);
+        let bare_names: Vec<_> = bare_plan
+            .targets
+            .iter()
+            .map(|target| target.name.as_ref())
+            .collect();
+        assert_eq!(bare_names, ["pulse", "tb.pulse"]);
+        assert!(!Rc::ptr_eq(&plan, &bare_plan));
+        let missing = sim.event_triggered_time.intern("unbacked_event");
+        let empty = sim.named_event_plan(missing);
+        assert!(empty.targets.is_empty());
+        assert!(Rc::ptr_eq(&empty, &sim.named_event_plan(missing)));
+        assert!(!sim.event_triggered_time.contains_key("unbacked_event"));
     }
 }
 

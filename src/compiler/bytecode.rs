@@ -800,7 +800,16 @@ pub enum Insn {
     /// Code coverage: count counter `n` (see `simulator::code_cov`). Reads
     /// and writes no register; only instrumented designs contain it.
     CovHit(u32),
+    /// Fused constant equality + `BranchIfFalse` (§11.4.5, §12.4):
+    /// compare the source against the embedded constant and branch when the
+    /// result is not true. Only Eq/CaseEq kinds are emitted. `tmp` is the
+    /// eliminated result register, retained as scratch for two-state lowering;
+    /// the four-state VM does not write it because it is dead on both paths.
+    /// Appended so existing serialized instruction discriminants stay stable.
+    CmpBranchConst(BinOpConstKind, RegId, Box<Value>, RegId, u32),
 }
+
+const _: () = assert!(std::mem::size_of::<Insn>() <= 24, "Insn grew past 24 bytes");
 
 /// Pre-resolved unpacked-array addressing embedded in bytecode. The name is
 /// retained for diagnostics and the rare unresolved fallback, while normal
@@ -1091,9 +1100,9 @@ impl Insn {
     /// appended after another WITHOUT register collisions — the two-state
     /// lowering tracks one static width per register, so reusing a slot at a
     /// different width would knock the whole fused block off the fast path.
-    /// Returns false for variants fusion must not carry (fallbacks, NBAs,
-    /// jump tables with internal targets, process-local reads); the caller
-    /// pre-filters with the same set and treats false as a bug.
+    /// Returns false for variants fusion must not carry (interpreter escapes,
+    /// masked jump tables, process-local reads). Callers also apply their own
+    /// side-effect and scheduling admission guards.
     pub fn offset_regs_and_targets(&mut self, rb: RegId, ib: u32) -> bool {
         use Insn::*;
         match self {
@@ -1115,6 +1124,22 @@ impl Insn {
                 *b += rb;
                 *c += rb;
                 *t += ib;
+            }
+            CmpBranchConst(_, s, _, tmp, t) => {
+                *s += rb;
+                *tmp += rb;
+                *t += ib;
+            }
+            // §12.5: arm entries, holes and the no-match/unknown path all
+            // refer to this block's local instruction coordinates. Relocate
+            // every target, including an exit that becomes the next member's
+            // entry, so dense cases retain NBA-only edge-block merging.
+            CaseJump(selector, jump) => {
+                *selector += rb;
+                for target in &mut jump.table {
+                    *target += ib;
+                }
+                jump.default += ib;
             }
             LoadConst(a, _)
             | Resize(a, _)
@@ -1265,7 +1290,6 @@ impl Insn {
             LoadClassStatic(a, _) => *a += rb,
             LoadProcessLocal(..)
             | Format(..)
-            | CaseJump(..)
             | CaseMaskJump(..)
             | StmtFallback(..)
             | InitLocalColl(..)
@@ -1366,6 +1390,7 @@ pub fn insn_opcode_name(i: &Insn) -> &'static str {
         Insn::Jump(..) => "Jump",
         Insn::BranchIfFalse(..) => "Br",
         Insn::CmpBranch(..) => "CmpBr",
+        Insn::CmpBranchConst(..) => "CmpBranchConst",
         Insn::MoveResize(..) => "MovRz",
         Insn::BranchIfSignalFalse(..) => "BrSig",
         Insn::BranchUnlessZero(..) => "BrNz",
@@ -1488,6 +1513,82 @@ impl RegReaders {
             }
         }
         self.fallbacks > own_fallbacks || self.reads.get(r as usize).copied().unwrap_or(0) > own
+    }
+}
+
+/// Reachable reads of one register definition, stopping at a replacement
+/// definition on each path. Register IDs are recycled across case arms (§12.5),
+/// so whole-stream read counts alone cannot distinguish their lifetimes.
+struct RegLiveness {
+    visited: Vec<u32>,
+    epoch: u32,
+    pending: Vec<usize>,
+}
+
+impl RegLiveness {
+    fn new(len: usize) -> Self {
+        Self {
+            visited: vec![0; len],
+            epoch: 0,
+            pending: Vec::new(),
+        }
+    }
+
+    fn read_before_write(&mut self, insns: &[Insn], starts: &[usize], reg: RegId) -> bool {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.visited.fill(0);
+            self.epoch = 1;
+        }
+        self.pending.clear();
+        self.pending.extend_from_slice(starts);
+        // A conservative bound keeps repeated queries linear in stream size,
+        // even when many recycled definitions have long reachable suffixes.
+        let mut budget = 1024;
+        while let Some(mut pc) = self.pending.pop() {
+            while pc < insns.len() && self.visited[pc] != self.epoch {
+                if budget == 0 {
+                    return true;
+                }
+                budget -= 1;
+                self.visited[pc] = self.epoch;
+                let insn = &insns[pc];
+                // An in-place update reads the old definition before replacing
+                // it; opaque AST fallbacks conservatively read every register.
+                if BytecodeCompiler::insn_reads_reg(insn, reg) {
+                    return true;
+                }
+                if BytecodeCompiler::dest_reg(insn) == Some(reg) {
+                    break;
+                }
+                match insn {
+                    Insn::Jump(target) => {
+                        pc = *target as usize;
+                        continue;
+                    }
+                    Insn::BranchIfFalse(_, target)
+                    | Insn::BranchUnlessZero(_, target)
+                    | Insn::BranchIfSignalFalse(_, target, _)
+                    | Insn::CmpBranch(_, _, _, _, target)
+                    | Insn::CmpBranchConst(_, _, _, _, target) => {
+                        self.pending.push(*target as usize);
+                    }
+                    Insn::CaseJump(_, jump) => {
+                        self.pending.extend(jump.table.iter().map(|&t| t as usize));
+                        pc = jump.default as usize;
+                        continue;
+                    }
+                    Insn::CaseMaskJump(_, jump) => {
+                        self.pending.extend(jump.table.iter().map(|&t| t as usize));
+                        pc = jump.xz_path as usize;
+                        continue;
+                    }
+                    _ => {}
+                }
+                pc += 1;
+            }
+        }
+        false
     }
 }
 
@@ -2828,12 +2929,7 @@ impl<'a> BytecodeCompiler<'a> {
     /// Inline a call to a pure combinational function, yielding the register
     /// holding its result. Accepts only argument-contained functions: input
     /// formals and directly writable `ref` actuals, with no external reads.
-    fn compile_pure_call(
-        &mut self,
-        func: &Expression,
-        args: &[Expression],
-        ctx_width: u32,
-    ) -> Option<RegId> {
+    fn compile_pure_call(&mut self, func: &Expression, args: &[Expression]) -> Option<RegId> {
         let name = match &func.kind {
             ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
                 h.path[0].name.name.clone()
@@ -3363,7 +3459,7 @@ impl<'a> BytecodeCompiler<'a> {
         let saved_continue_patches = std::mem::take(&mut self.loop_continue_patches);
         self.inline_ret = Some((Some(ret_slot), ret_w));
         let saved_ret_real = std::mem::replace(&mut self.inline_ret_real, ret_is_real);
-        let mut ok = self.compile_pure_body(&items, ret_slot, ret_w, ctx_width);
+        let mut ok = self.compile_pure_body(&items);
         self.inline_ret_real = saved_ret_real;
         // Early returns land HERE — after the body, before the output-formal
         // copy-out, which §13.5.3 performs on every return path.
@@ -3410,14 +3506,8 @@ impl<'a> BytecodeCompiler<'a> {
     /// become register-backed locals; a `return <expr>` assigns the return
     /// register (only valid as the final statement, which is the shape any
     /// combinational helper uses).
-    fn compile_pure_body(
-        &mut self,
-        items: &[Statement],
-        ret_slot: RegId,
-        ret_w: u32,
-        ctx_width: u32,
-    ) -> bool {
-        for (idx, st) in items.iter().enumerate() {
+    fn compile_pure_body(&mut self, items: &[Statement]) -> bool {
+        for st in items {
             match &st.kind {
                 StatementKind::VarDecl {
                     data_type,
@@ -3425,7 +3515,6 @@ impl<'a> BytecodeCompiler<'a> {
                     ..
                 } => {
                     for d in declarators {
-                        let is_real = crate::compiler::elaborate::is_type_real(data_type);
                         // Step 6: a CLASS-typed local holds a heap HANDLE in a
                         // register — default null (0), no resize (handles
                         // round-trip untouched), and the name joins
@@ -4138,7 +4227,7 @@ impl<'a> BytecodeCompiler<'a> {
             // they are not (e.g. a member-array lvalue with a runtime index,
             // which needs StmtFallback, unavailable under reg_var_loop_depth).
             StatementKind::Expr(e) => expr_simple(e),
-            other => false,
+            _ => false,
         }
     }
 
@@ -8340,7 +8429,7 @@ impl<'a> BytecodeCompiler<'a> {
         let mut lhs: Option<Expression> = None;
         let mut entries: Vec<(u64, Value)> = Vec::new();
         let mut default: Option<Value> = None;
-        let mut same_lhs = |l: &Expression, lhs: &mut Option<Expression>| -> bool {
+        let same_lhs = |l: &Expression, lhs: &mut Option<Expression>| -> bool {
             let ExprKind::Ident(h) = &l.kind else {
                 return false;
             };
@@ -8424,7 +8513,7 @@ impl<'a> BytecodeCompiler<'a> {
     ///   numeric values, which equals `===` only under zero-extension
     ///   (§11.8.1) and only when `to_u64` cannot truncate high bits;
     /// - patterns constant, x/z-free, < 4096 (table stays small);
-    /// - >=8 pattern values (below that the chain is competitive);
+    /// - >=8 pattern values, or 4..7 values with a dense dispatch table;
     /// - §12.5 first-match-wins kept for duplicate pattern values.
     fn compile_case_jump(
         &mut self,
@@ -8478,7 +8567,10 @@ impl<'a> BytecodeCompiler<'a> {
             n_entries += vals.len();
             arm_vals.push(vals);
         }
-        if n_entries < 8 {
+        // Admit short dense decoders as well as the existing >=8-entry cases.
+        // A sparse short case keeps the compare chain rather than allocating
+        // thousands of table slots to replace only a few comparisons (§12.5).
+        if n_entries < 4 || (n_entries < 8 && max_idx > 2 * n_entries as u64 + 16) {
             return false;
         }
         // Emit with all-or-nothing rollback so a body that fails to compile
@@ -14181,7 +14273,7 @@ impl<'a> BytecodeCompiler<'a> {
                 // leftover high bits of the source. Chunk k occupies source
                 // bits [k*slice + slice-1 : k*slice].
                 let mut parts: Vec<RegId> = Vec::with_capacity(full as usize + 1);
-                let mut range = |me: &mut Self, hi: u32, lo: u32| -> RegId {
+                let range = |me: &mut Self, hi: u32, lo: u32| -> RegId {
                     let hr = me.alloc_reg();
                     me.emit(Insn::LoadConst(
                         hr,
@@ -15314,7 +15406,7 @@ impl<'a> BytecodeCompiler<'a> {
                 // that incomplete prefix in the caller's instruction stream.
                 let start = self.insns.len();
                 let first_reg = self.next_reg;
-                if let Some(r) = self.compile_pure_call(func, args, ctx_width) {
+                if let Some(r) = self.compile_pure_call(func, args) {
                     return Some(r);
                 }
                 self.truncate_insns(start);
@@ -15511,7 +15603,7 @@ impl<'a> BytecodeCompiler<'a> {
         }
 
         let mut acc: Option<RegId> = None;
-        let mut add_term = |c: &mut Self, term: RegId, acc: &mut Option<RegId>| match *acc {
+        let add_term = |c: &mut Self, term: RegId, acc: &mut Option<RegId>| match *acc {
             None => *acc = Some(term),
             Some(a) => {
                 let sum = c.alloc_reg();
@@ -15609,7 +15701,6 @@ impl<'a> BytecodeCompiler<'a> {
                     }
                     w
                 }
-                _ => return None,
             }
         } else {
             u32::try_from(stride(idx_nodes.len() - 1)).ok()?
@@ -18858,7 +18949,7 @@ impl<'a> BytecodeCompiler<'a> {
                 f(*l);
                 f(*rr);
             }
-            Insn::MoveResize(_, s, _) => f(*s),
+            Insn::MoveResize(_, s, _) | Insn::CmpBranchConst(_, s, _, _, _) => f(*s),
             Insn::CaseLut(_, src, _) => f(*src),
             Insn::CaseJump(src, _) => f(*src),
             Insn::CaseMaskJump(src, _) => f(*src),
@@ -18893,30 +18984,30 @@ impl<'a> BytecodeCompiler<'a> {
             }
             Insn::CallMethod(_, h, _, a, n) => {
                 f(*h);
-                for x in (*a as usize..*a as usize + *n as usize) {
+                for x in *a as usize..*a as usize + *n as usize {
                     f(x as RegId);
                 }
             }
             Insn::CallScopedMethod(_, t, _, a, n) => {
                 f(*t);
-                for x in (*a as usize..*a as usize + *n as usize) {
+                for x in *a as usize..*a as usize + *n as usize {
                     f(x as RegId);
                 }
             }
             Insn::ConstructObject(_, _, a, n) => {
-                for x in (*a as usize..*a as usize + *n as usize) {
+                for x in *a as usize..*a as usize + *n as usize {
                     f(x as RegId);
                 }
             }
             // Step 9h: a class-scope static call reads its arg range only.
             Insn::CallStaticScoped(_, _, a, n) => {
-                for x in (*a as usize..*a as usize + *n as usize) {
+                for x in *a as usize..*a as usize + *n as usize {
                     f(x as RegId);
                 }
             }
             // class-perf P2: a free-function call reads its arg range only.
             Insn::CallFreeFunction(_, _, a, n) => {
-                for x in (*a as usize..*a as usize + *n as usize) {
+                for x in *a as usize..*a as usize + *n as usize {
                     f(x as RegId);
                 }
             }
@@ -18933,7 +19024,7 @@ impl<'a> BytecodeCompiler<'a> {
             Insn::StoreClassStatic(_, src) => f(*src),
             Insn::CallCollMethod(_, h, _, a, n, _) => {
                 f(*h);
-                for x in (*a as usize..*a as usize + *n as usize) {
+                for x in *a as usize..*a as usize + *n as usize {
                     f(x as RegId);
                 }
             }
@@ -19107,6 +19198,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -19338,6 +19430,7 @@ impl<'a> BytecodeCompiler<'a> {
             | Insn::BranchUnlessZero(_, t)
             | Insn::BranchIfSignalFalse(_, t, _)
             | Insn::CmpBranch(_, _, _, _, t)
+            | Insn::CmpBranchConst(_, _, _, _, t)
             | Insn::Jump(t) => (*t as usize) <= i,
             Insn::CaseJump(_, cj) => cj
                 .table
@@ -19415,6 +19508,8 @@ impl<'a> BytecodeCompiler<'a> {
             | Insn::Select(d, _, _, _)
             | Insn::CaseLut(d, _, _)
             | Insn::CmpBranch(_, _, _, d, _) => Some(*d),
+            // Four-state execution leaves the dead lowering scratch untouched.
+            Insn::CmpBranchConst(..) => None,
             _ => None,
         }
     }
@@ -19493,6 +19588,7 @@ impl<'a> BytecodeCompiler<'a> {
             | Insn::MoveResize(_, a, _)
             | Insn::Replicate(_, a, _)
             | Insn::BinOpConst(_, a, _, _)
+            | Insn::CmpBranchConst(_, a, _, _, _)
             | Insn::BitSelectConst(_, a, _)
             | Insn::RangeSelectConst(_, a, _, _)
             | Insn::CaseLut(_, a, _)
@@ -19620,6 +19716,7 @@ impl<'a> BytecodeCompiler<'a> {
                 if matches!(
                     ins,
                     Insn::CmpBranch(..)
+                        | Insn::CmpBranchConst(..)
                         | Insn::BranchIfFalse(..)
                         | Insn::BranchUnlessZero(..)
                         | Insn::BranchIfSignalFalse(..)
@@ -19667,6 +19764,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -19791,6 +19889,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -19845,6 +19944,7 @@ impl<'a> BytecodeCompiler<'a> {
     /// Late pair fusions (census-driven; run last, after every fact-based
     /// pass, so no other pass has to understand the fused forms):
     ///   cmp(d,l,r) ; BranchIfFalse(d,T)   -> CmpBranch(kind,l,r,d,T)
+    ///   EqC|CaseEqC(d,s,K) ; BranchIfFalse(d,T) -> CmpBranchConst(kind,s,K,d,T)
     ///   Move(d,s)  ; Resize(d,w)          -> MoveResize(d,s,w)
     ///   Resize(a,w); Move(d,a) [a dead]   -> MoveResize(d,a,w)
     /// `Lt -> BranchIfFalse` alone was 2.7% and `Resize -> Move` 3.1% of all
@@ -19857,6 +19957,9 @@ impl<'a> BytecodeCompiler<'a> {
         {
             return;
         }
+        static CONST_ON: OnceLock<bool> = OnceLock::new();
+        let const_on =
+            *CONST_ON.get_or_init(|| std::env::var_os("XEZIM_CMP_BRANCH_CONST_OFF").is_none());
         let mut is_target = vec![false; insns.len() + 1];
         for insn in insns.iter() {
             match insn {
@@ -19878,6 +19981,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -19886,7 +19990,7 @@ impl<'a> BytecodeCompiler<'a> {
                 _ => {}
             }
         }
-        let fwd_only = !Self::has_backward_branch(insns);
+        let mut liveness = RegLiveness::new(insns.len());
         for i in 0..insns.len() - 1 {
             if matches!(insns[i], Insn::Nop) {
                 continue;
@@ -19900,9 +20004,26 @@ impl<'a> BytecodeCompiler<'a> {
                 continue;
             }
             // cmp ; BranchIfFalse — the compare's dest must have no reader
-            // other than the branch (backward jumps make a linear liveness
-            // scan unsound, so the whole block is checked).
+            // other than the branch before its next definition, on either
+            // successor path. A branch can bypass a textual redefinition.
             if let Insn::BranchIfFalse(c, t) = insns[j] {
+                if const_on
+                    && matches!(
+                        insns[i],
+                        Insn::BinOpConst(d, _, _, BinOpConstKind::Eq | BinOpConstKind::CaseEq)
+                            if d == c
+                    )
+                    && !liveness.read_before_write(insns, &[j + 1, t as usize], c)
+                {
+                    let Insn::BinOpConst(_, src, k, kind) =
+                        std::mem::replace(&mut insns[i], Insn::Nop)
+                    else {
+                        unreachable!("matched constant comparison")
+                    };
+                    insns[i] = Insn::CmpBranchConst(kind, src, k, c, t);
+                    insns[j] = Insn::Nop;
+                    continue;
+                }
                 let kind = match &insns[i] {
                     Insn::Eq(d, ..) if *d == c => Some(CmpKind::Eq),
                     Insn::Neq(d, ..) if *d == c => Some(CmpKind::Neq),
@@ -19914,14 +20035,7 @@ impl<'a> BytecodeCompiler<'a> {
                     _ => None,
                 };
                 if let Some(kind) = kind {
-                    let only_reader = if fwd_only {
-                        insns[j + 1..].iter().all(|x| !Self::insn_reads_reg(x, c))
-                    } else {
-                        insns
-                            .iter()
-                            .enumerate()
-                            .all(|(k, x)| k == i || k == j || !Self::insn_reads_reg(x, c))
-                    };
+                    let only_reader = !liveness.read_before_write(insns, &[j + 1, t as usize], c);
                     if only_reader {
                         let (l, r) = match &insns[i] {
                             Insn::Eq(_, l, r)
@@ -19956,14 +20070,7 @@ impl<'a> BytecodeCompiler<'a> {
                     // value the fused form also reads), so it is excluded
                     // like the Move; counting it kept every loop body's
                     // `i = i + 1` on three instructions.
-                    let only_reader = if fwd_only {
-                        insns[j + 1..].iter().all(|x| !Self::insn_reads_reg(x, a))
-                    } else {
-                        insns
-                            .iter()
-                            .enumerate()
-                            .all(|(k, x)| k == i || k == j || !Self::insn_reads_reg(x, a))
-                    };
+                    let only_reader = !liveness.read_before_write(insns, &[j + 1], a);
                     if only_reader {
                         insns[i] = Insn::MoveResize(d, a, w);
                         insns[j] = Insn::Nop;
@@ -20004,6 +20111,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -20118,6 +20226,9 @@ impl<'a> BytecodeCompiler<'a> {
     /// the C906 compiled to 230 chained `+1`/`+5`/`+64` constant adds feeding
     /// 20 dynamic bit writes — 250 M interpreter instructions per CoreMark
     /// run doing arithmetic on numbers known at compile time.
+    // Tests exercise the persisted default directly; production selects an
+    // explicit mask for persisted bytecode or the lowering's private copy.
+    #[cfg(test)]
     fn fold_const_regs(insns: &mut Vec<Insn>, signal_widths: &[u32]) {
         Self::fold_const_regs_masked(insns, signal_widths, FOLD_STORES_PERSISTED);
     }
@@ -20160,6 +20271,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -20442,6 +20554,7 @@ impl<'a> BytecodeCompiler<'a> {
                     | Insn::BranchUnlessZero(..)
                     | Insn::BranchIfSignalFalse(..)
                     | Insn::CmpBranch(..)
+                    | Insn::CmpBranchConst(..)
                     | Insn::CaseJump(..)
                     | Insn::CaseMaskJump(..)
             ) {
@@ -20503,6 +20616,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -20512,6 +20626,7 @@ impl<'a> BytecodeCompiler<'a> {
             }
         }
         let mut rr = RegReaders::new(insns);
+        let mut liveness = RegLiveness::new(insns.len());
         for i in 0..insns.len() - 1 {
             let Insn::LoadConst(c, _) = &insns[i] else {
                 continue;
@@ -20575,7 +20690,7 @@ impl<'a> BytecodeCompiler<'a> {
                 Some(sj) => rr.read_outside(insns, c, &[i, j, sj]),
                 None => rr.read_outside(insns, c, &[i, j]),
             };
-            if consumed {
+            if consumed && d != c && liveness.read_before_write(insns, &[j + 1], c) {
                 continue;
             }
             rr.remove(&insns[j]);
@@ -20686,6 +20801,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -20787,6 +20903,8 @@ impl<'a> BytecodeCompiler<'a> {
                 // pass runs BEFORE the late fusion pass, so these arms only
                 // matter for re-runs over already-fused streams.)
                 Insn::CmpBranch(_, _, _, tmp, _) => store(&mut rw, *tmp, Some((1, true))),
+                // The constant branch does not write its four-state scratch.
+                Insn::CmpBranchConst(..) => {}
                 // `dst = resize(src, w)`: width is known, but a same-width
                 // source passes through `clone()` (fill/real preserved), so
                 // never claim plain-ness — conservative fact, no bad elision.
@@ -21097,6 +21215,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t)
                     if (*t as usize) < is_target.len() =>
                 {
@@ -21292,6 +21411,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, _)
                 | Insn::BranchIfSignalFalse(_, _, _)
                 | Insn::CmpBranch(_, _, _, _, _)
+                | Insn::CmpBranchConst(..)
                 | Insn::BlockingAssign(_, _, _)
                 | Insn::NbaAssign(_, _, _)
                 | Insn::BlockingAssignRange(_, _, _, _)
@@ -21420,6 +21540,7 @@ impl<'a> BytecodeCompiler<'a> {
                 | Insn::BranchUnlessZero(_, t)
                 | Insn::BranchIfSignalFalse(_, t, _)
                 | Insn::CmpBranch(_, _, _, _, t)
+                | Insn::CmpBranchConst(_, _, _, _, t)
                 | Insn::Jump(t) => {
                     if let Some(&m) = map.get(*t as usize) {
                         *t = m;
@@ -21434,6 +21555,387 @@ impl<'a> BytecodeCompiler<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_branch_fusion_preserves_kinds_and_constants() {
+        for kind in [BinOpConstKind::Eq, BinOpConstKind::CaseEq] {
+            for k in [
+                Value::from_u64(3, 8),
+                Value::all_x(8),
+                Value::all_z(8),
+                Value::from_u128(1 << 80, 96),
+            ] {
+                let mut insns = vec![
+                    Insn::BinOpConst(2, 0, Box::new(k.clone()), kind),
+                    Insn::Nop,
+                    Insn::BranchIfFalse(2, 4),
+                    Insn::Move(5, 0),
+                ];
+                BytecodeCompiler::fuse_cmp_branch_move_resize(&mut insns);
+                let Insn::CmpBranchConst(fused_kind, src, fused_k, tmp, target) = &insns[0] else {
+                    panic!("constant equality was not fused: {:?}", insns[0]);
+                };
+                assert_eq!(*fused_kind, kind);
+                assert_eq!((*src, *tmp, *target), (0, 2, 4));
+                assert_eq!(**fused_k, k);
+                assert!(matches!(insns[2], Insn::Nop));
+            }
+        }
+    }
+
+    #[test]
+    fn constant_branch_fusion_preserves_live_results_and_branch_entries() {
+        let compare =
+            || Insn::BinOpConst(2, 0, Box::new(Value::from_u64(3, 8)), BinOpConstKind::Eq);
+        let streams = [
+            // The true path replaces the result; the false path still reads it.
+            vec![
+                compare(),
+                Insn::BranchIfFalse(2, 4),
+                Insn::LoadConst(2, Box::new(Value::zero(8))),
+                Insn::Jump(5),
+                Insn::Move(5, 2),
+            ],
+            // A backward edge reaches a read before the comparison redefines it.
+            vec![Insn::Move(5, 2), compare(), Insn::BranchIfFalse(2, 0)],
+            // Another branch enters the pair at its second instruction.
+            vec![Insn::Jump(2), compare(), Insn::BranchIfFalse(2, 3)],
+            // Opaque escapes may observe a register-backed local.
+            vec![
+                compare(),
+                Insn::BranchIfFalse(2, 3),
+                carrying_fallback(Some(2)),
+            ],
+        ];
+        for mut insns in streams {
+            BytecodeCompiler::fuse_cmp_branch_move_resize(&mut insns);
+            assert!(!insns.iter().any(|i| matches!(i, Insn::CmpBranchConst(..))));
+        }
+    }
+
+    #[test]
+    fn constant_branch_targets_and_read_operands_survive_rewrites() {
+        let mut branch = Insn::CmpBranchConst(
+            BinOpConstKind::CaseEq,
+            1,
+            Box::new(Value::from_u64(3, 8)),
+            2,
+            4,
+        );
+        assert!(branch.offset_regs_and_targets(5, 7));
+        assert!(matches!(branch, Insn::CmpBranchConst(_, 6, _, 7, 11)));
+        assert!(BytecodeCompiler::insn_reads_reg(&branch, 6));
+        assert!(!BytecodeCompiler::insn_reads_reg(&branch, 7));
+        assert_eq!(BytecodeCompiler::dest_reg(&branch), None);
+        assert!(BytecodeCompiler::replace_read_reg(&mut branch, 6, 9));
+        assert!(matches!(branch, Insn::CmpBranchConst(_, 9, _, 7, 11)));
+
+        let mut insns = vec![
+            Insn::CmpBranchConst(BinOpConstKind::Eq, 0, Box::new(Value::zero(8)), 1, 4),
+            Insn::Nop,
+            Insn::Move(3, 0),
+            Insn::Nop,
+        ];
+        assert!(BytecodeCompiler::branch_target_map(&insns)[4]);
+        BytecodeCompiler::compact_nops(&mut insns);
+        assert!(matches!(insns[0], Insn::CmpBranchConst(_, _, _, _, 2)));
+        let mut live = RegLiveness::new(insns.len());
+        assert!(live.read_before_write(&insns, &[0], 0));
+        let back = [Insn::CmpBranchConst(
+            BinOpConstKind::Eq,
+            0,
+            Box::new(Value::zero(8)),
+            1,
+            0,
+        )];
+        assert!(BytecodeCompiler::has_backward_branch(&back));
+    }
+
+    #[test]
+    fn constant_branch_lowering_preserves_acceleration_and_case_equality_guard() {
+        for kind in [BinOpConstKind::Eq, BinOpConstKind::CaseEq] {
+            let cb = CompiledBlock {
+                instructions: vec![
+                    Insn::LoadSignal(0, 0),
+                    Insn::CmpBranchConst(kind, 0, Box::new(Value::from_u64(3, 8)), 1, 3),
+                    Insn::NbaAssign(1, 0, 8),
+                ],
+                num_regs: 2,
+                has_fallback: false,
+                nba_dup_targets: false,
+                foreach_slots: 0,
+                static_locals: Box::new([]),
+            };
+            let ts = lower_two_state(
+                &cb,
+                &[8, 8],
+                &[false, false],
+                &[false, false],
+                &HashMap::default(),
+            )
+            .expect("constant comparison remains two-state lowerable");
+            assert!(ts.has_ctrl);
+            assert!(matches!(ts.insns[1], TsInsn::EqC { d: 1, s: 0, k: 3 }));
+            assert!(matches!(ts.insns[2], TsInsn::BrFalse { s: 1, t: 4 }));
+            assert_eq!(ts.tsx, kind == BinOpConstKind::Eq);
+            // The existing signed widening, X/Z, fill, and wide-constant
+            // admission rules must also govern the fused form.
+            for k in [
+                Value::all_x(8),
+                Value::all_z(8),
+                Value::from_u128(1 << 80, 96),
+            ] {
+                let mut cb = cb.clone();
+                cb.instructions[1] = Insn::CmpBranchConst(kind, 0, Box::new(k), 1, 3);
+                assert!(
+                    lower_two_state(
+                        &cb,
+                        &[8, 8],
+                        &[false, false],
+                        &[false, false],
+                        &HashMap::default()
+                    )
+                    .is_none()
+                );
+            }
+            let mut cb = cb.clone();
+            let mut k = Value::from_u64(3, 16);
+            k.is_signed = true;
+            cb.instructions[1] = Insn::CmpBranchConst(kind, 0, Box::new(k), 1, 3);
+            assert!(
+                lower_two_state(
+                    &cb,
+                    &[8, 8],
+                    &[true, false],
+                    &[false, false],
+                    &HashMap::default()
+                )
+                .is_none()
+            );
+        }
+    }
+
+    /// §12.5: relocating a case preserves holes, duplicate targets and block exits.
+    #[test]
+    fn case_jump_relocation_adjusts_selector_and_all_targets() {
+        let original = Insn::CaseJump(
+            2,
+            Box::new(CaseJumpData {
+                table: vec![1, 5, 1],
+                default: 5,
+            }),
+        );
+        let mut relocated = original.clone();
+        assert!(relocated.offset_regs_and_targets(7, 11));
+        let Insn::CaseJump(selector, jump) = relocated else {
+            panic!("case jump")
+        };
+        assert_eq!(selector, 9);
+        assert_eq!(jump.table, vec![12, 16, 12]);
+        assert_eq!(jump.default, 16);
+        let Insn::CaseJump(selector, jump) = original else {
+            panic!("original case jump")
+        };
+        assert_eq!(selector, 2);
+        assert_eq!(jump.table, vec![1, 5, 1]);
+        assert_eq!(jump.default, 5);
+    }
+
+    /// §12.5: each case arm's temporary definition has its own lifetime.
+    #[test]
+    fn comparison_fusion_accepts_recycled_temporaries() {
+        let mut insns = vec![
+            Insn::CaseEq(3, 0, 1),
+            Insn::BranchIfFalse(3, 4),
+            Insn::Move(5, 0),
+            Insn::Jump(7),
+            Insn::CaseEq(3, 0, 2),
+            Insn::BranchIfFalse(3, 7),
+            Insn::Move(5, 1),
+        ];
+        BytecodeCompiler::fuse_cmp_branch_move_resize(&mut insns);
+        assert!(matches!(
+            insns[0],
+            Insn::CmpBranch(CmpKind::CaseEq, 0, 1, 3, 4)
+        ));
+        assert!(matches!(
+            insns[4],
+            Insn::CmpBranch(CmpKind::CaseEq, 0, 2, 3, 7)
+        ));
+        assert!(matches!(insns[1], Insn::Nop));
+        assert!(matches!(insns[5], Insn::Nop));
+    }
+
+    /// §12.4: an untaken arm can bypass a definition and keep the old value live.
+    #[test]
+    fn comparison_fusion_keeps_a_value_read_on_the_other_branch() {
+        let mut insns = vec![
+            Insn::CaseEq(3, 0, 1),
+            Insn::BranchIfFalse(3, 4),
+            Insn::LoadConst(3, Box::new(Value::from_u64(0, 1))),
+            Insn::Jump(5),
+            Insn::Move(5, 3),
+        ];
+        BytecodeCompiler::fuse_cmp_branch_move_resize(&mut insns);
+        assert!(matches!(insns[0], Insn::CaseEq(3, 0, 1)));
+        assert!(matches!(insns[1], Insn::BranchIfFalse(3, 4)));
+    }
+
+    /// §12.5: loads in later case arms replace the earlier constant definition.
+    #[test]
+    fn constant_fusion_accepts_recycled_temporaries() {
+        let mut insns = vec![
+            Insn::LoadConst(2, Box::new(Value::from_u64(1, 8))),
+            Insn::CaseEq(3, 0, 2),
+            Insn::BranchIfFalse(3, 4),
+            Insn::Jump(7),
+            Insn::LoadConst(2, Box::new(Value::from_u64(2, 8))),
+            Insn::CaseEq(3, 0, 2),
+            Insn::Move(5, 3),
+        ];
+        BytecodeCompiler::fuse_binop_const(&mut insns);
+        assert!(matches!(insns[0], Insn::Nop));
+        assert!(matches!(insns[4], Insn::Nop));
+        assert!(matches!(
+            insns[1],
+            Insn::BinOpConst(3, 0, _, BinOpConstKind::CaseEq)
+        ));
+        assert!(matches!(
+            insns[5],
+            Insn::BinOpConst(3, 0, _, BinOpConstKind::CaseEq)
+        ));
+    }
+
+    /// §12.4: a branch can bypass the next textual constant definition.
+    #[test]
+    fn constant_fusion_keeps_a_value_read_on_the_other_branch() {
+        let mut insns = vec![
+            Insn::LoadConst(2, Box::new(Value::from_u64(1, 8))),
+            Insn::CaseEq(3, 0, 2),
+            Insn::BranchIfFalse(3, 5),
+            Insn::LoadConst(2, Box::new(Value::from_u64(2, 8))),
+            Insn::Jump(6),
+            Insn::Move(5, 2),
+        ];
+        BytecodeCompiler::fuse_binop_const(&mut insns);
+        assert!(matches!(insns[0], Insn::LoadConst(2, _)));
+        assert!(matches!(insns[1], Insn::CaseEq(3, 0, 2)));
+    }
+
+    /// §12.7: liveness follows loop back-edges and reads before in-place writes.
+    #[test]
+    fn definition_liveness_handles_loops_in_place_reads_and_fallbacks() {
+        let streams = [
+            vec![Insn::Move(5, 2), Insn::Jump(0)],
+            vec![Insn::Add(2, 2, 1)],
+            vec![carrying_fallback(Some(2))],
+        ];
+        for insns in streams {
+            let mut live = RegLiveness::new(insns.len());
+            assert!(live.read_before_write(&insns, &[insns.len() - 1], 2));
+        }
+        let insns = vec![Insn::Jump(0)];
+        let mut live = RegLiveness::new(insns.len());
+        assert!(!live.read_before_write(&insns, &[0], 2));
+        // Epoch reuse must not carry an earlier query's visited nodes forward.
+        assert!(!live.read_before_write(&insns, &[0], 3));
+        live.epoch = u32::MAX;
+        assert!(!live.read_before_write(&insns, &[0], 2));
+    }
+
+    /// §12.5: every dispatch successor must kill the definition before reading it.
+    #[test]
+    fn definition_liveness_checks_all_dispatch_successors() {
+        let mut insns = vec![
+            Insn::CaseJump(
+                0,
+                Box::new(CaseJumpData {
+                    table: vec![1, 3],
+                    default: 5,
+                }),
+            ),
+            Insn::LoadConst(2, Box::new(Value::from_u64(0, 8))),
+            Insn::Jump(6),
+            Insn::Move(5, 2),
+            Insn::Jump(6),
+            Insn::LoadConst(2, Box::new(Value::from_u64(0, 8))),
+        ];
+        let mut live = RegLiveness::new(insns.len());
+        assert!(live.read_before_write(&insns, &[0], 2));
+        insns[3] = Insn::LoadConst(2, Box::new(Value::from_u64(0, 8)));
+        assert!(!live.read_before_write(&insns, &[0], 2));
+        // Long paths retain the original instruction conservatively rather
+        // than making compilation quadratic or overlooking a distant use.
+        let mut insns = vec![Insn::Nop; 1025];
+        insns.push(Insn::Move(5, 2));
+        let mut live = RegLiveness::new(insns.len());
+        assert!(live.read_before_write(&insns, &[0], 2));
+    }
+
+    #[test]
+    fn constant_fusion_preserves_the_consumers_replacement_definition() {
+        let mut insns = vec![
+            Insn::LoadConst(2, Box::new(Value::from_u64(3, 8))),
+            Insn::Add(2, 0, 2),
+            Insn::Move(5, 2),
+        ];
+        BytecodeCompiler::fuse_binop_const(&mut insns);
+        assert!(matches!(insns[0], Insn::Nop));
+        assert!(matches!(
+            insns[1],
+            Insn::BinOpConst(2, 0, _, BinOpConstKind::Add)
+        ));
+        assert!(matches!(insns[2], Insn::Move(5, 2)));
+    }
+
+    /// §12.5: short dense tables preserve first-match dispatch; sparse cases stay chains.
+    #[test]
+    fn case_jump_admits_short_dense_tables() {
+        let span = crate::ast::Span::dummy();
+        for (count, stride, expected) in [
+            (3, 1, false),
+            (4, 1, true),
+            (7, 1, true),
+            (7, 100, false),
+            (8, 100, true),
+        ] {
+            let mut signals = NameMap::default();
+            signals.insert(Arc::from("selector"), 0);
+            let arrays = HashMap::default();
+            let widths = HashMap::default();
+            let mut compiler = BytecodeCompiler::new(&signals, &[false], &[16], &arrays, &widths);
+            let items: Vec<_> = (0..count)
+                .map(|index| crate::ast::stmt::CaseItem {
+                    patterns: vec![Expression::new(
+                        ExprKind::Number(NumberLiteral::Integer {
+                            size: Some(16),
+                            signed: false,
+                            base: NumberBase::Decimal,
+                            value: (index * stride).to_string(),
+                            cached_val: std::cell::Cell::new(None),
+                        }),
+                        span,
+                    )],
+                    is_default: false,
+                    stmt: Statement::new(StatementKind::Null, span),
+                    span,
+                    pattern: None,
+                    guard: None,
+                })
+                .collect();
+            assert_eq!(
+                compiler.compile_case_jump(&ident_expr("selector"), &items),
+                expected
+            );
+            assert_eq!(
+                compiler
+                    .insns
+                    .iter()
+                    .any(|insn| matches!(insn, Insn::CaseJump(..))),
+                expected
+            );
+        }
+    }
 
     /// The read counts the peephole passes use must answer exactly what a
     /// scan of the block with `insn_reads_reg` answers, before and after
@@ -21991,14 +22493,11 @@ mod tests {
         );
     }
 
-    // class-perf Step 4b: a bare Ident that names a member/static of the
-    // method's class or an ENCLOSING class must NOT read a same-named module
-    // signal. The compiled path does not model class-static storage, so the
-    // method must BAIL (return None => AST interpreter) rather than silently
-    // read the wrong (module) cell. `class_shadow_names` feeds this check.
+    // A class method with an unresolved bare name must decline compilation
+    // so the interpreter can resolve the name against its lexical class scope.
     #[test]
-    fn method_body_with_enclosing_class_shadow_bails() {
-        // return os;   (os is an enclosing-class static that shadows a module var)
+    fn method_body_with_unresolved_class_scope_name_bails() {
+        // return os; (no register, member metadata, or module signal binds os)
         let stmt_ret = Statement::new(
             StatementKind::Return(Some(ident_expr("os"))),
             crate::ast::Span::dummy(),
@@ -22011,9 +22510,6 @@ mod tests {
         let arrays: HashMap<String, (i64, i64, u32)> = Default::default();
         let widths: HashMap<String, u32> = Default::default();
 
-        // Without the shadow set the bare `os` lowers as a module signal; with
-        // `os` listed as a class-scope name it must bail all-or-nothing.
-        let shadow: HashSet<String> = ["os".to_string()].into_iter().collect();
         let mut compiler = BytecodeCompiler::new(&sigmap, &sig_signed, &sig_w, &arrays, &widths);
         let empty_fns: HashMap<String, FunctionDeclaration> = HashMap::default();
         assert!(
@@ -22051,7 +22547,7 @@ mod tests {
                     &body
                 )
                 .is_none(),
-            "bare Ident in the class-shadow set must bail, not read a module signal"
+            "an unresolved class-scope name must leave the method on the interpreter"
         );
     }
 }
@@ -23513,7 +24009,8 @@ fn ts_raw_hazard(
             Insn::BranchIfFalse(_, t)
             | Insn::BranchUnlessZero(_, t)
             | Insn::BranchIfSignalFalse(_, t, _)
-            | Insn::CmpBranch(_, _, _, _, t) => vec![i + 1, *t as usize],
+            | Insn::CmpBranch(_, _, _, _, t)
+            | Insn::CmpBranchConst(_, _, _, _, t) => vec![i + 1, *t as usize],
             Insn::CaseJump(_, cj) => cj
                 .table
                 .iter()
@@ -24201,6 +24698,7 @@ pub fn lower_two_state(
             | Insn::BranchUnlessZero(_, t)
             | Insn::BranchIfSignalFalse(_, t, _)
             | Insn::CmpBranch(_, _, _, _, t)
+            | Insn::CmpBranchConst(_, _, _, _, t)
             | Insn::Jump(t) => tgts.push(*t),
             Insn::CaseJump(_, cj) => {
                 tgts.extend(cj.table.iter().copied());
@@ -24273,7 +24771,7 @@ pub fn lower_two_state(
     let mut def_tc: Vec<u32> = vec![0; cb.num_regs as usize];
     // Mirror of the loop index, readable from `def!` (a `for` pattern binding
     // is not, due to macro hygiene).
-    let mut cur_i: usize = 0;
+    let mut cur_i: usize;
     // Registers holding a folded 4-state constant: (value plane, xz plane).
     // These registers are NEVER materialized in the u64 file, so any reader
     // outside the fold set would see an unwritten slot -- the guard at the
@@ -24370,6 +24868,7 @@ pub fn lower_two_state(
             note(a);
         }
         match ins {
+            Insn::CmpBranchConst(_, _, _, tmp, _) => note(*tmp),
             Insn::BinOpConstAdd2(a) => {
                 note(a.d1);
                 note(a.d2);
@@ -25076,7 +25575,12 @@ pub fn lower_two_state(
                     mask: ts_mask(wr2),
                 });
             }
-            Insn::BinOpConst(d, s, k, kind) => {
+            Insn::BinOpConst(d, s, k, kind) | Insn::CmpBranchConst(kind, s, k, d, _) => {
+                if matches!(insn, Insn::CmpBranchConst(..))
+                    && !matches!(kind, BinOpConstKind::Eq | BinOpConstKind::CaseEq)
+                {
+                    gate!("unsupported constant comparison");
+                }
                 let w = narrow_reg!(rw, *s, "wide operand (binop-const)");
                 let v = clean_const(k)?;
                 let both_sg = sg[*s as usize] && k.is_signed;
@@ -25152,6 +25656,9 @@ pub fn lower_two_state(
                             },
                         });
                     }
+                }
+                if let Insn::CmpBranchConst(_, _, _, _, t) = insn {
+                    out.push(TsInsn::BrFalse { s: *d, t: *t });
                 }
             }
             Insn::Concat(d, parts) => {

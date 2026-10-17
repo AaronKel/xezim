@@ -160,6 +160,18 @@ unsafe fn br() -> &'static AotBridge {
     let (t, f) = truth(v, x);
     (f as u64, if t || f { 0 } else { 1 })
 }
+// §11.4.5/§11.8.1: signed case equality extends BOTH planes. The
+// canonical 64-bit encodings compare equally iff the common-width ones do.
+#[inline(always)] fn caseeq4(
+    mut lv: u64, mut lx: u64, mut rv: u64, mut rx: u64,
+    both_signed: bool, lw: u32, rw: u32,
+) -> (u64, u64) {
+    if both_signed {
+        lv = sext(lv, lw); lx = sext(lx, lw);
+        rv = sext(rv, rw); rx = sext(rx, rw);
+    }
+    (((lv == rv) && (lx == rx)) as u64, 0)
+}
 /// op: 0 ==, 1 !=, 2 <, 3 <=, 4 >, 5 >=
 #[inline(always)] fn cmp4(
     mut lv: u64, mut lx: u64, mut rv: u64, mut rx: u64,
@@ -326,7 +338,8 @@ pub fn gen_block_fn_mapped(
             | Insn::Jump(t)
             | Insn::BranchIfSignalFalse(_, t, _)
             | Insn::BranchUnlessZero(_, t)
-            | Insn::CmpBranch(_, _, _, _, t) => targets.push(*t as usize),
+            | Insn::CmpBranch(_, _, _, _, t)
+            | Insn::CmpBranchConst(_, _, _, _, t) => targets.push(*t as usize),
             Insn::CaseJump(_, cj) => {
                 targets.extend(cj.table.iter().map(|&t| t as usize));
                 targets.push(cj.default as usize);
@@ -352,6 +365,7 @@ pub fn gen_block_fn_mapped(
                 | Insn::BranchIfSignalFalse(..)
                 | Insn::BranchUnlessZero(..)
                 | Insn::CmpBranch(..)
+                | Insn::CmpBranchConst(..)
                 | Insn::CaseJump(..)
         )
     });
@@ -485,7 +499,8 @@ pub fn gen_fsm_fn(
             | Jump(t)
             | BranchIfSignalFalse(_, t, _)
             | BranchUnlessZero(_, t)
-            | CmpBranch(_, _, _, _, t) => targets.push(*t as usize),
+            | CmpBranch(_, _, _, _, t)
+            | CmpBranchConst(_, _, _, _, t) => targets.push(*t as usize),
             CaseJump(_, cj) => {
                 targets.extend(cj.table.iter().map(|&t| t as usize));
                 targets.push(cj.default as usize);
@@ -751,9 +766,12 @@ fn emit_insn_rust(
                     );
                 }
                 K::CaseEq => {
+                    let both = rs(*sr) && k.is_signed;
+                    let lw = rw(*sr);
+                    let kw = k.width;
                     let _ = writeln!(
                         w,
-                        "r{d}v = ((r{sr}v == {kv:#x}) && (r{sr}x == {kx:#x})) as u64; r{d}x = 0;"
+                        "let t = caseeq4(r{sr}v, r{sr}x, {kv:#x}, {kx:#x}, {both}, {lw}, {kw}); r{d}v = t.0; r{d}x = t.1;"
                     );
                 }
                 K::Eq => {
@@ -877,9 +895,11 @@ fn emit_insn_rust(
             );
         }
         CaseEq(d, l, r) => {
+            let both = rs(*l) && rs(*r);
+            let (lw, rw_) = (rw(*l), rw(*r));
             let _ = writeln!(
                 w,
-                "r{d}v = ((r{l}v == r{r}v) && (r{l}x == r{r}x)) as u64; r{d}x = 0;"
+                "let t = caseeq4(r{l}v, r{l}x, r{r}v, r{r}x, {both}, {lw}, {rw_}); r{d}v = t.0; r{d}x = t.1;"
             );
         }
         Shl(d, l, r) => {
@@ -1308,14 +1328,30 @@ fn emit_insn_rust(
                 "if (r{cond}v | r{cond}x) != 0 {{ pc = {t}; continue 'sm; }}"
             );
         }
+        CmpBranchConst(kind, src, k, tmp, target) => {
+            // Reuse the constant comparison emitter, preserving its planes
+            // and signed-width rules, before the fused branch.
+            if k.is_fill || k.is_real || k.width > 64 {
+                return None;
+            }
+            let cmp = BinOpConst(*tmp, *src, k.clone(), *kind);
+            emit_insn_rust(w, tables, ntab, &cmp, i, n, meta, sig_w, sig_signed, sigmap)?;
+            let t = jump_pc(*target as usize, n);
+            let _ = writeln!(
+                w,
+                "if (r{tmp}v & !r{tmp}x) == 0 {{ pc = {t}; continue 'sm; }}"
+            );
+        }
         CmpBranch(kind, l, r, tmp, target) => {
             use crate::compiler::bytecode::CmpKind as CK;
             let t = jump_pc(*target as usize, n);
             match kind {
                 CK::CaseEq => {
+                    let both = rs(*l) && rs(*r);
+                    let (lw, rw_) = (rw(*l), rw(*r));
                     let _ = writeln!(
                         w,
-                        "r{tmp}v = ((r{l}v == r{r}v) && (r{l}x == r{r}x)) as u64; r{tmp}x = 0;"
+                        "let t = caseeq4(r{l}v, r{l}x, r{r}v, r{r}x, {both}, {lw}, {rw_}); r{tmp}v = t.0; r{tmp}x = t.1;"
                     );
                 }
                 _ => {

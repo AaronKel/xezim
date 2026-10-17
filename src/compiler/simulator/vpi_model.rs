@@ -460,7 +460,10 @@ pub(super) enum TKind {
     Enum(u32),
     /// Index into `VpiModel::structs` (struct or union).
     Struct(u32),
+    // Nominal names are retained for future VPI type-name queries.
+    #[allow(dead_code)]
     Class(String),
+    #[allow(dead_code)] // Same nominal-name metadata as Class.
     VirtualIf(String),
     /// No data type written (`wire [3:0] w`, `input a`).
     Implicit,
@@ -1005,13 +1008,6 @@ impl VpiModel {
             line: 0,
             d: OData::Range { left: l, right: r },
         }))
-    }
-
-    pub fn scope_of_ref(&self, r: MRef) -> u32 {
-        match r {
-            MRef::Scope(s) => self.scopes[s as usize].parent,
-            MRef::Obj(o) => self.objs[o as usize].scope,
-        }
     }
 
     /// The instance (module, interface, program or package) a scope is in.
@@ -3978,7 +3974,7 @@ impl<'a> Builder<'a> {
                 false,
                 true,
             );
-            let mut term = |b: &mut Self, i: Option<usize>, is_notifier: bool| -> u32 {
+            let term = |b: &mut Self, i: Option<usize>, is_notifier: bool| -> u32 {
                 let Some(Some(a)) = i.and_then(|i| tc.args.get(i)) else {
                     return NONE;
                 };
@@ -4719,7 +4715,7 @@ pub(super) fn handle_by_index(
     h: &VpiHandle,
     index: i64,
 ) -> Option<*mut libc::c_void> {
-    let r = with_model(sim, |m, sim| match ident(m, h)? {
+    let r = with_model(sim, |m, _sim| match ident(m, h)? {
         MRef::Obj(o) => {
             if let OData::GenArray { elems } = &m.objs[o as usize].d {
                 let s = elems

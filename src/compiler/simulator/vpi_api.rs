@@ -628,20 +628,6 @@ pub(super) fn set_strength_hint(sim: &Simulator, id: usize, type_code: c_int, fo
     }
 }
 
-/// `set_strength_hint` for the value-change dispatcher, which holds the
-/// simulator only as a raw pointer.
-pub(super) fn set_strength_hint_raw(
-    sim: *mut Simulator,
-    id: usize,
-    type_code: Option<c_int>,
-    format: c_int,
-) {
-    if format == vc::STRENGTH_VAL && !sim.is_null() {
-        let sim = unsafe { &*sim };
-        STRENGTH_HINT.with(|c| c.set(type_code.and_then(|t| signal_strengths(sim, id, t))));
-    }
-}
-
 /// `set_strength_hint` for a callback's object handle.
 pub(super) fn set_strength_hint_for_obj(
     sim: &Simulator,

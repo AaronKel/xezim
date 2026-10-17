@@ -22,15 +22,6 @@
 
 use xezim::simulate;
 
-fn u(sim: &xezim::compiler::Simulator, n: &str) -> u64 {
-    sim.get_signal(&format!("top.{}", n))
-        .or_else(|| sim.get_signal(n))
-        .unwrap_or_else(|| panic!("signal not found: {}", n))
-        .to_u64()
-        .unwrap_or_else(|| panic!("{} not u64-able", n))
-        & 0xFFFF_FFFF
-}
-
 const SRC: &str = r#"
 class Inner #(string Name = "inner-default");
   static function string get();

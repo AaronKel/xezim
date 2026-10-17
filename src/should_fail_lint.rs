@@ -3277,8 +3277,8 @@ fn module_own_names<'a>(
         PortList::NonAnsi(ns) => out.extend(ns.iter().map(|n| n.name.as_str())),
         PortList::Empty => {}
     }
-    let mut add_params = |pd: &'a xezim_core::ast::decl::ParameterDeclaration,
-                          out: &mut HashSet<&'a str>| {
+    let add_params = |pd: &'a xezim_core::ast::decl::ParameterDeclaration,
+                      out: &mut HashSet<&'a str>| {
         match &pd.kind {
             ParameterKind::Data { assignments, .. } => {
                 out.extend(assignments.iter().map(|a| a.name.name.as_str()))

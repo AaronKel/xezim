@@ -27,3 +27,12 @@ mod packed_record_edge_loop;
 mod wide_block_counters;
 #[path = "perf/x_plane_executor.rs"]
 mod x_plane_executor;
+
+#[path = "perf/case_fusion.rs"]
+mod case_fusion;
+
+#[path = "perf/cmp_branch_const.rs"]
+mod cmp_branch_const;
+
+#[path = "perf/named_event_intern.rs"]
+mod named_event_intern;

@@ -2667,8 +2667,7 @@ pub fn check(defs: &[&SourceDefinition], elab: &ElaboratedModule) -> Vec<String>
     // Phase 1: package scopes (twice, so a package sees the ones it imports).
     let no_classes: HashMap<String, Option<Rc<ClassInfo>>> = HashMap::default();
     let empty_pkgs: HashMap<String, Scope> = HashMap::default();
-    let mut unit = Scope::default();
-    {
+    let unit = {
         let env = Env {
             class_names: &class_names,
             packages: &empty_pkgs,
@@ -2683,8 +2682,8 @@ pub fn check(defs: &[&SourceDefinition], elab: &ElaboratedModule) -> Vec<String>
                 ck.declare_typedef(td);
             }
         }
-        unit = ck.pop();
-    }
+        ck.pop()
+    };
     let mut packages: HashMap<String, Scope> = HashMap::default();
     for _pass in 0..2 {
         let mut next: HashMap<String, Scope> = HashMap::default();

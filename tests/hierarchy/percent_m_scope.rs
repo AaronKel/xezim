@@ -5,8 +5,6 @@
 //! recursive function reports `m.f` at every depth. Verified against a
 //! commercial simulator.
 
-use xezim::simulate;
-
 fn line(src: &str, top: &str) -> Vec<String> {
     xezim::simulate_multi(
         &[src.to_string()],

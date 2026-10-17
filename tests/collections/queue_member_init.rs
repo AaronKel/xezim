@@ -13,15 +13,6 @@
 
 use xezim::simulate;
 
-fn m(sim: &xezim::compiler::Simulator, n: &str) -> u64 {
-    sim.get_signal(n)
-        .or_else(|| sim.get_signal(&format!("top.{}", n)))
-        .unwrap_or_else(|| panic!("signal not found: {}", n))
-        .to_u64()
-        .unwrap_or_else(|| panic!("{} not u64-able", n))
-        & 0xFFFF_FFFF
-}
-
 /// A queue member with an inline default initializer (`int q[$] = '{1,2,3}`)
 /// must be populated at construction time, not left empty.
 #[test]

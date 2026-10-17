@@ -107,6 +107,7 @@ pub enum Opcode {
     Cast,
     ForeachKeys,
     ForeachNext,
+    CmpBranchConst,
 }
 
 impl Opcode {
@@ -207,6 +208,7 @@ impl Opcode {
                 BinOpConstKind::Sub => Self::BinOpConstSub,
             },
             Insn::CmpBranch(..) => Self::CmpBranch,
+            Insn::CmpBranchConst(..) => Self::CmpBranchConst,
             Insn::MoveResize(..) => Self::MoveResize,
             Insn::WaitDelayReg(..) => Self::WaitDelayReg,
             Insn::BinOpConstAdd2(..) => Self::BinOpConstAdd2,
@@ -237,12 +239,12 @@ impl Opcode {
     }
 }
 
-pub const NUM_OPCODES: usize = 98;
+pub const NUM_OPCODES: usize = 99;
 
 /// Sizes the opcode-census arrays, which are indexed by `Opcode as usize`. A
 /// stale value panics at run time under `XEZIM_OPCODE_CENSUS=1`, so pin it to
 /// the last discriminant at compile time instead.
-const _: () = assert!(NUM_OPCODES == Opcode::ForeachNext as usize + 1);
+const _: () = assert!(NUM_OPCODES == Opcode::CmpBranchConst as usize + 1);
 
 /// Dispatch table - proof of concept.
 #[derive(Debug, Clone)]

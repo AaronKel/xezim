@@ -6,8 +6,6 @@
 //! instead of the distinct per-instance hierarchical path. Verified against a
 //! commercial simulator.
 
-use xezim::simulate;
-
 fn line(src: &str, top: &str) -> Vec<String> {
     xezim::simulate_multi(
         &[src.to_string()],

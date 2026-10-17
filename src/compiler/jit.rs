@@ -870,6 +870,7 @@ mod enabled {
                     | Insn::Jump(t)
                     | Insn::BranchUnlessZero(_, t)
                     | Insn::CmpBranch(_, _, _, _, t)
+                    | Insn::CmpBranchConst(_, _, _, _, t)
                     | Insn::BranchIfSignalFalse(_, t, _) => targets.push(*t as usize),
                     Insn::CaseJump(_, cj) => {
                         targets.extend(cj.table.iter().map(|&t| t as usize));
@@ -1197,6 +1198,48 @@ mod enabled {
                     // Fused compare+branch: compute the compare into the
                     // embedded dead register with the SAME emitters as the
                     // unfused insns, then branch on definite-true (v & ~x).
+                    Insn::CmpBranchConst(kind, src, k, tmp, target) => {
+                        if k.is_fill || k.is_real || k.width > 64 {
+                            return Err(());
+                        }
+                        let cmp = Insn::BinOpConst(*tmp, *src, k.clone(), *kind);
+                        emit_insn(
+                            &mut builder,
+                            &cmp,
+                            sim_ptr,
+                            &reg_slots,
+                            &xz_slots,
+                            &reg_widths,
+                            &reg_signed,
+                            signal_widths,
+                            inline_storage,
+                            load_ref,
+                            load_xz_ref,
+                            load2_ref,
+                            load_slice_ref,
+                            load_slice_xz_ref,
+                            store_4s_ref,
+                            nba_4s_ref,
+                            store_ref,
+                            nba_ref,
+                            nba_range_ref,
+                            nba_bit_ref,
+                            blk_range_ref,
+                            load_array_ref,
+                            pointer_type,
+                        )?;
+                        let (tv, tx) = ld2(&mut builder, pointer_type, &reg_slots, &xz_slots, *tmp);
+                        let ntx = builder.ins().bnot(tx);
+                        let known1 = builder.ins().band(tv, ntx);
+                        let target_b = resolve_target(*target as usize, &pc_to_block);
+                        let fall_b = if i + 1 < n {
+                            pc_to_block[i + 1].unwrap_or(exit_block)
+                        } else {
+                            exit_block
+                        };
+                        builder.ins().brif(known1, fall_b, &[], target_b, &[]);
+                        live = false;
+                    }
                     Insn::CmpBranch(kind, l, r, tmp, target) => {
                         use crate::compiler::bytecode::CmpKind as CK;
                         match kind {
@@ -1205,10 +1248,15 @@ mod enabled {
                                     ld2(&mut builder, pointer_type, &reg_slots, &xz_slots, *l);
                                 let (rv, rx) =
                                     ld2(&mut builder, pointer_type, &reg_slots, &xz_slots, *r);
-                                let veq = builder.ins().icmp(IntCC::Equal, lv, rv);
-                                let xeq = builder.ins().icmp(IntCC::Equal, lx, rx);
-                                let both = builder.ins().band(veq, xeq);
-                                let ext = builder.ins().uextend(types::I64, both);
+                                let both_signed =
+                                    reg_signed[*l as usize] && reg_signed[*r as usize];
+                                let ext = case_eq_planes(
+                                    &mut builder,
+                                    (lv, lx),
+                                    (rv, rx),
+                                    (reg_widths[*l as usize], reg_widths[*r as usize]),
+                                    both_signed,
+                                );
                                 let zero = builder.ins().iconst(types::I64, 0);
                                 st2(
                                     &mut builder,
@@ -1570,8 +1618,8 @@ mod enabled {
         load_slice_xz_ref: FuncRef,
         store_4s_ref: FuncRef,
         nba_4s_ref: FuncRef,
-        store_ref: FuncRef,
-        nba_ref: FuncRef,
+        _store_ref: FuncRef,
+        _nba_ref: FuncRef,
         nba_range_ref: FuncRef,
         nba_bit_ref: FuncRef,
         blk_range_ref: FuncRef,
@@ -1670,10 +1718,16 @@ mod enabled {
                     K::CaseEq => {
                         let kvc = builder.ins().iconst(types::I64, kv0 as i64);
                         let kxc = builder.ins().iconst(types::I64, kx0 as i64);
-                        let veq = builder.ins().icmp(IntCC::Equal, sv, kvc);
-                        let xeq = builder.ins().icmp(IntCC::Equal, sx, kxc);
-                        let both = builder.ins().band(veq, xeq);
-                        let ext = builder.ins().uextend(types::I64, both);
+                        let both_signed =
+                            reg_s.get(*sr as usize).copied().unwrap_or(false) && k.is_signed;
+                        let sw = reg_w.get(*sr as usize).copied().unwrap_or(0);
+                        let ext = case_eq_planes(
+                            builder,
+                            (sv, sx),
+                            (kvc, kxc),
+                            (sw, k.width),
+                            both_signed,
+                        );
                         let zero = builder.ins().iconst(types::I64, 0);
                         st2(builder, pointer_type, regs, xz, *d, ext, zero);
                     }
@@ -2150,10 +2204,13 @@ mod enabled {
                 // would have called `4'bxxxx === 4'b0000` equal.
                 let (lv, lx) = ld2(builder, pointer_type, regs, xz, *l);
                 let (rv, rx) = ld2(builder, pointer_type, regs, xz, *r);
-                let veq = builder.ins().icmp(IntCC::Equal, lv, rv);
-                let xeq = builder.ins().icmp(IntCC::Equal, lx, rx);
-                let both = builder.ins().band(veq, xeq);
-                let ext = builder.ins().uextend(types::I64, both);
+                let both_signed = reg_s.get(*l as usize).copied().unwrap_or(false)
+                    && reg_s.get(*r as usize).copied().unwrap_or(false);
+                let widths = (
+                    reg_w.get(*l as usize).copied().unwrap_or(0),
+                    reg_w.get(*r as usize).copied().unwrap_or(0),
+                );
+                let ext = case_eq_planes(builder, (lv, lx), (rv, rx), widths, both_signed);
                 let zero = builder.ins().iconst(types::I64, 0);
                 st2(builder, pointer_type, regs, xz, *d, ext, zero);
             }
@@ -2213,14 +2270,6 @@ mod enabled {
                 let nid = builder.ins().iconst(types::I32, *sig_id as i64);
                 let nw = builder.ins().iconst(types::I32, *width as i64);
                 builder.ins().call(nba_4s_ref, &[sim_ptr, nid, nv, nx, nw]);
-                return Ok(());
-                #[allow(unreachable_code)]
-                let v = builder
-                    .ins()
-                    .stack_load(types::I64, regs[*val_reg as usize], 0);
-                let id = builder.ins().iconst(types::I32, *sig_id as i64);
-                let w = builder.ins().iconst(types::I32, *width as i64);
-                builder.ins().call(nba_ref, &[sim_ptr, id, v, w]);
             }
             // Fused LoadConst + NbaAssign: both planes are compile-time
             // constants. The gate rejected fill/real constants.
@@ -2832,7 +2881,7 @@ mod enabled {
     /// in either operand yields 1'bx, not a 0/1 answer.
     fn emit_cmp(
         builder: &mut FunctionBuilder,
-        pointer_type: Type,
+        _pointer_type: Type,
         regs: &[StackSlot],
         xz: &[StackSlot],
         reg_w: &[u32],
@@ -2913,6 +2962,27 @@ mod enabled {
         builder.ins().stack_store(out_x, xz[d as usize], 0);
     }
 
+    /// §11.4.5/§11.8.1: `===` compares the literal four-state encodings
+    /// after signed extension when both operands are signed. Extending both
+    /// to 64 bits gives the same equality as extending to their common width,
+    /// and replicates X/Z sign bits in both planes just like Value::case_eq.
+    fn case_eq_planes(
+        builder: &mut FunctionBuilder,
+        (mut lv, mut lx): (Value, Value),
+        (mut rv, mut rx): (Value, Value),
+        (lw, rw): (u32, u32),
+        both_signed: bool,
+    ) -> Value {
+        if both_signed {
+            (lv, lx) = sext_planes(builder, lv, lx, lw);
+            (rv, rx) = sext_planes(builder, rv, rx, rw);
+        }
+        let veq = builder.ins().icmp(IntCC::Equal, lv, rv);
+        let xeq = builder.ins().icmp(IntCC::Equal, lx, rx);
+        let both = builder.ins().band(veq, xeq);
+        builder.ins().uextend(types::I64, both)
+    }
+
     /// Static width propagation for the masking pass in `codegen_block`.
     ///
     /// The interpreter's `Value` carries its width intrinsically, so `~a` on a
@@ -2924,7 +2994,7 @@ mod enabled {
     /// `(dest reg, result width)` for the ops whose result can EXCEED the
     /// width the interpreter would have kept — the codegen masks both planes
     /// after emitting them. Width 0 = unknown; no mask.
-    pub fn insn_result_width(insn: &Insn, reg_w: &[u32], sig_w: &[u32]) -> Option<(u16, u32)> {
+    pub fn insn_result_width(insn: &Insn, reg_w: &[u32], _sig_w: &[u32]) -> Option<(u16, u32)> {
         use Insn::*;
         let rw = |r: &u16| reg_w.get(*r as usize).copied().unwrap_or(0);
         let need_mask = |d: u16, w: u32| if w >= 1 && w < 64 { Some((d, w)) } else { None };
@@ -2982,7 +3052,9 @@ mod enabled {
             Concat(d, _) => reg_s[*d as usize] = false,
             Replicate(d, ..) | CaseLut(d, ..) => reg_s[*d as usize] = false,
             MoveResize(d, sr, _) => reg_s[*d as usize] = reg_s[*sr as usize],
-            CmpBranch(_, _, _, tmp, _) => reg_s[*tmp as usize] = false,
+            CmpBranch(_, _, _, tmp, _) | CmpBranchConst(_, _, _, tmp, _) => {
+                reg_s[*tmp as usize] = false
+            }
             BinOpConst(d, sr, k, kind) => {
                 use crate::compiler::bytecode::BinOpConstKind as K;
                 reg_s[*d as usize] = match kind {
@@ -3088,7 +3160,7 @@ mod enabled {
             }
             Resize(d, w) => set(reg_w, d, *w),
             MoveResize(d, _, w) => set(reg_w, d, *w),
-            CmpBranch(_, _, _, tmp, _) => set(reg_w, tmp, 1),
+            CmpBranch(_, _, _, tmp, _) | CmpBranchConst(_, _, _, tmp, _) => set(reg_w, tmp, 1),
             Replicate(d, sr, cnt) => {
                 let sw = get(reg_w, sr);
                 let total = (sw as u64) * (*cnt as u64);
@@ -3275,7 +3347,7 @@ mod enabled {
 
     fn ld2(
         builder: &mut FunctionBuilder,
-        pointer_type: Type,
+        _pointer_type: Type,
         regs: &[StackSlot],
         xz: &[StackSlot],
         r: u16,
@@ -3289,7 +3361,7 @@ mod enabled {
     /// Store both planes of a VM register.
     fn st2(
         builder: &mut FunctionBuilder,
-        pointer_type: Type,
+        _pointer_type: Type,
         regs: &[StackSlot],
         xz: &[StackSlot],
         d: u16,
@@ -3353,7 +3425,7 @@ mod enabled {
 
     fn emit_binop(
         builder: &mut FunctionBuilder,
-        pointer_type: Type,
+        _pointer_type: Type,
         regs: &[StackSlot],
         d: u16,
         l: u16,
@@ -3462,6 +3534,7 @@ mod enabled {
                 | StmtFallback(..)
                 | NbaAssignArrayRead(..)
                 | CmpBranch(..)
+                | CmpBranchConst(..)
                 | MoveResize(..)
                 | Replicate(..)
                 | CaseLut(..)

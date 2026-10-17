@@ -21,6 +21,7 @@ pub mod ts_jit;
 pub use arena::{Arena, ArenaGuard, ArenaVec};
 pub use dispatch::{DispatchTable, NUM_OPCODES, Opcode, get_dispatch_table};
 pub use simulator::Simulator;
+pub use soa::{InlineSignalArray, PackedWideSignalArray, SoaSignalStore, SoaSignalTable};
 pub use xezim_core::Value;
 pub use xezim_core::elaborate;
 pub use xezim_core::elaborate::{ElaboratedModule, elaborate_module};

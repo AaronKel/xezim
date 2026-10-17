@@ -76,9 +76,18 @@ extern "C" fn handle_interrupt_alarm(_sig: libc::c_int) {
 pub(crate) fn install_interrupt_handler() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
-        libc::signal(libc::SIGINT, handle_interrupt as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_interrupt as libc::sighandler_t);
-        libc::signal(libc::SIGALRM, handle_interrupt_alarm as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            handle_interrupt as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_interrupt as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGALRM,
+            handle_interrupt_alarm as *const () as libc::sighandler_t,
+        );
     });
 }
 
@@ -98,6 +107,7 @@ pub(crate) fn loop_stop_requested() -> bool {
 
 /// Address of the flag `loop_stop_requested` reads (an `AtomicBool`, one
 /// byte), for native code that polls it on loop back-edges.
+#[cfg(feature = "jit")]
 pub(crate) fn loop_stop_flag_addr() -> usize {
     &LOOP_STOP as *const AtomicBool as usize
 }
