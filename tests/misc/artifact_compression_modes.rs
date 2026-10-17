@@ -85,3 +85,102 @@ fn artifact_modes_round_trip() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// §7.5/§7.8: loading an artifact must preserve a dynamic array element's
+/// associative type, including a second associative dimension and key types.
+#[test]
+fn dynamic_outer_associative_properties_survive_artifact_round_trip() {
+    let bin = env!("CARGO_BIN_EXE_xezim");
+    let dir = std::env::temp_dir().join(format!(
+        "xezim_dynamic_assoc_artifact_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("design.sv");
+    std::fs::write(&source, r#"
+class row_map;
+  int values[][string];
+endclass
+class nested_map;
+  int values[][string][int];
+endclass
+module top;
+  initial begin
+    row_map rows; nested_map nested;
+    rows=new; nested=new;
+    rows.values=new[2]; nested.values=new[1];
+    rows.values[1]["A"]=7;
+    nested.values[0]["B"][3]=11;
+    $display("T|one %0d %0d %0d %0d", rows.values[0].size(), rows.values[1].size(), rows.values[1].exists("A"), rows.values[1]["A"]);
+    $display("T|two %0d %0d %0d", nested.values[0].size(), nested.values[0]["B"].size(), nested.values[0]["B"][3]);
+  end
+endmodule
+"#).unwrap();
+    for mode in ["none", "3"] {
+        let artifact = dir.join(format!("design_{mode}.xez"));
+        let compile = Command::new(bin)
+            .args([
+                "--compile",
+                "--no-cache",
+                "-s",
+                "top",
+                "--artifact-compression",
+                mode,
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&artifact)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success() && artifact.exists(),
+            "compile: {}{}",
+            String::from_utf8_lossy(&compile.stdout),
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let loaded = Command::new(bin)
+            .args(["--simulate", "--verbose"])
+            .arg(&artifact)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&loaded.stdout);
+        let stderr = String::from_utf8_lossy(&loaded.stderr);
+        assert!(loaded.status.success(), "load: {stdout}{stderr}");
+        assert!(
+            format!("{stdout}{stderr}").contains("Loaded compiled:"),
+            "artifact was not loaded: {stdout}{stderr}"
+        );
+        let lines: Vec<_> = stdout
+            .lines()
+            .filter(|line| line.starts_with("T|"))
+            .collect();
+        assert_eq!(
+            lines,
+            ["T|one 0 1 1 7", "T|two 1 1 11"],
+            "{mode}: {stdout}{stderr}"
+        );
+    }
+    // The previous serialized class layout must be rejected at the header,
+    // before the reader can interpret its payload with missing dimensions.
+    let mut bytes = std::fs::read(dir.join("design_none.xez")).unwrap();
+    bytes[7] = 0x22;
+    let stale = dir.join("stale.xez");
+    std::fs::write(&stale, bytes).unwrap();
+    let output = Command::new(bin)
+        .arg("--simulate")
+        .arg(stale)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("incompatible xezim artifact version")
+            && text.contains("recompile with current xezim"),
+        "{text}"
+    );
+    assert!(!text.contains("T|"), "stale artifact executed: {text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
