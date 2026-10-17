@@ -750,3 +750,6 @@ mod parameterized_static_constructor;
 
 #[path = "classes/dynamic_outer_assoc.rs"]
 mod dynamic_outer_assoc;
+
+#[path = "classes/constraint_inside_cast_union.rs"]
+mod constraint_inside_cast_union;

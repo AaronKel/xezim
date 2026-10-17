@@ -110622,7 +110622,8 @@ impl Simulator {
                     ranges,
                 } => {
                     if let Some(lv) = self.target_for(inner, targets) {
-                        if let Some(v) = self.pick_inside_value(ranges) {
+                        let target = self.eval_expr(inner);
+                        if let Some(v) = self.pick_inside_value(ranges, &target) {
                             self.assign_value(&lv, &v);
                         }
                     }
@@ -110660,7 +110661,10 @@ impl Simulator {
                                 ),
                             })
                             .collect();
-                        self.pick_inside_value(&rs)
+                        {
+                            let target = self.eval_expr(expr);
+                            self.pick_inside_value(&rs, &target)
+                        }
                     };
                     if let Some(v) = picked {
                         self.assign_value(expr, &v);
@@ -110687,7 +110691,10 @@ impl Simulator {
                                 ),
                             })
                             .collect();
-                        self.pick_inside_value(&rs)
+                        {
+                            let target = self.eval_expr(expr);
+                            self.pick_inside_value(&rs, &target)
+                        }
                     };
                     if let Some(v) = picked {
                         self.assign_value(&lv, &v);
@@ -111998,7 +112005,10 @@ impl Simulator {
                     ranges,
                 } => {
                     if self.inline_foreach_elem_ref(inner, arr, idx) {
-                        if let Some(v) = self.pick_inside_value(ranges) {
+                        let target = self
+                            .get_signal_value_by_name(&elem_name)
+                            .unwrap_or_else(|| Value::zero(w));
+                        if let Some(v) = self.pick_inside_value(ranges, &target) {
                             self.set_signal_value_by_name(&elem_name, v);
                             return true;
                         }
@@ -112032,7 +112042,10 @@ impl Simulator {
                                 ),
                             })
                             .collect();
-                        self.pick_inside_value(&rs)
+                        {
+                            let target = self.eval_expr(expr);
+                            self.pick_inside_value(&rs, &target)
+                        }
                     };
                     if let Some(v) = picked {
                         self.set_signal_value_by_name(&elem_name, v);
@@ -113115,8 +113128,35 @@ impl Simulator {
         Some(deck)
     }
 
-    fn pick_inside_value(&mut self, ranges: &[Expression]) -> Option<Value> {
+    fn pick_inside_value(&mut self, ranges: &[Expression], target: &Value) -> Option<Value> {
         use rand::Rng;
+        // Numeric scope/foreach constraints share the class solver's joint
+        // comparison and union sampler. Keep the legacy non-integral path
+        // for strings, reals, X/Z and expressions outside the exact model.
+        let string_item = ranges.iter().any(|e| match &e.kind {
+            ExprKind::Range(lo, hi) => {
+                self.expr_is_string_valued(lo) || self.expr_is_string_valued(hi)
+            }
+            _ => self.expr_is_string_valued(e),
+        });
+        if !target.is_real && !string_item {
+            let cr: Vec<_> = ranges
+                .iter()
+                .map(|r| match &r.kind {
+                    ExprKind::Range(lo, hi) => ConstraintRange::Range {
+                        lo: (**lo).clone(),
+                        hi: (**hi).clone(),
+                    },
+                    _ => ConstraintRange::Value(r.clone()),
+                })
+                .collect();
+            let (choices, ws) = self.cons_ranges_i128_ws(&cr, target.width);
+            if ws.is_some() {
+                let choices =
+                    Self::fit_cons_ranges_for_target(choices, ws, target.width, target.is_signed);
+                return self.pick_i128_range(&choices, target.width, target.is_signed);
+            }
+        }
         let mut candidates: Vec<Value> = Vec::new();
         for r in ranges {
             match &r.kind {
@@ -157116,6 +157156,18 @@ impl Simulator {
             // read as u64, `int_val inside {[-100:100]}` had lo = 0xFFFF_FF9C >
             // hi = 100, i.e. an empty range, and the draw fell back to garbage.
             let mut prop_allowed_ranges: HashMap<String, Vec<(i128, i128)>> = HashMap::default();
+            let target_ranges = |me: &mut Self, expr: &Expression, ranges: &[ConstraintRange]| {
+                if let ExprKind::Ident(h) = &expr.kind
+                    && let Some((name, width)) = h
+                        .path
+                        .last()
+                        .and_then(|n| rand_props.iter().find(|(p, _)| p == &n.name.name))
+                {
+                    me.cons_ranges_for_target(ranges, *width, signed_rand_props.contains(name))
+                } else {
+                    me.cons_ranges_i128(ranges)
+                }
+            };
             for con in &constraints {
                 for item in &con.items {
                     let (inside_expr, inside_ranges): (
@@ -157128,7 +157180,7 @@ impl Simulator {
                             is_dist,
                             ..
                         } if !*is_dist => {
-                            let rs = self.cons_ranges_i128(range);
+                            let rs = target_ranges(self, expr, range);
                             (Some(expr), Some(rs))
                         }
                         ConstraintItem::Expr(expr) => {
@@ -157147,7 +157199,7 @@ impl Simulator {
                                         _ => ConstraintRange::Value(r.clone()),
                                     })
                                     .collect();
-                                let rs = self.cons_ranges_i128(&cr);
+                                let rs = target_ranges(self, inner, &cr);
                                 (Some(inner.as_ref()), Some(rs))
                             } else {
                                 (None, None)
@@ -160279,83 +160331,171 @@ impl Simulator {
         ranges: &[ConstraintRange],
         ctx_w: u32,
     ) -> (Vec<(i128, i128)>, Option<(u32, bool)>) {
-        let mut out: Vec<(i128, i128)> = Vec::new();
+        struct Bound<'a> {
+            expr: Option<&'a Expression>,
+            leaves: Vec<(u64, u32, bool)>,
+            raw: u64,
+            width: u32,
+            signed: bool,
+            dollar: bool,
+        }
+        fn bound<'a>(me: &mut Simulator, e: &'a Expression) -> Option<Bound<'a>> {
+            let mut leaves = Vec::new();
+            let (width, signed) = me.exact_leaves(e, &mut leaves)?;
+            Some(Bound {
+                expr: Some(e),
+                leaves,
+                raw: 0,
+                width,
+                signed,
+                dollar: matches!(e.kind, ExprKind::Dollar),
+            })
+        }
+        let mut bounds: Vec<(Bound<'_>, Option<Bound<'_>>)> = Vec::new();
         let mut ws: Option<(u32, bool)> = Some((1, true));
-        let note = |ws: &mut Option<(u32, bool)>, w: u32, s: bool| {
-            if let Some((aw, as_)) = ws {
-                *aw = (*aw).max(w);
-                *as_ &= s;
+        let note = |ws: &mut Option<(u32, bool)>, b: &Bound<'_>| {
+            if !b.dollar
+                && let Some((aw, as_)) = ws
+            {
+                *aw = (*aw).max(b.width);
+                *as_ &= b.signed;
             }
         };
-        let at = |x: (i128, u32, bool)| -> i128 {
-            let w = x.1.max(ctx_w);
-            if w == 0 || w > 64 {
-                x.0
-            } else {
-                Self::as_ctx(x.0, w, x.2)
-            }
-        };
+        // Cache each expression's leaves once. Its joint comparison type must
+        // be known before folding arithmetic or dropping an inverted range.
+        // 8'(148) is signed in isolation but becomes 148 in an unsigned set.
         for r in ranges {
             match r {
                 ConstraintRange::Value(e) => {
                     if let Some(nm) = self.array_operand_name(e) {
-                        let sz = self.get_queue_size(&nm);
-                        for i in 0..sz {
+                        for i in 0..self.get_queue_size(&nm) {
                             if let Some(ev) =
                                 self.get_signal_value_by_name(&format!("{}[{}]", nm, i))
+                                && let Some(raw) = ev.to_u64()
                             {
-                                if let Some(v) = ev.to_u64() {
-                                    note(&mut ws, ev.width, ev.is_signed);
-                                    let x = Self::as_ctx(v as i128, ev.width, ev.is_signed);
-                                    out.push((x, x));
-                                }
+                                let b = Bound {
+                                    expr: None,
+                                    leaves: Vec::new(),
+                                    raw,
+                                    width: ev.width,
+                                    signed: ev.is_signed,
+                                    dollar: false,
+                                };
+                                note(&mut ws, &b);
+                                bounds.push((b, None));
                             }
                         }
                         continue;
                     }
-                    match self.exact_int(e) {
-                        Some(x) => {
-                            note(&mut ws, x.1, x.2);
-                            let v = at(x);
-                            out.push((v, v));
-                        }
-                        None => ws = None,
+                    if let Some(b) = bound(self, e) {
+                        note(&mut ws, &b);
+                        bounds.push((b, None));
+                    } else {
+                        ws = None;
                     }
                 }
                 ConstraintRange::Range { lo, hi } => {
-                    let (Some(lx), Some(hx)) = (self.exact_int(lo), self.exact_int(hi)) else {
+                    let (Some(l), Some(h)) = (bound(self, lo), bound(self, hi)) else {
                         ws = None;
                         continue;
                     };
-                    for (b, x) in [(lo, lx), (hi, hx)] {
-                        if !matches!(b.kind, ExprKind::Dollar) {
-                            note(&mut ws, x.1, x.2);
-                        }
-                    }
-                    let l = if matches!(lo.kind, ExprKind::Dollar) {
-                        lx.0
-                    } else {
-                        at(lx)
-                    };
-                    let h = if matches!(hi.kind, ExprKind::Dollar) {
-                        hx.0
-                    } else {
-                        at(hx)
-                    };
-                    // §11.4.13: `[hi:lo]` with the left bound above the
-                    // right one is an empty range. A `$` bound keeps the
-                    // ordered reading.
-                    if l > h
-                        && !matches!(lo.kind, ExprKind::Dollar)
-                        && !matches!(hi.kind, ExprKind::Dollar)
-                    {
-                        continue;
-                    }
-                    out.push((l.min(h), l.max(h)));
+                    note(&mut ws, &l);
+                    note(&mut ws, &h);
+                    bounds.push((l, Some(h)));
                 }
             }
         }
+        let at = |me: &mut Self, b: &Bound<'_>| -> Option<i128> {
+            let (w, s) = if b.dollar {
+                (b.width, b.signed)
+            } else {
+                let (w, s) = ws.unwrap_or((b.width, b.signed));
+                (w.max(ctx_w), s)
+            };
+            let v = if let Some(e) = b.expr {
+                me.exact_fold(e, &b.leaves, &mut 0, w, s)?
+            } else {
+                Self::as_ctx(b.raw as i128, b.width, s)
+            };
+            Some(if b.dollar || w == 0 || w > 64 {
+                v
+            } else {
+                Self::as_ctx(v, w, s)
+            })
+        };
+        let mut out = Vec::with_capacity(bounds.len());
+        for (lo, hi) in bounds {
+            let Some(l) = at(self, &lo) else {
+                continue;
+            };
+            let Some(h) = hi.as_ref().map_or(Some(l), |b| at(self, b)) else {
+                continue;
+            };
+            if l <= h || lo.dollar || hi.as_ref().is_some_and(|b| b.dollar) {
+                out.push((l.min(h), l.max(h)));
+            }
+        }
         (out, ws)
+    }
+
+    /// Map a comparison set into the target's representable domain before
+    /// sampling. Wider signed constants cannot alias narrow target values;
+    /// unsigned items can name a signed value by its sign-extended bit pattern.
+    fn cons_ranges_for_target(
+        &mut self,
+        ranges: &[ConstraintRange],
+        width: u32,
+        signed: bool,
+    ) -> Vec<(i128, i128)> {
+        let (rs, items_ws) = self.cons_ranges_i128_ws(ranges, width);
+        Self::fit_cons_ranges_for_target(rs, items_ws, width, signed)
+    }
+
+    fn fit_cons_ranges_for_target(
+        rs: Vec<(i128, i128)>,
+        items_ws: Option<(u32, bool)>,
+        width: u32,
+        signed: bool,
+    ) -> Vec<(i128, i128)> {
+        if width == 0 || width > 64 {
+            return rs;
+        }
+        if signed && let Some((iw, false)) = items_ws {
+            let w = iw.max(width).min(64);
+            let half = 1i128 << (width - 1);
+            let period = 1i128 << w;
+            let mut out = Vec::new();
+            for (l, h) in rs {
+                let (l, h) = (Self::bits_at(l, w) as i128, Self::bits_at(h, w) as i128);
+                if l > h {
+                    continue;
+                }
+                let (a, b) = (l.max(0), h.min(half - 1));
+                if a <= b {
+                    out.push((a, b));
+                }
+                let (a, b) = (l.max(period - half), h.min(period - 1));
+                if a <= b {
+                    out.push((a - period, b - period));
+                }
+            }
+            return out;
+        }
+        // Match the existing membership judge's signed interpretation when
+        // a negative endpoint is present, including legacy unsigned targets.
+        let signed = signed || rs.iter().any(|&(l, h)| l < 0 || h < 0);
+        let (lo, hi) = if signed {
+            let half = 1i128 << (width - 1);
+            (-half, half - 1)
+        } else {
+            (0, (1i128 << width) - 1)
+        };
+        rs.into_iter()
+            .filter_map(|(l, h)| {
+                let (l, h) = (l.max(lo), h.min(hi));
+                (l <= h).then_some((l, h))
+            })
+            .collect()
     }
 
     /// Exact-signed membership test used by every `inside`/`dist` solve path.
@@ -160399,7 +160539,7 @@ impl Simulator {
         width: u32,
         signed: bool,
     ) -> Option<Value> {
-        let choices = self.cons_ranges_i128_at(ranges, width);
+        let choices = self.cons_ranges_for_target(ranges, width, signed);
         self.pick_i128_range(&choices, width, signed)
     }
 
@@ -160440,16 +160580,63 @@ impl Simulator {
         signed: bool,
     ) -> Option<Value> {
         use rand::Rng;
-        if choices.is_empty() {
-            return None;
-        }
-        let (lo, hi) = choices[self.cur_rng().gen_range(0..choices.len())];
-        let v = if hi > lo {
-            self.cur_rng().gen_range(lo..=hi)
+        let v = if let [(lo, hi)] = choices {
+            // Retain the existing RNG calls for the common one-interval case.
+            if lo > hi {
+                return None;
+            }
+            let _ = self.cur_rng().gen_range(0..1usize);
+            if hi > lo {
+                self.cur_rng().gen_range(*lo..=*hi)
+            } else {
+                *lo
+            }
         } else {
-            lo
+            // An inside list is a union of values, not a weighted list of
+            // items. Overlap and duplicate entries contribute no extra mass.
+            let mut sorted: Vec<_> = choices.iter().copied().filter(|(l, h)| l <= h).collect();
+            sorted.sort_unstable();
+            let mut union: Vec<(i128, i128)> = Vec::with_capacity(sorted.len());
+            for (l, h) in sorted {
+                if let Some(last) = union.last_mut()
+                    && l <= last.1.saturating_add(1)
+                {
+                    last.1 = last.1.max(h);
+                } else {
+                    union.push((l, h));
+                }
+            }
+            if union.is_empty() {
+                return None;
+            }
+            // Inclusive cardinalities use unsigned modular arithmetic: zero
+            // denotes exactly 2^128 values, possible only for the full domain.
+            // No signed subtraction, capped span or saturating weight is used.
+            let size = |l: i128, h: i128| (h as u128).wrapping_sub(l as u128).wrapping_add(1);
+            let total = union
+                .iter()
+                .fold(0u128, |n, &(l, h)| n.wrapping_add(size(l, h)));
+            let mut rank = if total == 0 {
+                self.cur_rng().r#gen::<u128>()
+            } else {
+                self.cur_rng().gen_range(0..total)
+            };
+            let mut chosen = None;
+            for (l, h) in union {
+                let n = size(l, h);
+                if n == 0 || rank < n {
+                    chosen = Some(l.wrapping_add(rank as i128));
+                    break;
+                }
+                rank -= n;
+            }
+            chosen?
         };
-        let mut out = Value::from_u64(Self::bits_at(v, width.min(64)) as u64, width);
+        let mut out = if width <= 64 {
+            Value::from_u64(Self::bits_at(v, width) as u64, width)
+        } else {
+            Value::from_u128(Self::bits_at(v, width.min(128)), width)
+        };
         out.is_signed = signed;
         Some(out)
     }
@@ -174988,6 +175175,9 @@ fn vm_range_select(v: &Value, left: usize, right: usize) -> Option<(u64, u64, u3
         None
     }
 }
+
+#[cfg(test)]
+mod constraint_set_tests;
 
 #[cfg(test)]
 mod two_state_dynamic_tests;
