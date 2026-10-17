@@ -250,3 +250,66 @@ fn dynamic_associative_rows_lifetime_and_isolation() {
         assert!(!output.contains("T|FAIL"), "tier={tier}:\n{output}");
     }
 }
+
+const BOUNDS: &str = r#"class holder_bounds;
+  int v[][string];
+  function bit local_bounds();
+    int v[][string];
+    v=new[1]; v[0]["A"]=3;
+    v[-1]["bad"]=9; v[1]["bad"]=10;
+    return v.size()==1 && v[0].size()==1 && v[0]["A"]==3 && v[-1].size()==0 && v[1].size()==0;
+  endfunction
+  function bit local_deleted();
+    int v[][string];
+    v=new[1]; v[0]["A"]=3; v.delete(); v[0]["bad"]=10;
+    return v.size()==0 && v[0].size()==0;
+  endfunction
+endclass
+typedef struct { int v[][string]; } bounds_t;
+module bounds;
+  bounds_t s; holder_bounds h;
+  int checked=0; int failed=0;
+  task check(string label,bit ok);
+    checked++;
+    if(ok) $display("T|PASS %s",label);
+    else begin failed++; $display("T|FAIL %s",label); end
+  endtask
+  initial begin
+    h=new;
+    s.v=new[1]; s.v[0]["A"]=7;
+    s.v[-1]["bad"]=1; s.v[1]["bad"]=2;
+    check("struct negative and size index ignored",s.v.size()==1 && s.v[0]["A"]==7 && s.v[-1].size()==0 && s.v[1].size()==0);
+    s.v=new[0]; s.v[0]["bad"]=3;
+    check("struct zero size has no rows",s.v.size()==0 && s.v[0].size()==0);
+    s.v=new[1]; s.v[0]["A"]=4; s.v.delete(); s.v[0]["bad"]=5;
+    check("struct deleted rows cannot be recreated",s.v.size()==0 && s.v[0].size()==0);
+    h.v=new[1]; h.v[0]["A"]=11; h.v[-1]["bad"]=12; h.v[1]["bad"]=13;
+    check("class negative and size index ignored",h.v.size()==1 && h.v[0]["A"]==11 && h.v[-1].size()==0 && h.v[1].size()==0);
+    h.v.delete(); h.v[0]["bad"]=14;
+    check("class deleted row remains empty",h.v.size()==0 && h.v[0].size()==0);
+    check("local negative and size index ignored",h.local_bounds());
+    check("local deleted row remains empty",h.local_deleted());
+    $display("T|SUMMARY checked=%0d failed=%0d",checked,failed);
+  end
+endmodule
+"#;
+
+#[test]
+fn dynamic_associative_row_bounds() {
+    for tier in ["0", "1"] {
+        let output = run(BOUNDS, "bounds", "bounds", tier);
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.starts_with("T|PASS"))
+                .count(),
+            7,
+            "tier={tier}:\n{output}"
+        );
+        assert!(
+            output.contains("T|SUMMARY checked=7 failed=0"),
+            "tier={tier}:\n{output}"
+        );
+        assert!(!output.contains("T|FAIL"), "tier={tier}:\n{output}");
+    }
+}

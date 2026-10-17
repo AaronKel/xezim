@@ -119096,6 +119096,27 @@ impl Simulator {
                 .iter()
                 .all(|d| matches!(d, crate::ast::types::UnpackedDimension::Associative { .. }))
         {
+            if nidx > 0 {
+                // Locate the final struct member outside array selects. A
+                // selected dynamic row is a collection only while allocated;
+                // an OOB write must not register a phantom associative row.
+                let mut depth = 0usize;
+                let mut member_start = 0usize;
+                for (i, byte) in flat.bytes().enumerate() {
+                    match byte {
+                        b'[' => depth += 1,
+                        b']' => depth = depth.saturating_sub(1),
+                        b'.' if depth == 0 => member_start = i + 1,
+                        _ => {}
+                    }
+                }
+                let open = member_start + flat[member_start..].find('[')?;
+                let close = open + 1 + flat[open + 1..].find(']')?;
+                let index = flat[open + 1..close].parse::<i64>().ok()?;
+                if index < 0 || index as u64 >= self.get_queue_size(&flat[..open]) {
+                    return None;
+                }
+            }
             let kind = Self::coll_kind_of(&dims[nidx..=nidx])?;
             return Some((kind, mdt, self.string_keyed_dim(&dims[nidx])));
         }
