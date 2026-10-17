@@ -252,20 +252,29 @@ module top;
     else begin failures++; $display("T|FAIL %s",label); end
   endtask
   initial begin
-    value_two extra;
+    value_two extra; value_two two; value_five five;
+    item int_item; item byte_item; alias_eleven aliased;
+    parameter_target#(23) typed_target; parameter_target#(31) named_target;
+    int typed_before; int aliased_before;
+    typed_before=ledger::typed; aliased_before=ledger::aliased;
     check("value constructors precede initial",ledger::valued==7);
-    check("distinct value specialization payloads",value_two::inst.payload==2 && value_five::inst.payload==5);
-    check("different member class and type specializations",ledger::typed==2 && type_int::inst.payload==19 && type_byte::inst.payload==19);
-    check("self typedef and constructor argument",ledger::aliased==1 && alias_eleven::inst.payload==11);
+    // Inspect the constructed objects through typed copies of their statics.
+    two=value_two::inst; five=value_five::inst;
+    int_item=type_int::inst; byte_item=type_byte::inst;
+    aliased=alias_eleven::inst;
+    typed_target=held_target::inst; named_target=held_named::inst;
+    check("distinct value specialization payloads",two.payload==2 && five.payload==5);
+    check("different member class and type specializations",typed_before==2 && int_item.payload==19 && byte_item.payload==19);
+    check("self typedef and constructor argument",aliased_before==1 && aliased.payload==11);
     check("function initializer precedes initial",ledger::functions==1);
     check("function initializer value",function_seventeen::value==20);
     check("recursive static read sees default",ledger::recursive==1 && recursive_int::inst!=null);
-    check("type parameter retains target specialization",held_target::inst.payload==26);
-    check("named property specialization arguments",held_named::inst.payload==35);
+    check("type parameter retains target specialization",typed_target.payload==26);
+    check("named property specialization arguments",named_target.payload==35);
     check("inherited initializer precedes initial once",journal::calls==1);
     check("direct and inherited specialization share initializer",base_seven::token==7 && leaf_seven::token==7 && journal::calls==1);
     extra=new(2);
-    check("explicit construction and one time statics",ledger::valued==9 && value_two::inst.payload==2 && ledger::typed==2 && ledger::functions==1);
+    check("explicit construction and one time statics",ledger::valued==9 && value_two::inst==two && two.payload==2 && ledger::typed==2 && ledger::functions==1);
     $display("T|SUMMARY checks=%0d failures=%0d",checked,failures);
   end
 endmodule
