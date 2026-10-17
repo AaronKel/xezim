@@ -365,7 +365,7 @@ endmodule
 /// Measure admission from a fresh persistent cache, independent of the
 /// asynchronous profiler. The positive case must contain an actual compiled
 /// block, rather than a cached refusal, and both policies check known results.
-fn run_with_admission(source: &str, tier: &str) -> (String, usize) {
+fn run_with_admission(source: &str, tier: &str) -> (String, usize, usize) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -400,6 +400,7 @@ fn run_with_admission(source: &str, tier: &str) -> (String, usize) {
         .collect::<Vec<_>>()
         .join("\n");
     let mut blocks = 0;
+    let mut refusals = 0;
     if cache.exists() {
         for entry in std::fs::read_dir(&cache).unwrap() {
             let path = entry.unwrap().path();
@@ -412,12 +413,14 @@ fn run_with_admission(source: &str, tier: &str) -> (String, usize) {
                     xezim::compiler::bytecode::PersistedMethodOutcome::Block { .. }
                 ) {
                     blocks += 1;
+                } else {
+                    refusals += 1;
                 }
             }
         }
     }
     std::fs::remove_dir_all(dir).unwrap();
-    (text, blocks)
+    (text, blocks, refusals)
 }
 
 #[test]
@@ -443,11 +446,11 @@ endmodule
 "#;
     assert_eq!(
         run_with_admission(source, "1000000"),
-        ("TAG r=109275".into(), 0)
+        ("TAG r=109275".into(), 0, 0)
     );
     assert_eq!(
         run_with_admission(source, "100"),
-        ("TAG r=109275".into(), 1)
+        ("TAG r=109275".into(), 1, 0)
     );
 }
 
@@ -510,10 +513,18 @@ endmodule
         let output = format!("TAG {expected}\nTAG {expected}");
         assert_eq!(
             run_with_admission(&source, "1000000"),
-            (output.clone(), 0),
+            (output.clone(), 0, 0),
             "{tag} cold"
         );
-        assert_eq!(run_with_admission(&source, "100"), (output, 1), "{tag} hot");
+        // Multi-index member foreach currently declines bytecode lowering.
+        // A persisted refusal proves heat reached admission while preserving
+        // interpreter execution; it must never count as a compiled block.
+        let (blocks, refusals) = if tag == "matrix" { (0, 1) } else { (1, 0) };
+        assert_eq!(
+            run_with_admission(&source, "100"),
+            (output, blocks, refusals),
+            "{tag} hot"
+        );
     }
 }
 
@@ -556,7 +567,7 @@ endmodule
         );
         assert_eq!(
             run_with_admission(&source, "100"),
-            (format!("TAG {expected}\nTAG {expected}"), 0),
+            (format!("TAG {expected}\nTAG {expected}"), 0, 0),
             "{tag}"
         );
     }
