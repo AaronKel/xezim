@@ -81375,6 +81375,15 @@ impl Simulator {
                     if !cont.is_empty() {
                         let cont_s = self.resolve_locator_storage(&cont);
                         if let Some(su) = self.queue_elem_struct(&cont_s) {
+                            // This is the actual aggregate copy, not a shape
+                            // probe. Capture an impure RHS selector once so
+                            // the pure name probes can retain every member.
+                            if Self::lvalue_has_incdec_index(rvalue)
+                                && let Some(rhs) = self.rewrite_lvalue_index_side_effects(rvalue)
+                            {
+                                self.exec_stmt_blocking_assign_body(stmt, lvalue, &rhs);
+                                return;
+                            }
                             let dst_s = format!("{}{}", cont_s, &dst[cut..]);
                             let src = eval_rflat(self, &mut rflat_cache);
                             if let Some(src) = src {
@@ -81419,6 +81428,19 @@ impl Simulator {
             // identical code at top level worked.
             let (dst, spread_su) = self.struct_copy_target(dst);
             if let Some(su) = spread_su {
+                let dst_is_collection = self.module.dynamic_arrays.contains(&dst)
+                    || self.module.arrays.contains_key(&dst)
+                    || self.module.associative_arrays.contains_key(&dst);
+                // Freeze only after the destination is known to be a struct;
+                // rejected speculative probes must not execute selectors. The
+                // LHS was already frozen by the assignment-entry path above.
+                if !dst_is_collection
+                    && Self::lvalue_has_incdec_index(rvalue)
+                    && let Some(rhs) = self.rewrite_lvalue_index_side_effects(rvalue)
+                {
+                    self.exec_stmt_blocking_assign_body(stmt, lvalue, &rhs);
+                    return;
+                }
                 let src = eval_rflat(self, &mut rflat_cache);
                 if let Some(src) = src {
                     if src != dst && self.struct_storage_exists(&src, &su) {
@@ -81449,9 +81471,6 @@ impl Simulator {
                 // `q2 = q1` copies elements, and spreading one
                 // packed value into `q2.<member>` would destroy
                 // that.
-                let dst_is_collection = self.module.dynamic_arrays.contains(&dst)
-                    || self.module.arrays.contains_key(&dst)
-                    || self.module.associative_arrays.contains_key(&dst);
                 if !dst_is_collection
                     && matches!(
                         &rvalue.kind,
