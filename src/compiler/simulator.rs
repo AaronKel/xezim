@@ -56089,12 +56089,12 @@ impl Simulator {
     }
 
     /// The statements a blocking loop or branch body splices into the process
-    /// stream: a `begin…end` body's own statements, unless it declares
-    /// variables. Such a body stays one block, so the run loop opens and
-    /// closes its scope on every pass (§6.21) like any other block.
+    /// stream: an unnamed `begin…end` body's own statements, unless it
+    /// declares variables. Named bodies retain their scope and disable
+    /// target (§9.3, §9.6.2); declarations retain their lifetime (§6.21).
     fn spliced_body(body: &Statement) -> Vec<Statement> {
         match &body.kind {
-            StatementKind::SeqBlock { stmts, .. } if !Self::stmts_declare_vars(stmts) => {
+            StatementKind::SeqBlock { stmts, name: None } if !Self::stmts_declare_vars(stmts) => {
                 stmts.clone()
             }
             _ => vec![body.clone()],
@@ -56110,7 +56110,7 @@ impl Simulator {
         body: &Statement,
     ) -> Arc<[Statement]> {
         match &body.kind {
-            StatementKind::SeqBlock { stmts, .. } if !Self::stmts_declare_vars(stmts) => {
+            StatementKind::SeqBlock { stmts, name: None } if !Self::stmts_declare_vars(stmts) => {
                 self.blocking_cont_frame(owner, body, 8, stmts)
             }
             _ => self.blocking_cont_frame(owner, body, 8, std::slice::from_ref(body)),
