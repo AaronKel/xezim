@@ -55202,6 +55202,16 @@ impl Simulator {
         if let Some((_, c)) = self.inactive_queue.iter().find(|(p, _)| *p == pid) {
             return Some(c);
         }
+        if let Some((_, c)) = self.deferred_clocking_conts.iter().find(|(p, _)| *p == pid) {
+            return Some(c);
+        }
+        if let Some((w, _)) = self
+            .deferred_clocking_guarded
+            .iter()
+            .find(|(w, _)| w.pid == pid)
+        {
+            return Some(&w.continuation);
+        }
         None
     }
 
@@ -55214,6 +55224,23 @@ impl Simulator {
             .position(|w| w.parent_pid == pid && !w.wait_fork)
         {
             return Some(self.join_waiters.remove(idx).continuation);
+        }
+        // Remote disable abandons the rest of the named block, including
+        // its clocking guard/count. This is not a process::suspend extraction:
+        // resuming an explicit suspension must retain those wait conditions.
+        if let Some(idx) = self
+            .deferred_clocking_conts
+            .iter()
+            .position(|(p, _)| *p == pid)
+        {
+            return Some(self.deferred_clocking_conts.remove(idx).1);
+        }
+        if let Some(idx) = self
+            .deferred_clocking_guarded
+            .iter()
+            .position(|(w, _)| w.pid == pid)
+        {
+            return Some(self.deferred_clocking_guarded.remove(idx).0.continuation);
         }
         self.proc_suspend(pid);
         let info = self.suspended_proc_info.remove(&pid)?;
@@ -55257,6 +55284,8 @@ impl Simulator {
             cands.extend(self.event_waiters.iter().map(|w| w.pid));
             cands.extend(self.condition_waiters.iter().map(|(p, _)| *p));
             cands.extend(self.inactive_queue.iter().map(|(p, _)| *p));
+            cands.extend(self.deferred_clocking_conts.iter().map(|(p, _)| *p));
+            cands.extend(self.deferred_clocking_guarded.iter().map(|(w, _)| w.pid));
             cands.extend(
                 self.event_queue
                     .pending_pid_times()
@@ -89689,6 +89718,10 @@ impl Simulator {
     /// §9.6.2/§9.7: canceled processes cannot resume their captured waits.
     fn vc_cancel_process(&mut self, pid: usize) {
         self.vc_saved.retain(|_, (owner, _)| *owner != pid);
+        // Same-slot clocking waits are parked outside event_waiters until
+        // Reactive. Every kill/disable path must purge these waits too.
+        self.deferred_clocking_conts.retain(|(p, _)| *p != pid);
+        self.deferred_clocking_guarded.retain(|(w, _)| w.pid != pid);
         // Every kill site passes here: a process killed while suspended in
         // an imported task unwinds it by the §35.9 disable protocol.
         if !self.dpi_tasks.is_empty() {
@@ -96060,6 +96093,11 @@ impl Simulator {
     fn resolve_deferred_clocking_guards(&mut self) {
         let pending = std::mem::take(&mut self.deferred_clocking_guarded);
         for (mut waiter, g) in pending {
+            // A prior guard can call a function that kills another waiter
+            // already extracted into this batch. Do not evaluate or re-arm it.
+            if self.killed_pids.contains(&waiter.pid) {
+                continue;
+            }
             let saved_hint = waiter
                 .value_ctx
                 .as_ref()
@@ -96071,6 +96109,12 @@ impl Simulator {
             } else {
                 self.eval_waiter_condition(waiter.pid, &g)
             };
+            if self.killed_pids.contains(&waiter.pid) {
+                if let Some(h) = saved_hint {
+                    *self.name_resolve_hint.borrow_mut() = h;
+                }
+                continue;
+            }
             if ok && waiter.remaining_events <= 1 {
                 let cont = std::mem::replace(&mut waiter.continuation, ProcCont::empty());
                 self.deferred_clocking_conts.push((waiter.pid, cont));
@@ -96152,9 +96196,14 @@ impl Simulator {
                 if self.finished {
                     break;
                 }
+                // A prior continuation may kill a sibling in this batch.
+                // Dispatch already rejects killed pids; skip completion too.
+                if self.killed_pids.contains(&pid) {
+                    continue;
+                }
                 ran_any = true;
                 self.run_scheduled_process(pid, &stmts);
-                if !self.is_pid_suspended(pid) {
+                if !self.killed_pids.contains(&pid) && !self.is_pid_suspended(pid) {
                     self.child_finished(pid);
                 }
                 self.break_flag = false;
@@ -103726,6 +103775,17 @@ impl Simulator {
             return true;
         }
         if self.reactive_conts.iter().any(|(p, _)| *p == pid) {
+            return true;
+        }
+        // §9.4.2 / §14.13: @(cb) reached after its raw edge parks until
+        // Reactive, including while an iff guard awaits this edge's samples.
+        // Keep the task's locals/this alive rather than treating it as done.
+        if self.deferred_clocking_conts.iter().any(|(p, _)| *p == pid)
+            || self
+                .deferred_clocking_guarded
+                .iter()
+                .any(|(w, _)| w.pid == pid)
+        {
             return true;
         }
         // A process blocked on `fork...join`/`join_any` is the PARENT of a

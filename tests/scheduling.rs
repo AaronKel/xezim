@@ -66,6 +66,8 @@ mod clockgen_x_clock_stays_x;
 mod clocking_event_cycle_delay;
 #[path = "scheduling/clocking_iff_samples_this_edge.rs"]
 mod clocking_iff_samples_this_edge;
+#[path = "scheduling/clocking_task_context.rs"]
+mod clocking_task_context;
 #[path = "scheduling/comb_collection_element_sensitivity.rs"]
 mod comb_collection_element_sensitivity;
 #[path = "scheduling/comb_result_clobbered_by_process.rs"]
