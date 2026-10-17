@@ -57,29 +57,45 @@ const FST_BATCH_FLUSH: usize = 64;
 /// any real design is an inline 24-byte memcpy with no allocation at all.
 pub struct FstTimestep {
     pub time: u64,
-    pub changes: Vec<(FstSignalId, Value)>,
+    /// The width is the immutable FST declaration width; zero denotes a real.
+    /// A runtime Value may use a different storage width, but the wire record
+    /// must always match its registered handle.
+    pub changes: Vec<(FstSignalId, Value, u32)>,
 }
 
 /// Render a `Value` as the FST bit string: full width, MSB first, '0'/'1'/'x'/'z'.
 /// Width-0 yields a single '0' so the writer never sees an empty change.
 pub fn fst_format_value(val: &Value) -> Vec<u8> {
-    if val.is_real {
-        return val.to_f64().to_le_bytes().to_vec();
+    fst_format_declared_value(val, if val.is_real { 0 } else { val.width.max(1) })
+}
+
+/// Format against the FST declaration, not the current storage container.
+/// Fixed-width assignments retain low bits on truncation and extend narrow
+/// signed/X/Z values using the same rules as the simulator (§10.8).
+/// A zero width identifies the real encoding (eight binary bytes).
+pub fn fst_format_declared_value(val: &Value, width: u32) -> Vec<u8> {
+    if width == 0 {
+        let mut real = val.clone();
+        real.is_real = true;
+        return real.to_f64().to_le_bytes().to_vec();
     }
-    let w = val.width as usize;
-    if w == 0 {
-        return vec![b'0'];
-    }
-    let mut s = Vec::with_capacity(w);
-    for i in (0..w).rev() {
-        s.push(match val.get_bit(i) {
+    let fitted;
+    let bits = if val.width != width || val.is_fill {
+        fitted = val.resize_for_assign(width);
+        &fitted
+    } else {
+        val
+    };
+    let mut out = Vec::with_capacity(width as usize);
+    for i in (0..width as usize).rev() {
+        out.push(match bits.get_bit(i) {
             LogicBit::Zero => b'0',
             LogicBit::One => b'1',
             LogicBit::X => b'x',
             LogicBit::Z => b'z',
         });
     }
-    s
+    out
 }
 
 enum Msg {
@@ -174,8 +190,10 @@ impl Writer {
             // fst-writer cannot add to it.
             return;
         }
-        for (fid, val) in &ts.changes {
-            let _ = self.body.signal_change(*fid, &fst_format_value(val));
+        for (fid, val, width) in &ts.changes {
+            let _ = self
+                .body
+                .signal_change(*fid, &fst_format_declared_value(val, *width));
         }
         if self.body.size() >= FST_FLUSH_AT {
             self.flush();

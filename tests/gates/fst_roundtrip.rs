@@ -598,3 +598,191 @@ endmodule
     let fst = decode(&ok_fst);
     assert!(fst.has("top.gen[0].gsig"), "have {:?}", fst.paths());
 }
+
+/// IEEE 1800 §10.8: waveform encoding follows the declaration even when a
+/// temporary carries more bits. These shapes cover the reported 1/32 mismatch
+/// and truncation, signed extension, four-state extension, fill and real data.
+#[test]
+fn declared_width_controls_fst_encoding() {
+    use xezim::compiler::fst_sink::fst_format_declared_value as format;
+    use xezim_core::value::{LogicBit, Value};
+    let word = Value::from_u64(439, 32);
+    assert_eq!(format(&word, 1), b"1");
+    assert_eq!(format(&word, 8), b"10110111");
+    let mut signed = Value::from_u64(0x80, 8);
+    signed.is_signed = true;
+    assert_eq!(format(&signed, 16), b"1111111110000000");
+    assert_eq!(format(&Value::from_u64(0x80, 8), 16), b"0000000010000000");
+    signed.set_bit(7, LogicBit::X);
+    assert_eq!(format(&signed, 12), b"xxxxx0000000");
+    signed.set_bit(7, LogicBit::Z);
+    assert_eq!(format(&signed, 12), b"zzzzz0000000");
+    let mut fill = Value::from_u64(1, 1);
+    fill.is_fill = true;
+    assert_eq!(format(&fill, 9), b"111111111");
+    let mut wide = Value::zero(131);
+    wide.set_bit(130, LogicBit::One);
+    wide.set_bit(0, LogicBit::One);
+    assert_eq!(format(&wide, 1), b"1");
+    assert_eq!(format(&wide, 132).len(), 132);
+    let mut real = Value::from_f64(3.25);
+    real.is_real = false; // declaration metadata restores the real encoding
+    assert_eq!(format(&real, 0), 3.25f64.to_le_bytes());
+    assert_eq!(format(&Value::zero(0), 1), b"0");
+}
+
+/// Exercise both actual sink modes with mismatched runtime widths, then
+/// decode the output instead of merely checking that the writer survived.
+#[test]
+fn sink_preserves_declared_width_inline_and_threaded() {
+    use fst_writer::{
+        FstFileType, FstInfo, FstScopeType, FstSignalType, FstVarDirection, FstVarType,
+    };
+    use xezim::compiler::fst_sink::{FstSink, FstTimestep, open_fst};
+    use xezim_core::value::Value;
+    for threaded in [false, true] {
+        let path = std::env::temp_dir().join(format!(
+            "xezim_fst_width_{}_{}.fst",
+            std::process::id(),
+            threaded
+        ));
+        let info = FstInfo {
+            start_time: 0,
+            timescale_exponent: -9,
+            version: "regression".into(),
+            date: String::new(),
+            file_type: FstFileType::Verilog,
+        };
+        let (mut header, target) = open_fst(path.to_str().unwrap(), &info).unwrap();
+        header.scope("top", "", FstScopeType::Module).unwrap();
+        let flag = header
+            .var(
+                "flag",
+                FstSignalType::bit_vec(1),
+                FstVarType::Reg,
+                FstVarDirection::Implicit,
+                None,
+            )
+            .unwrap();
+        let byte = header
+            .var(
+                "byte",
+                FstSignalType::bit_vec(8),
+                FstVarType::Reg,
+                FstVarDirection::Implicit,
+                None,
+            )
+            .unwrap();
+        let real = header
+            .var(
+                "real",
+                FstSignalType::real(),
+                FstVarType::Real,
+                FstVarDirection::Implicit,
+                None,
+            )
+            .unwrap();
+        header.up_scope().unwrap();
+        let mut body = header.finish().unwrap();
+        body.signal_change(flag, b"0").unwrap();
+        body.signal_change(byte, b"00000000").unwrap();
+        body.signal_change(real, &0f64.to_le_bytes()).unwrap();
+        let mut sink = if threaded {
+            FstSink::threaded(body, target, 0)
+        } else {
+            FstSink::inline(body, target, 0)
+        };
+        sink.post(FstTimestep {
+            time: 1,
+            changes: vec![
+                (flag, Value::from_u64(439, 32), 1),
+                (byte, Value::from_u64(439, 32), 8),
+                (real, Value::from_f64(3.25), 0),
+            ],
+        });
+        sink.post(FstTimestep {
+            time: 4,
+            changes: vec![],
+        });
+        sink.finish();
+        let fst = decode(&path);
+        assert_eq!(fst.var("top.flag").length, 1);
+        assert_eq!(fst.var("top.byte").length, 8);
+        assert_eq!(
+            fst.timeline("top.flag"),
+            vec![(0, "0".into()), (1, "1".into())]
+        );
+        assert_eq!(
+            fst.timeline("top.byte"),
+            vec![(0, "00000000".into()), (1, "10110111".into())]
+        );
+        assert_eq!(
+            fst.timeline("top.real"),
+            vec![(0, "r0".into()), (1, "r3.25".into())]
+        );
+        assert_eq!(fst.end_time, 4);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+/// Strings have no fixed maximum length (§6.16). They must not be declared as
+/// 1024-bit vectors and later overflow the writer when a string grows.
+#[test]
+fn variable_length_strings_leave_other_fst_signals_complete() {
+    for length in [0, 1, 127, 128, 129, 200] {
+        let src = format!(
+            r#"
+module top;
+  string text = "";
+  bit flag = 0;
+  logic [130:0] wide = 0;
+  initial begin
+    #1; text = {{{length}{{"A"}}}}; flag = 1; wide = 131'h400000000000000000000000000000001;
+    #1; text = ""; flag = 0;
+    #2; $finish;
+  end
+endmodule
+"#
+        );
+        let fst = dump(&format!("string_{length}"), &src);
+        assert!(
+            !fst.has("top.text"),
+            "string was declared as a fixed vector"
+        );
+        assert_eq!(
+            fst.timeline("top.flag"),
+            vec![(0, "0".into()), (1, "1".into()), (2, "0".into())]
+        );
+        assert_eq!(fst.var("top.wide").length, 131);
+        let wide = &fst.timeline("top.wide")[1].1;
+        assert_eq!(wide.len(), 131);
+        assert!(wide.starts_with('1') && wide.ends_with('1'));
+        assert_eq!(fst.end_time, 4);
+    }
+}
+
+#[test]
+fn string_typedef_and_array_do_not_become_fixed_vectors() {
+    let fst = dump(
+        "string_types",
+        r#"
+module top;
+  typedef string text_t;
+  text_t alias_text = "";
+  string words[2];
+  bit flag = 0;
+  initial begin
+    #1; alias_text = {129{"A"}}; words[0] = {200{"B"}}; words[1] = "short"; flag = 1;
+    #3; $finish;
+  end
+endmodule
+"#,
+    );
+    assert!(!fst.has("top.alias_text"));
+    assert!(!fst.paths().iter().any(|p| p.starts_with("top.words")));
+    assert_eq!(
+        fst.timeline("top.flag"),
+        vec![(0, "0".into()), (1, "1".into())]
+    );
+    assert_eq!(fst.end_time, 4);
+}

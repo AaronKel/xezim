@@ -8110,8 +8110,9 @@ pub struct Simulator {
     /// through `note_elem_width_key`. Built on first use so every
     /// construction path (fresh elaboration, artifact load) is covered.
     elem_dotted_bases: RefCell<Option<HashSet<String>>>,
-    /// Compact per-net trace table: (signal_table index, FST signal id).
-    fst_trace: Vec<(usize, FstSignalId)>,
+    /// Per-net trace: (signal-table index, (FST handle, immutable encoding width)).
+    /// A zero encoding width denotes a real; fixed vectors use at least one.
+    fst_trace: Vec<(usize, (FstSignalId, u32))>,
     /// Signal id → `fst_trace` slots, for the shared incremental dirty-set
     /// change detection (see the `dump_dirty` field docs). Empty ⇒ full scan.
     fst_id_to_trace: Vec<Vec<u32>>,
@@ -104878,8 +104879,8 @@ impl Simulator {
     /// background writer exists to absorb it. This wrapper keeps the
     /// simulator-side call site (the t=0 header snapshot) reading naturally.
     #[inline]
-    fn fst_format_value(val: &Value) -> Vec<u8> {
-        super::fst_sink::fst_format_value(val)
+    fn fst_format_value(val: &Value, width: u32) -> Vec<u8> {
+        super::fst_sink::fst_format_declared_value(val, width)
     }
 
     /// Open the FST file, write the hierarchy (scopes + vars), transition to
@@ -104899,7 +104900,7 @@ impl Simulator {
         // A scope may carry a depth, `LEVEL:SCOPE` (§21.7.1.4: 0 = every
         // level below the scope, N = N levels starting at it). Scopes with the
         // same depth are selected together; the union keeps first-seen order.
-        let sig_names: Vec<String> = if self.fst_scopes.is_empty() {
+        let mut sig_names: Vec<String> = if self.fst_scopes.is_empty() {
             self.dump_signal_names(&self.fst_scopes, 0)
         } else {
             let mut groups: Vec<(u32, Vec<String>)> = Vec::new();
@@ -104921,6 +104922,32 @@ impl Simulator {
             }
             out
         };
+        // The current FST writer only represents fixed-width vectors and
+        // reals. A SystemVerilog string has no fixed maximum length (§6.16);
+        // declaring it as a 1024-bit vector corrupts or aborts a later growth.
+        // Omit unsupported variables explicitly instead of truncating them.
+        let mut omitted_strings = Vec::new();
+        sig_names.retain(|name| {
+            let base = name.split('[').next().unwrap_or(name);
+            let is_string = self.string_signals.contains(name)
+                || self.string_signals.contains(base)
+                || self
+                    .module
+                    .var_decl_types
+                    .get(base)
+                    .is_some_and(|dt| Self::is_string_data_type(&self.resolve_dt(dt)));
+            if is_string {
+                omitted_strings.push(name.clone());
+            }
+            !is_string
+        });
+        if !omitted_strings.is_empty() {
+            eprintln!(
+                "Warning: FST skips unsupported variable-length string variables: {}",
+                omitted_strings.join(", ")
+            );
+        }
+
         eprintln!(
             "[FST] dumping {} signals (scopes={})",
             sig_names.len(),
@@ -105068,19 +105095,19 @@ impl Simulator {
         }
 
         // DFS-emit scopes/vars, collecting (signal_table idx, FstSignalId).
-        let mut trace: Vec<(usize, FstSignalId)> = Vec::new();
+        let mut trace: Vec<(usize, (FstSignalId, u32))> = Vec::new();
         let mut events: Vec<(usize, FstSignalId)> = Vec::new();
         let mut id_to_fst: HashMap<usize, FstSignalId> = HashMap::default();
         fn emit<W: std::io::Write + std::io::Seek>(
             header: &mut FstHeaderWriter<W>,
             name: &str,
             node: &FstNode,
-            trace: &mut Vec<(usize, FstSignalId)>,
+            trace: &mut Vec<(usize, (FstSignalId, u32))>,
             events: &mut Vec<(usize, FstSignalId)>,
             id_to_fst: &mut HashMap<usize, FstSignalId>,
         ) {
             let _ = header.scope(name, "", FstScopeType::Module);
-            for (leaf, _width, tbl_id, signal_type, var_type, is_event) in &node.signals {
+            for (leaf, width, tbl_id, signal_type, var_type, is_event) in &node.signals {
                 // Aliased nets (same signal_table id) reuse one FST id.
                 let alias = id_to_fst.get(tbl_id).copied();
                 let fid = match header.var(
@@ -105098,7 +105125,12 @@ impl Simulator {
                     if *is_event {
                         events.push((*tbl_id, fid));
                     } else {
-                        trace.push((*tbl_id, fid));
+                        let encoding_width = if *var_type == FstVarType::Real {
+                            0
+                        } else {
+                            (*width).max(1)
+                        };
+                        trace.push((*tbl_id, (fid, encoding_width)));
                     }
                 }
             }
@@ -105159,9 +105191,9 @@ impl Simulator {
         // t=0 snapshot + seed prev.
         let _ = body.time_change(self.time);
         let mut prev: Vec<Value> = Vec::with_capacity(trace.len());
-        for (tbl_id, fid) in &trace {
+        for (tbl_id, (fid, width)) in &trace {
             let val = self.dump_value(*tbl_id);
-            let _ = body.signal_change(*fid, &Self::fst_format_value(&val));
+            let _ = body.signal_change(*fid, &Self::fst_format_value(&val, *width));
             prev.push(self.signal_table[*tbl_id].clone());
         }
         for (_, fid) in &events {
@@ -105194,17 +105226,17 @@ impl Simulator {
         // last flush; the full scan is O(all traced nets) per time slot, which
         // on an unscoped dump dominates everything else (see `dump_dirty`).
         // Values are collected UNFORMATTED: the sink's writer thread renders
-        // them (`fst_sink::fst_format_value`). A `Value` <=64 bits wide is
+        // them (`fst_sink::fst_format_declared_value`). A `Value` <=64 bits wide is
         // inline storage, so this clone is a 24-byte memcpy with no allocation
         // — strictly cheaper than the per-bit `Vec<u8>` render it replaces.
-        let mut changes: Vec<(FstSignalId, Value)> = Vec::new();
+        let mut changes: Vec<(FstSignalId, Value, u32)> = Vec::new();
         macro_rules! check_fst_slot {
             ($idx:expr_2021) => {{
                 let idx = $idx;
-                let tbl_id = self.fst_trace[idx].0;
+                let (tbl_id, (fid, width)) = self.fst_trace[idx];
                 let val = &self.signal_table[tbl_id];
                 if self.fst_prev_signals[idx] != *val {
-                    changes.push((self.fst_trace[idx].1, self.dump_value(tbl_id)));
+                    changes.push((fid, self.dump_value(tbl_id), width));
                     self.fst_prev_signals[idx] = val.clone();
                 }
             }};
@@ -105232,8 +105264,8 @@ impl Simulator {
             if fired && self.fst_event_last[idx] != now {
                 self.fst_event_last[idx] = now;
                 let fid = self.fst_events[idx].1;
-                changes.push((fid, Value::ones(1)));
-                changes.push((fid, Value::zero(1)));
+                changes.push((fid, Value::ones(1), 1));
+                changes.push((fid, Value::zero(1), 1));
             }
         }
         if changes.is_empty() {
