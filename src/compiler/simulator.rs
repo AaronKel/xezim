@@ -129677,7 +129677,13 @@ impl Simulator {
         self.current_spec = Some((base.to_string(), sig.to_string()));
         let canon_sig = self.canonicalize_spec_sig(base, sig);
         for (cname, prop, init) in inits {
-            let spec_key = format!("{}#{}::{}", base, canon_sig, prop);
+            // An inherited static belongs to the DECLARING specialization,
+            // so direct and derived references share its single initializer.
+            let declaring_sig = self
+                .ancestor_spec(base, &canon_sig, &cname)
+                .unwrap_or_else(|| canon_sig.clone());
+            self.current_spec = Some((cname.clone(), declaring_sig.clone()));
+            let spec_key = format!("{}#{}::{}", cname, declaring_sig, prop);
             if self.class_statics.contains_key(&spec_key) {
                 continue;
             }
@@ -129701,6 +129707,7 @@ impl Simulator {
             self.class_context_stack.pop();
             self.class_statics.insert(spec_key.clone(), v);
         }
+        self.current_spec = Some((base.to_string(), sig.to_string()));
         let targets: Vec<DataType> = self
             .get_class_def(base)
             .map(|cd| cd.typedef_targets.values().cloned().collect())

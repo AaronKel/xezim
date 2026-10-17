@@ -232,6 +232,17 @@ class named_holder #(int N=1);
   static parameter_target#(.N(N)) inst=new(4);
 endclass
 typedef named_holder#(31) held_named;
+class journal;
+  static int calls=0;
+endclass
+class inherited_base #(int N=1);
+  static function int init(); journal::calls++; return N; endfunction
+  static int token=init();
+endclass
+class inherited_leaf #(int N=1) extends inherited_base#(N);
+endclass
+typedef inherited_leaf#(7) leaf_seven;
+typedef inherited_base#(7) base_seven;
 module top;
   int checked=0;
   int failures=0;
@@ -251,6 +262,8 @@ module top;
     check("recursive static read sees default",ledger::recursive==1 && recursive_int::inst!=null);
     check("type parameter retains target specialization",held_target::inst.payload==26);
     check("named property specialization arguments",held_named::inst.payload==35);
+    check("inherited initializer precedes initial once",journal::calls==1);
+    check("direct and inherited specialization share initializer",base_seven::token==7 && leaf_seven::token==7 && journal::calls==1);
     extra=new(2);
     check("explicit construction and one time statics",ledger::valued==9 && value_two::inst.payload==2 && ledger::typed==2 && ledger::functions==1);
     $display("T|SUMMARY checks=%0d failures=%0d",checked,failures);
@@ -266,11 +279,11 @@ fn static_constructor_specialization_neighbors() {
             .lines()
             .filter(|line| line.starts_with("T|PASS"))
             .count(),
-        10,
+        12,
         "{output}"
     );
     assert!(
-        output.contains("T|SUMMARY checks=10 failures=0"),
+        output.contains("T|SUMMARY checks=12 failures=0"),
         "{output}"
     );
     assert!(!output.contains("T|FAIL"), "{output}");
