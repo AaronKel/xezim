@@ -104977,6 +104977,82 @@ impl Simulator {
     /// the body writer, and emit the t=0 snapshot. Mirrors `vcd_start_dump`:
     /// same scope-filter semantics, tick_s-derived timescale, and net dedup
     /// (aliased signal_table ids share one FST id via the `alias` parameter).
+    /// Resolve string leaves without confusing indexed hierarchy scopes with
+    /// variable selects. Unpacked struct leaves may have no type entry of
+    /// their own, so start at the longest declared prefix and walk members.
+    fn fst_signal_is_string(&self, name: &str) -> bool {
+        fn resolved<'a>(sim: &'a Simulator, mut dt: &'a DataType) -> &'a DataType {
+            for _ in 0..64 {
+                let DataType::TypeReference { name, .. } = dt else {
+                    break;
+                };
+                let Some(next) =
+                    super::elaborate::lookup_scoped_type(name, &sim.module.typedef_types)
+                else {
+                    break;
+                };
+                dt = next;
+            }
+            dt
+        }
+        if self.string_signals.contains(name) {
+            return true;
+        }
+        let mut ends = Vec::new();
+        let mut depth = 0usize;
+        for (i, ch) in name.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                '.' if depth == 0 => ends.push(i),
+                _ => {}
+            }
+        }
+        ends.push(name.len());
+        for end in ends.into_iter().rev() {
+            let prefix = &name[..end];
+            let leaf_start = prefix.rfind('.').map_or(0, |i| i + 1);
+            let Some(leaf) = Self::flat_single_base(&prefix[leaf_start..]) else {
+                continue;
+            };
+            let base = &prefix[..leaf_start + leaf.len()];
+            if end == name.len() && self.string_signals.contains(base) {
+                return true;
+            }
+            let Some(mut dt) = self
+                .module
+                .var_decl_types
+                .get(prefix)
+                .or_else(|| self.module.var_decl_types.get(base))
+            else {
+                continue;
+            };
+            let mut known = true;
+            for (member, _) in Self::split_flat_path(name[end..].trim_start_matches('.')) {
+                if member.is_empty() {
+                    continue;
+                }
+                let DataType::Struct(su) = resolved(self, dt) else {
+                    known = false;
+                    break;
+                };
+                let Some(m) = su
+                    .members
+                    .iter()
+                    .find(|m| m.declarators.iter().any(|d| d.name.name == member))
+                else {
+                    known = false;
+                    break;
+                };
+                dt = &m.data_type;
+            }
+            if known {
+                return Self::is_string_data_type(resolved(self, dt));
+            }
+        }
+        false
+    }
+
     fn fst_start_dump(&mut self) {
         let filename = match self.fst_file.clone() {
             Some(f) => f,
@@ -105018,14 +105094,7 @@ impl Simulator {
         // Omit unsupported variables explicitly instead of truncating them.
         let mut omitted_strings = Vec::new();
         sig_names.retain(|name| {
-            let base = name.split('[').next().unwrap_or(name);
-            let is_string = self.string_signals.contains(name)
-                || self.string_signals.contains(base)
-                || self
-                    .module
-                    .var_decl_types
-                    .get(base)
-                    .is_some_and(|dt| Self::is_string_data_type(&self.resolve_dt(dt)));
+            let is_string = self.fst_signal_is_string(name);
             if is_string {
                 omitted_strings.push(name.clone());
             }

@@ -786,3 +786,60 @@ endmodule
     );
     assert_eq!(fst.end_time, 4);
 }
+
+#[test]
+fn generated_and_aggregate_string_leaves_are_omitted() {
+    let fst = dump(
+        "string_paths",
+        r#"
+package types_pkg;
+  typedef string text_t;
+endpackage
+module top;
+  typedef int text_t;
+  typedef struct { string text; bit flag; } entry_t;
+  typedef struct { entry_t entry; string words[2]; bit flag; } outer_t;
+  entry_t holder;
+  entry_t entries[2];
+  outer_t nested;
+  types_pkg::text_t qualified_text = "";
+  for (genvar g = 0; g < 2; g++) begin : gen
+    typedef string generated_t;
+    generated_t text = "";
+    bit flag = 0;
+    initial begin #1; text = {200{"G"}}; flag = 1; end
+  end
+  bit flag = 0;
+  initial begin
+    #1;
+    holder.text = {200{"H"}}; holder.flag = 1;
+    entries[0].text = {129{"E"}}; entries[1].text = "entry";
+    nested.entry.text = {200{"N"}}; nested.words[0] = {129{"W"}};
+    qualified_text = {200{"P"}}; flag = 1;
+    #3; $finish;
+  end
+endmodule
+"#,
+    );
+    for path in fst.paths() {
+        assert!(
+            !path.ends_with(".text")
+                && !path.ends_with("qualified_text")
+                && !path.contains(".words"),
+            "unsupported string declared: {path}"
+        );
+    }
+    for path in [
+        "top.flag",
+        "top.gen[0].flag",
+        "top.gen[1].flag",
+        "top.holder.flag",
+    ] {
+        assert_eq!(
+            fst.timeline(path),
+            vec![(0, "0".into()), (1, "1".into())],
+            "{path}"
+        );
+    }
+    assert_eq!(fst.end_time, 4);
+}
