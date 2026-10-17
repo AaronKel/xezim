@@ -17,6 +17,17 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   including comparisons against constants, matching four-state execution
   (§11.4.5).
 
+* Class task handles and local variables remain alive across same-slot
+  clocking waits, including guarded waits and cancellation (§14.13).
+  (#335, reported by urbanij)
+* Parameterized class constructor statics initialize once per referenced
+  specialization before initial blocks, with the declared target type and
+  constructor arguments preserved (§6.8, §8.25). (#338, reported by Dragon-Git)
+* FST value records retain their declared widths when runtime storage uses a
+  different width. Unsupported variable-length strings are omitted with a
+  warning naming them, preserving the rest of the waveform (§6.16, §10.8).
+  (#339, reported by Lramseyer)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
