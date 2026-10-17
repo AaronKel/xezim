@@ -89508,16 +89508,16 @@ impl Simulator {
 
     /// Evaluate a hierarchical expression or member chain into a dotted/indexed
     /// signal name string (e.g. `u.ev`, `ua[0].ev`, `m.l.ev`, `vif.ev`).
-    fn hier_expr_to_string(&self, e: &Expression) -> Option<String> {
+    fn hier_expr_to_string<'a>(&'a self, e: &'a Expression) -> Option<std::borrow::Cow<'a, str>> {
+        use std::borrow::Cow;
         match &e.kind {
             ExprKind::Ident(h) => {
                 if h.path.is_empty() {
                     return None;
                 }
-                let mut out = String::new();
                 let first = h.path[0].name.name.as_str();
                 let head = if let Some(bound) = self.iface_alias_for(first) {
-                    bound
+                    Cow::Owned(bound)
                 } else if first == "this" {
                     if let Some(Some(this_h)) = self.this_stack.last() {
                         if h.path.len() >= 2 {
@@ -89525,7 +89525,7 @@ impl Simulator {
                             if let Some((bound, _)) =
                                 self.virtual_iface_bindings.get(&(*this_h, member.clone()))
                             {
-                                out.push_str(bound);
+                                let mut out = bound.clone();
                                 for seg in &h.path[2..] {
                                     out.push('.');
                                     out.push_str(&seg.name.name);
@@ -89535,24 +89535,29 @@ impl Simulator {
                                         let _ = write!(out, "[{}]", i);
                                     }
                                 }
-                                return Some(out);
+                                return Some(Cow::Owned(out));
                             }
                         }
                     }
-                    first.to_string()
+                    Cow::Borrowed(first)
                 } else if let Some(Some(this_h)) = self.this_stack.last() {
                     if let Some((bound, _)) = self
                         .virtual_iface_bindings
                         .get(&(*this_h, first.to_string()))
                     {
-                        bound.clone()
+                        Cow::Borrowed(bound.as_str())
                     } else {
-                        first.to_string()
+                        Cow::Borrowed(first)
                     }
                 } else {
-                    first.to_string()
+                    Cow::Borrowed(first)
                 };
-                out.push_str(&head);
+                // Most probes are ordinary scalar names that are not events.
+                // Borrow them; an actual event result becomes owned below.
+                if h.path.len() == 1 && h.path[0].selects.is_empty() {
+                    return Some(head);
+                }
+                let mut out = head.into_owned();
                 for sel in &h.path[0].selects {
                     let i = self.eval_scalar_self(sel)?;
                     use std::fmt::Write as _;
@@ -89567,7 +89572,7 @@ impl Simulator {
                         let _ = write!(out, "[{}]", i);
                     }
                 }
-                Some(out)
+                Some(Cow::Owned(out))
             }
             ExprKind::MemberAccess { expr, member } => {
                 if let ExprKind::Ident(h) = &expr.kind {
@@ -89577,21 +89582,21 @@ impl Simulator {
                                 .virtual_iface_bindings
                                 .get(&(*this_h, member.name.clone()))
                             {
-                                return Some(bound.clone());
+                                return Some(Cow::Borrowed(bound.as_str()));
                             }
                         }
                     }
                 }
                 let mut base = self.hier_expr_to_string(expr)?;
-                base.push('.');
-                base.push_str(&member.name);
+                base.to_mut().push('.');
+                base.to_mut().push_str(&member.name);
                 Some(base)
             }
             ExprKind::Index { expr, index } => {
                 let mut base = self.hier_expr_to_string(expr)?;
                 let i = self.eval_scalar_self(index)?;
                 use std::fmt::Write as _;
-                let _ = write!(base, "[{}]", i);
+                let _ = write!(base.to_mut(), "[{}]", i);
                 Some(base)
             }
             ExprKind::Paren(inner) => self.hier_expr_to_string(inner),
@@ -89650,10 +89655,12 @@ impl Simulator {
             return Some(scoped);
         }
         if declared(&name) {
-            return Some(name);
+            return Some(name.into_owned());
         }
-        let top_prefix = format!("{}.", self.module.name);
-        if let Some(rest) = name.strip_prefix(&top_prefix) {
+        if let Some(rest) = name
+            .strip_prefix(self.module.name.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
+        {
             if declared(rest) {
                 return Some(rest.to_string());
             }
@@ -89664,9 +89671,9 @@ impl Simulator {
                 return Some(scoped);
             }
         }
-        let canon = self.resolve_event_key(&name);
-        if declared(&canon) {
-            return Some(canon);
+        let canon = Self::resolve_event_key_ref(&self.event_aliases, name.as_ref());
+        if declared(canon) {
+            return Some(canon.to_string());
         }
         None
     }
@@ -175675,3 +175682,6 @@ impl PatCmp {
         }
     }
 }
+
+#[cfg(test)]
+mod event_name_tests;
