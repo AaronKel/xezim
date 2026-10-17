@@ -129551,7 +129551,13 @@ impl Simulator {
         // Queue-based: add to pending queue and process iteratively to
         // avoid deep recursion on the Rust stack when initialization chains
         // dozens of specializations during init.
-        let key = (base.to_string(), self.canonicalize_spec_sig(base, sig));
+        let mut key = (base.to_string(), sig.to_string());
+        if self.initialized_spec_statics.contains(&key) {
+            return;
+        }
+        // Most callers already supply a canonical signature; preserve their
+        // initialized fast return without repeating parameter resolution.
+        key.1 = self.canonicalize_spec_sig(base, sig);
         if self.initialized_spec_statics.contains(&key) {
             return;
         }
