@@ -31,6 +31,14 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   trigger timestamps, reducing name allocation and lookup work while retaining
   event aliasing and scheduling behavior (§15.5).
 
+**Maintenance**
+
+* Expanded regression coverage for default-valued array arguments and nested
+  associative collections, including repeated calls and queue element isolation.
+  (#332 and #333, contributed by Thomasb81)
+* Rust warning cleanup preserves optional native execution and successful
+  two-state dynamic operations. (#334, contributed by Thomasb81)
+
 ### 0.11.2 — class, collection and DPI parity fixes, `-uvm`, crash-safe FST dumps (October 2026)
 
 **Correctness**
