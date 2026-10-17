@@ -7653,6 +7653,8 @@ pub struct Simulator {
     /// collections, keyed by the local's storage; dropped with it (see
     /// `declare_local_coll_array`, `cleanup_dyn_storage`).
     local_coll_elems: HashMap<String, Vec<String>>,
+    /// Declared associative tails of dynamic roots and their scoped rows.
+    dynamic_assoc_dims: HashMap<String, Vec<crate::ast::types::UnpackedDimension>>,
     /// `(callee member, caller member)` collection copy-backs of the dynamic
     /// members of an output/inout/ref struct formal, drained into the call's
     /// queue writebacks (see `bind_unpacked_struct_formal`).
@@ -13288,6 +13290,7 @@ impl Simulator {
             struct_coll_member_len_mask: std::cell::Cell::new(0),
             assoc_elem_colls: HashSet::default(),
             local_coll_elems: HashMap::default(),
+            dynamic_assoc_dims: HashMap::default(),
             pending_struct_coll_wb: Vec::new(),
             pending_ret_struct: None,
             class_member_names_cell: std::cell::OnceCell::new(),
@@ -83630,6 +83633,132 @@ impl Simulator {
         }
     }
 
+    /// The declared associative tail below a dynamic outer array, scoped to
+    /// a local, object property, or unpacked-struct member (§7.4.5).
+    #[cold]
+    fn dynamic_assoc_decl(
+        &self,
+        name: &str,
+    ) -> Option<(DataType, Vec<crate::ast::types::UnpackedDimension>)> {
+        if let Some(tail) = self.dynamic_assoc_dims.get(name) {
+            let dt = self
+                .module
+                .var_decl_types
+                .get(name)
+                .cloned()
+                .or_else(|| self.class_member_coll_type(name).cloned())?;
+            return Some((dt, tail.clone()));
+        }
+        if let Some((h, prop)) = name.split_once('#')
+            && let Ok(handle) = h.parse::<usize>()
+            && let Some(cd) = self.class_prop_declarer(handle, prop)
+            && let Some(tail) = cd.dynamic_assoc_properties.get(prop)
+        {
+            return Some((cd.property_types.get(prop)?.clone(), tail.clone()));
+        }
+        let (dt, dims, selected) = self.struct_member_path_decl(name)?;
+        (selected == 0
+            && matches!(
+                dims.first(),
+                Some(crate::ast::types::UnpackedDimension::Unsized(_))
+            )
+            && dims.len() > 1
+            && dims[1..]
+                .iter()
+                .all(|d| matches!(d, crate::ast::types::UnpackedDimension::Associative { .. })))
+        .then(|| (dt, dims[1..].to_vec()))
+    }
+
+    /// Register a row's declared key type; metadata alone creates no AA entry.
+    #[cold]
+    fn register_dynamic_assoc_tail(
+        &mut self,
+        name: &str,
+        dt: &DataType,
+        tail: &[crate::ast::types::UnpackedDimension],
+    ) {
+        let Some(crate::ast::types::UnpackedDimension::Associative { data_type, .. }) =
+            tail.first()
+        else {
+            return;
+        };
+        let w = resolve_type_width(
+            dt,
+            Some(&self.module.parameters),
+            Some(&self.module.typedefs),
+        )
+        .max(1);
+        self.register_coll_name(
+            name,
+            StructCollKind::Assoc,
+            w,
+            self.string_keyed_dim(&tail[0]),
+        );
+        let (index, key_type) = super::elaborate::assoc_key_type_info(
+            data_type.as_deref(),
+            &self.module.parameters,
+            &self.module.typedefs,
+            &self.module.typedef_types,
+        );
+        if let Some(index) = index {
+            self.module
+                .assoc_index_widths
+                .insert(name.to_string(), index);
+        }
+        if let Some(key_type) = key_type {
+            self.module
+                .assoc_key_type_names
+                .insert(name.to_string(), key_type);
+        }
+        self.module
+            .var_decl_types
+            .insert(name.to_string(), dt.clone());
+        self.dynamic_assoc_dims
+            .insert(name.to_string(), tail.to_vec());
+        if let Some(levels) = super::elaborate::assoc_inner_string_levels(tail) {
+            self.module
+                .assoc_inner_string_keys
+                .insert(name.to_string(), levels);
+        }
+    }
+
+    /// Discard rows outside the retained prefix, including every nested key
+    /// and its runtime metadata. Reallocation must not resurrect old entries.
+    #[cold]
+    fn clear_dynamic_assoc_rows(&mut self, root: &str, keep: u64) {
+        let prefix = format!("{}[", root);
+        let discard = |key: &str| {
+            key.strip_prefix(&prefix)
+                .and_then(|rest| rest.split(']').next())
+                .and_then(|i| i.parse::<u64>().ok())
+                .is_some_and(|i| i >= keep)
+        };
+        for key in self.signals.keys_with_elem_prefix(&prefix) {
+            if discard(&key) {
+                // AA leaves are created in the runtime map, never allocated
+                // compact-table signal IDs; deleting the map entry is final.
+                debug_assert!(!self.signal_name_to_id.contains_key(key.as_str()));
+                self.signals.remove(&key);
+                self.widths.remove(&key);
+            }
+        }
+        self.module
+            .associative_arrays
+            .retain(|key, _| !discard(key));
+        self.module
+            .assoc_index_widths
+            .retain(|key, _| !discard(key));
+        self.module
+            .assoc_key_type_names
+            .retain(|key, _| !discard(key));
+        self.module
+            .assoc_inner_string_keys
+            .retain(|key, _| !discard(key));
+        self.module.assoc_elem_widths.retain(|key, _| !discard(key));
+        self.module.var_decl_types.retain(|key, _| !discard(key));
+        self.dynamic_assoc_dims.retain(|key, _| !discard(key));
+    }
+
     /// §7.5.1: size the dynamic array stored at `name` to `new[n_expr]`,
     /// copying min(n, src.size()) elements from `src_expr` (`new[n](src)`)
     /// and giving the rest the element type's default.
@@ -83660,6 +83789,35 @@ impl Simulator {
             ExprKind::MemberAccess { .. } => self.expr_assoc_name(e),
             _ => None,
         });
+        if let Some((dt, tail)) = self.dynamic_assoc_decl(name) {
+            self.module
+                .var_decl_types
+                .insert(name.to_string(), dt.clone());
+            self.dynamic_assoc_dims
+                .insert(name.to_string(), tail.clone());
+            let keep = src
+                .as_deref()
+                .map_or(0, |sn| self.get_queue_size(sn).min(n));
+            // A self-resize keeps its surviving rows. Every other constructor
+            // replaces the destination, including nested associative entries.
+            self.clear_dynamic_assoc_rows(
+                name,
+                if src.as_deref() == Some(name) {
+                    keep
+                } else {
+                    0
+                },
+            );
+            for i in 0..n {
+                let row = format!("{}[{}]", name, i);
+                self.register_dynamic_assoc_tail(&row, &dt, &tail);
+                if i < keep && src.as_deref() != Some(name) {
+                    self.queue_copy_elem(src.as_deref().unwrap(), i, name, i);
+                }
+            }
+            self.set_queue_size(name, n);
+            return;
+        }
         let keep = match &src {
             Some(sn) => self.get_queue_size(sn).min(n),
             None => 0,
@@ -88968,6 +89126,32 @@ impl Simulator {
         lifetime: Option<crate::ast::types::Lifetime>,
     ) -> bool {
         use crate::ast::types::UnpackedDimension as UD;
+        if matches!(dims.first(), Some(UD::Unsized(_)))
+            && dims.len() > 1
+            && dims[1..]
+                .iter()
+                .all(|d| matches!(d, UD::Associative { .. }))
+        {
+            let name = if matches!(lifetime, Some(crate::ast::types::Lifetime::Static)) {
+                d.name.name.clone()
+            } else {
+                self.declare_local_dyn(&d.name.name)
+            };
+            self.register_coll_name(&name, StructCollKind::Dynamic, w, false);
+            self.module
+                .var_decl_types
+                .insert(name.clone(), data_type.clone());
+            self.dynamic_assoc_dims
+                .insert(name.clone(), dims[1..].to_vec());
+            self.clear_dynamic_assoc_rows(&name, 0);
+            self.set_queue_size(&name, 0);
+            if let Some(init) = &d.init
+                && let Some((n, src)) = Self::sized_new_parts(init)
+            {
+                self.fill_sized_new(&name, n, src);
+            }
+            return true;
+        }
         let shape: Option<Vec<(i64, i64)>> = dims[..k]
             .iter()
             .map(|dim| match dim {
@@ -108892,6 +109076,10 @@ impl Simulator {
             self.signals.remove(&size_key);
             self.widths.remove(&size_key);
         }
+        if self.dynamic_assoc_dims.contains_key(key) {
+            self.clear_dynamic_assoc_rows(key, 0);
+            self.dynamic_assoc_dims.remove(key);
+        }
         self.module.dynamic_arrays.remove(key);
         self.module.arrays.remove(key);
         self.module.arrays_2d.remove(key);
@@ -110319,10 +110507,27 @@ impl Simulator {
             let mut key = name.clone();
             for (n, idx) in rev[..=j].iter().rev().enumerate() {
                 let kv = self.eval_expr(idx);
-                let ks = self.assoc_key_str(&name, &kv);
+                let declared_tail = if self.dynamic_assoc_dims.is_empty() {
+                    None
+                } else {
+                    self.dynamic_assoc_dims.get(&key).cloned()
+                };
+                let ks =
+                    self.assoc_key_str(if declared_tail.is_some() { &key } else { &name }, &kv);
+                let prior = declared_tail.as_ref().map(|_| key.clone());
                 key.push('[');
                 key.push_str(&ks);
                 key.push(']');
+                if let Some(tail) = declared_tail.filter(|tail| tail.len() > 1) {
+                    if let Some(dt) = self
+                        .module
+                        .var_decl_types
+                        .get(prior.as_deref().unwrap())
+                        .cloned()
+                    {
+                        self.register_dynamic_assoc_tail(&key, &dt, &tail[1..]);
+                    }
+                }
                 if n == 0
                     && j > 0
                     && (self.module.dynamic_arrays.contains(&key)
@@ -118842,6 +119047,18 @@ impl Simulator {
         // §7.4.5: the member itself (`s.q`), or one ELEMENT of a fixed
         // array of collections (`s.sp[1]` of `T sp[4][$]`): every
         // dimension but the trailing collection one selected.
+        if matches!(
+            dims.first(),
+            Some(crate::ast::types::UnpackedDimension::Unsized(_))
+        ) && dims.len() > 1
+            && nidx < dims.len()
+            && dims[1..]
+                .iter()
+                .all(|d| matches!(d, crate::ast::types::UnpackedDimension::Associative { .. }))
+        {
+            let kind = Self::coll_kind_of(&dims[nidx..=nidx])?;
+            return Some((kind, mdt, self.string_keyed_dim(&dims[nidx])));
+        }
         let n = dims.len();
         if n == 0 {
             return None;
@@ -128404,6 +128621,14 @@ impl Simulator {
             }
         }
         if bm == BuiltinM::Delete {
+            if args.is_empty()
+                && self.dynamic_assoc_dims.contains_key(obj_name)
+                && self.module.dynamic_arrays.contains(obj_name)
+            {
+                self.clear_dynamic_assoc_rows(obj_name, 0);
+                self.set_queue_size(obj_name, 0);
+                return Some(Value::zero(32));
+            }
             if self.is_associative_array(obj_name) {
                 if let Some(arg) = args.first() {
                     let key = self.eval_expr(arg);
@@ -153424,6 +153649,12 @@ impl Simulator {
             };
             if let Some((shape, _, _)) = cd.array_of_coll_properties.get(&member) {
                 outer_len = Some(shape.len());
+                break;
+            }
+            if !cd.dynamic_assoc_properties.is_empty()
+                && cd.dynamic_assoc_properties.contains_key(&member)
+            {
+                outer_len = Some(1);
                 break;
             }
             cur_cls = cd.extends.clone();

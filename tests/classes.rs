@@ -747,3 +747,6 @@ mod member_shadows_package_var;
 
 #[path = "classes/parameterized_static_constructor.rs"]
 mod parameterized_static_constructor;
+
+#[path = "classes/dynamic_outer_assoc.rs"]
+mod dynamic_outer_assoc;
