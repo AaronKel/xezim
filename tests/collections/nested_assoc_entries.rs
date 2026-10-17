@@ -22,8 +22,8 @@
 use xezim::simulate;
 
 /// The full issue matrix: fixed outer, dynamic outer, and associative outer,
-/// each with `[string][string]` elements written/read under string AND int
-/// inner keys, plus the one-level-assoc control (`mem[2][string]`).
+/// each with `[string][string]` elements written/read under string keys,
+/// plus the one-level-assoc control (`mem[2][string]`).
 const NESTED: &str = r#"
 module tb;
   int one_fixed [2][string];
@@ -94,19 +94,52 @@ fn two_level_assoc_under_non_assoc_outer_dimension_creates_entries() {
     );
 }
 
-/// Two-level associative array nested under a QUEUE outer dimension — the
-/// remaining non-associative container. `q[0][k1][k2] = v` must create the
-/// outer entry and the inner element.
-const QUEUE_OUTER: &str = r#"
+/// A separately sized dynamic outer dimension preserves the original
+/// one-element fixture and checks the associative `num()` method.
+const DYNAMIC_OUTER: &str = r#"
 module tb;
   int q [][string][string];
   int ok;
   initial begin
     q = new[1];                            // -> q[0] is the assoc sub-array
     q[0]["p"]["q"] = 7;
-    // a second element, to ensure each index registers independently
+    // The dynamic element must expose its associative entry.
     if (q[0].num() == 0) ok = 0;
     ok = (q[0]["p"]["q"] == 7) && (q[0].num() == 1);
+  end
+endmodule
+"#;
+
+#[test]
+fn two_level_assoc_under_dynamic_outer_creates_entries() {
+    assert_eq!(
+        ok_flag(DYNAMIC_OUTER),
+        1,
+        "a two-level associative array nested under a dynamic outer dimension \
+         did not create entries on write"
+    );
+}
+
+/// A true queue uses `[$]` and grows through `push_back`. Two independently
+/// populated rows must retain their values without changing the copied source.
+const QUEUE_OUTER: &str = r#"
+module tb;
+  int q[$][string][string];
+  int empty_row[string][string];
+  int ok;
+  initial begin
+    q.push_back(empty_row);
+    q.push_back(empty_row);
+    q[0]["A"]["B"] = 7;
+    q[1]["A"]["B"] = 9;
+    ok = (q.size() == 2)
+      && (q[0].size() == 1)
+      && (q[1].size() == 1)
+      && (q[0].exists("A"))
+      && (q[1]["A"].exists("B"))
+      && (q[0]["A"]["B"] == 7)
+      && (q[1]["A"]["B"] == 9)
+      && (empty_row.size() == 0);
   end
 endmodule
 "#;
@@ -116,7 +149,6 @@ fn two_level_assoc_under_queue_outer_creates_entries() {
     assert_eq!(
         ok_flag(QUEUE_OUTER),
         1,
-        "a two-level associative array nested under a queue outer dimension \
-         did not create entries on write"
+        "a queue of associative rows lost entries or shared row storage"
     );
 }
