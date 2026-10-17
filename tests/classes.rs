@@ -753,3 +753,6 @@ mod dynamic_outer_assoc;
 
 #[path = "classes/constraint_inside_cast_union.rs"]
 mod constraint_inside_cast_union;
+
+#[path = "classes/string_frame_teardown.rs"]
+mod string_frame_teardown;

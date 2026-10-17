@@ -166727,6 +166727,7 @@ impl Simulator {
                 // call-count tier: compiling every task on its first call
                 // paid a whole plan + compile for each of the many tasks a
                 // UVM run calls only a few times.
+                let mut ast_string_cleanup = None;
                 if let Some(cval) = compiled_methods_enabled()
                     .then(|| {
                         self.try_run_compiled_method(
@@ -166823,6 +166824,35 @@ impl Simulator {
                     if heat_key.is_some() {
                         self.compiled_method_heat_stack.pop();
                     }
+                    ast_string_cleanup = Some((
+                        frame_string_signals,
+                        frame_string_props,
+                        frame_string_prop_mask,
+                        frame_string_prop_more,
+                    ));
+                } // end else: AST interpreter path
+                if let Some(prev) = _prev_meth {
+                    CUR_METHOD_HASH.store(prev, Ordering::Relaxed);
+                }
+                if let Some(prev) = _prev_compiled {
+                    CUR_METHOD_COMPILED.store(prev, Ordering::Relaxed);
+                }
+                // Write back any static locals declared in this body before
+                // the locals frame is dropped.
+                self.sync_static_locals();
+                self.fn_ret_collection_stack.pop();
+                // Declaration snapshots describe this activation's string
+                // flags. Restore them before reinstating the caller's flags
+                // (§6.21/§23.8), or an integral shadow can erase the caller's
+                // string classification after it has already been restored.
+                self.close_decl_shadow_frame();
+                if let Some((
+                    frame_string_signals,
+                    frame_string_props,
+                    frame_string_prop_mask,
+                    frame_string_prop_more,
+                )) = ast_string_cleanup
+                {
                     for n in &frame_string_signals {
                         self.string_signals.remove(n);
                     }
@@ -166840,25 +166870,7 @@ impl Simulator {
                             self.string_signals.insert(n);
                         }
                     }
-                } // end else: AST interpreter path
-                if let Some(prev) = _prev_meth {
-                    CUR_METHOD_HASH.store(prev, Ordering::Relaxed);
                 }
-                if let Some(prev) = _prev_compiled {
-                    CUR_METHOD_COMPILED.store(prev, Ordering::Relaxed);
-                }
-                // Write back any static locals declared in this body before
-                // the locals frame is dropped.
-                self.sync_static_locals();
-                self.fn_ret_collection_stack.pop();
-                // §23.8: stop leaking this frame's string formal names into
-                // the global set now that the body is done (see
-                // frame_string_signals).
-                // §6.21/§23.8: also restore the frame-scoped snapshot so this
-                // method's non-string locals can't leak a `remove` (parking
-                // mirrors the free-function path: the frame is torn down and
-                // re-entered on resume, re-pushing the snapshot).
-                self.close_decl_shadow_frame();
                 self.restore_spec_pooled(saved_spec);
                 if let Some(prev) = saved_resolve_hint {
                     *self.name_resolve_hint.borrow_mut() = prev;
