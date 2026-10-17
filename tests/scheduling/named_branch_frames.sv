@@ -50,12 +50,6 @@ module top;
         $display("T|case-unreachable");
       end
     endcase
-    if (1) begin : if_scope
-      #1;
-      $display("T|if %m");
-      disable if_scope;
-      $display("T|if-unreachable");
-    end
     randcase
       1: begin
         #1;

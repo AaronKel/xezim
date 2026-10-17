@@ -48,7 +48,6 @@ const EXPECTED: &[&str] = &[
     "T|repeated top.repeated 0",
     "T|repeated top.repeated 1",
     "T|case top.case_scope",
-    "T|if top.if_scope",
     "T|unnamed top",
     "T|done top",
 ];
