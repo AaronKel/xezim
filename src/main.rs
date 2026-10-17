@@ -3088,7 +3088,10 @@ suppressed but the explicit SDF annotation still applies."
             .as_ref()
             .map(|v| v.iter().take(8).copied().collect::<Vec<u8>>())
         {
-            if head.len() == 8 && &head[..] == xezim::XEZIM_BYTECODE_MAGIC {
+            // Recognize the artifact family before checking its version.
+            // The loader must diagnose an older/newer layout rather than
+            // send binary payload bytes to the source parser.
+            if head.len() == 8 && head[..7] == xezim::XEZIM_BYTECODE_MAGIC[..7] {
                 match xezim::read_compiled(sf) {
                     Ok(Some(elab)) => {
                         chatter_out!("Loaded compiled: {}", sf);

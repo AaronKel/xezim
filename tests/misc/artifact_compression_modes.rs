@@ -162,25 +162,38 @@ endmodule
     }
     // The previous serialized class layout must be rejected at the header,
     // before the reader can interpret its payload with missing dimensions.
-    let mut bytes = std::fs::read(dir.join("design_none.xez")).unwrap();
-    bytes[7] = 0x22;
-    let stale = dir.join("stale.xez");
-    std::fs::write(&stale, bytes).unwrap();
-    let output = Command::new(bin)
-        .arg("--simulate")
-        .arg(stale)
-        .output()
-        .unwrap();
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        text.contains("incompatible xezim artifact version")
-            && text.contains("recompile with current xezim"),
-        "{text}"
-    );
-    assert!(!text.contains("T|"), "stale artifact executed: {text}");
+    let current = xezim::XEZIM_BYTECODE_MAGIC[7];
+    for mode in ["none", "3"] {
+        for version in [current.wrapping_sub(1), current.wrapping_add(1)] {
+            let mut bytes = std::fs::read(dir.join(format!("design_{mode}.xez"))).unwrap();
+            bytes[7] = version;
+            let stale = dir.join(format!("stale_{mode}_{version}.xez"));
+            std::fs::write(&stale, bytes).unwrap();
+            let output = Command::new(bin)
+                .arg("--simulate")
+                .arg(stale)
+                .output()
+                .unwrap();
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "incompatible artifact did not exit cleanly: {text}"
+            );
+            assert!(
+                text.contains("incompatible xezim artifact version")
+                    && text.contains("recompile with current xezim"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("T|") && !text.contains("panicked"),
+                "incompatible artifact reached execution or parsing: {text}"
+            );
+        }
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
