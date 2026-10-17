@@ -174388,6 +174388,9 @@ fn vm_range_select(v: &Value, left: usize, right: usize) -> Option<(u64, u64, u3
 }
 
 #[cfg(test)]
+mod two_state_dynamic_tests;
+
+#[cfg(test)]
 mod vm_fastpath_tests {
     use super::*;
 
