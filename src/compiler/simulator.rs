@@ -276,34 +276,15 @@ fn method_tier_threshold() -> u32 {
     })
 }
 
-/// Loops carried this gate: the loop-heat boost (see the tier gate below) is
-/// OFF by default so the admission behaviour on the reference workloads stays
-/// byte-for-byte the pure call-count tier (flat within ±0.1%). Setting
-/// `XEZIM_METHOD_TIER` to *any* explicit value opts the boost in: a wait-free
-/// loop-candidate method is then compiled as soon as its MEASURED loop
-/// iterations (back-edges run on the AST interpreter) reach the threshold —
-/// not on its first call, and not merely because its body structurally
-/// contains a loop. The call-count tier still uses the parsed value, so
-/// `XEZIM_METHOD_TIER` remains the single threshold control.
+/// Explicit `XEZIM_METHOD_TIER` enables measured loop heat in addition to
+/// call-count tiering. AST loops publish heat at exit; the next method call
+/// attempts compilation after that heat reaches the threshold. Unsupported
+/// bodies remain interpreted, and an unset tier retains call-count admission.
 #[inline]
 fn method_boost_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("XEZIM_METHOD_TIER").is_some())
 }
-
-// class-perf loop-heat boost: the adaptive tier counter measures heat by
-// *number of calls* (a method compiles after `HOT_CALLS`). That is blind to
-// heat that lives in the *iterations of a single call* — a task or function
-// invoked exactly once that owns a 5M-iteration `for` loop never graduates,
-// so every iteration runs on the proven-but-slow AST interpreter. This
-// boost treats a body whose STATEMENTS contain a loop as hot on first call
-// (bypasses the counter) provided it is wait-free (see the tier gate). It
-// is a GENERIC SystemVerilog rule — it predicates on loop statements, not
-// on any UVM/library shape. Correctness is preserved: the boost only
-// changes WHETHER compilation is *attempted*; if `BytecodeCompiler` cannot
-// lower a plan the body runs on the AST interpreter exactly as before.
-// It is opt-in: gated on an explicitly-set `XEZIM_METHOD_TIER` (see
-// `method_boost_enabled`).
 
 /// Compiler salt for the persistent compiled-method cache (XEZIM_METHOD_CACHE).
 /// Bump on ANY change that can alter the compiled instructions or the
