@@ -83656,6 +83656,9 @@ impl Simulator {
         {
             return Some((cd.property_types.get(prop)?.clone(), tail.clone()));
         }
+        if !name.contains('.') {
+            return None;
+        }
         let (dt, dims, selected) = self.struct_member_path_decl(name)?;
         (selected == 0
             && matches!(
