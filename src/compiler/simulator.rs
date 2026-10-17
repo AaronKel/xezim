@@ -28754,90 +28754,92 @@ impl Simulator {
     /// register index the lowered stream names.
     #[inline(never)]
     unsafe fn ts_exec_dyn(&mut self, insn: &super::bytecode::TsInsn, regs: *mut u64) -> u8 {
-        use super::bytecode::TsInsn;
-        match insn {
-            // 1 = bail: the four-state re-run takes the interrupt at the
-            // same back-edge (`Insn::Jump`'s poll in `exec_insns`).
-            TsInsn::LoopPoll => u8::from(loop_stop_requested()),
-            TsInsn::SigRangeDyn {
-                d,
-                sig,
-                i,
-                w,
-                sw,
-                mask,
-            } => match self.ts_sig_range_dyn(*sig, unsafe { *regs.add(*i as usize) }, *w, *sw) {
-                TsDyn::Ok(v) => {
-                    unsafe { *regs.add(*d as usize) = v & mask };
-                    0
+        unsafe {
+            use super::bytecode::TsInsn;
+            match insn {
+                // 1 = bail: the four-state re-run takes the interrupt at the
+                // same back-edge (`Insn::Jump`'s poll in `exec_insns`).
+                TsInsn::LoopPoll => u8::from(loop_stop_requested()),
+                TsInsn::SigRangeDyn {
+                    d,
+                    sig,
+                    i,
+                    w,
+                    sw,
+                    mask,
+                } => match self.ts_sig_range_dyn(*sig, *regs.add(*i as usize), *w, *sw) {
+                    TsDyn::Ok(v) => {
+                        *regs.add(*d as usize) = v & mask;
+                        0
+                    }
+                    TsDyn::Oob => 1,
+                    TsDyn::X => 2,
+                },
+                TsInsn::RangeStoreDyn {
+                    sig,
+                    i,
+                    s,
+                    w,
+                    sw,
+                    mask,
+                } => {
+                    let (lo, v) = (*regs.add(*i as usize), *regs.add(*s as usize) & mask);
+                    (!self.ts_range_store_dyn(*sig, lo, v, *w, *sw, false)) as u8
                 }
-                TsDyn::Oob => 1,
-                TsDyn::X => 2,
-            },
-            TsInsn::RangeStoreDyn {
-                sig,
-                i,
-                s,
-                w,
-                sw,
-                mask,
-            } => {
-                let (lo, v) = unsafe { (*regs.add(*i as usize), *regs.add(*s as usize) & mask) };
-                (!self.ts_range_store_dyn(*sig, lo, v, *w, *sw, false)) as u8
-            }
-            TsInsn::RangeStoreNbaDyn {
-                sig,
-                i,
-                s,
-                w,
-                sw,
-                mask,
-            } => {
-                let (lo, v) = unsafe { (*regs.add(*i as usize), *regs.add(*s as usize) & mask) };
-                (!self.ts_range_store_dyn(*sig, lo, v, *w, *sw, true)) as u8
-            }
-            TsInsn::WNbaFromElem(op) => {
-                let (iv, ix) = self.signal_table[op.idx_sig as usize].raw_bits();
-                if ix != 0 {
-                    // §11.5.1: an x/z index reads an all-x element.
-                    let mut v = Value::new(op.w.max(1));
+                TsInsn::RangeStoreNbaDyn {
+                    sig,
+                    i,
+                    s,
+                    w,
+                    sw,
+                    mask,
+                } => {
+                    let (lo, v) = (*regs.add(*i as usize), *regs.add(*s as usize) & mask);
+                    (!self.ts_range_store_dyn(*sig, lo, v, *w, *sw, true)) as u8
+                }
+                TsInsn::WNbaFromElem(op) => {
+                    let (iv, ix) = self.signal_table[op.idx_sig as usize].raw_bits();
+                    if ix != 0 {
+                        // §11.5.1: an x/z index reads an all-x element.
+                        let mut v = Value::new(op.w.max(1));
+                        v.is_signed = false;
+                        self.ts_store_nba_val(op.dst as usize, v);
+                        return 0;
+                    }
+                    let i = iv as i64;
+                    if i < op.lo || i > op.hi {
+                        return 1;
+                    }
+                    let eid = op.first as usize + (i - op.lo) as usize;
+                    let mut v = self.signal_table[eid].clone();
                     v.is_signed = false;
                     self.ts_store_nba_val(op.dst as usize, v);
-                    return 0;
+                    0
                 }
-                let i = iv as i64;
-                if i < op.lo || i > op.hi {
-                    return 1;
+                TsInsn::SaveSigW { sig } => {
+                    // One entry per 64-bit word, then a marker (`TS_SAVE_WIDE`
+                    // in the id, word count in `v`, `u64::MAX` in `x`) that
+                    // `ts_restore_saved` meets first. Rides the narrow save list
+                    // so a hazard on a wide signal adds nothing per attempt.
+                    let id = *sig as usize;
+                    let w = self.signal_widths[id] as usize;
+                    let nw = w.div_ceil(64);
+                    for i in 0..nw {
+                        let n = (w - i * 64).min(64);
+                        let (wv, wx) =
+                            Self::raw_bits_slice(&self.signal_table[id], (i * 64) as u16, n as u16);
+                        self.ts_save_list.push((*sig | TS_SAVE_WIDE, wv, wx));
+                    }
+                    self.ts_save_list
+                        .push((*sig | TS_SAVE_WIDE, nw as u64, u64::MAX));
+                    0
                 }
-                let eid = op.first as usize + (i - op.lo) as usize;
-                let mut v = self.signal_table[eid].clone();
-                v.is_signed = false;
-                self.ts_store_nba_val(op.dst as usize, v);
-                0
-            }
-            TsInsn::SaveSigW { sig } => {
-                // One entry per 64-bit word, then a marker (`TS_SAVE_WIDE`
-                // in the id, word count in `v`, `u64::MAX` in `x`) that
-                // `ts_restore_saved` meets first. Rides the narrow save list
-                // so a hazard on a wide signal adds nothing per attempt.
-                let id = *sig as usize;
-                let w = self.signal_widths[id] as usize;
-                let nw = w.div_ceil(64);
-                for i in 0..nw {
-                    let n = (w - i * 64).min(64);
-                    let (wv, wx) =
-                        Self::raw_bits_slice(&self.signal_table[id], (i * 64) as u16, n as u16);
-                    self.ts_save_list.push((*sig | TS_SAVE_WIDE, wv, wx));
+                TsInsn::RangeFillXW { sig, hi, lo, v } => {
+                    self.ts_wide_range_fill_xz(*sig as usize, *lo, *hi, *v);
+                    0
                 }
-                self.ts_save_list
-                    .push((*sig | TS_SAVE_WIDE, nw as u64, u64::MAX));
-                0
+                _ => 0,
             }
-            TsInsn::RangeFillXW { sig, hi, lo, v } => {
-                self.ts_wide_range_fill_xz(*sig as usize, *lo, *hi, *v);
-                0
-            }
-            _ => 0,
         }
     }
 
