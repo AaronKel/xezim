@@ -29,13 +29,9 @@
 //! `[n-1:0]`, packed arrays of structs, selects out of range and with x
 //! indices, a 2-state local, an output formal, a return value, a block
 //! variable, static subroutines, and a function called 5,000 times. Every
-//! expected value follows the LRM. Verilator 5.038 passes every check but
-//! "no element" and "partly out-of-range read": it has no x, wraps an
-//! out-of-range packed index on a write, and reads a part-select partly out
-//! of range as 0, so those two rest on §7.4.6 (a write with an invalid index
-//! does nothing) and §11.5.1. The design runs with the default method
-//! tiering, with every function compiled on its first call, and with none
-//! compiled.
+//! expected value is confirmed by the reference simulator, including X/Z and
+//! partially out-of-range accesses. The design runs with default method
+//! tiering, eager compilation, and interpreted methods.
 
 use std::process::Command;
 
@@ -303,7 +299,7 @@ const SRC: &str = r##"module top;
 endmodule
 "##;
 
-fn run(env: &[(&str, &str)]) -> String {
+fn run_source(source: &str, env: &[(&str, &str)]) -> String {
     // Unique per call: tests run as parallel threads of one process.
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -314,7 +310,7 @@ fn run(env: &[(&str, &str)]) -> String {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("top.sv");
-    std::fs::write(&path, SRC).unwrap();
+    std::fs::write(&path, source).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_xezim"))
         .args([
             "--simulate",
@@ -326,6 +322,11 @@ fn run(env: &[(&str, &str)]) -> String {
         .envs(env.iter().copied())
         .output()
         .expect("run xezim");
+    assert!(
+        out.status.success(),
+        "simulator failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
@@ -333,7 +334,7 @@ fn run(env: &[(&str, &str)]) -> String {
 }
 
 fn check(env: &[(&str, &str)]) {
-    let text = run(env);
+    let text = run_source(SRC, env);
     assert!(
         text.contains("ALL PASS") && !text.contains("FAIL"),
         "nested selects of packed locals ({:?}):\n{}",
@@ -355,4 +356,28 @@ fn packed_local_nested_selects_compiled_first_call() {
 #[test]
 fn packed_local_nested_selects_interpreted() {
     check(&[("XEZIM_COMPILE_METHODS", "0")]);
+}
+
+// IEEE 1800-2023 §6.21, §7.4.1, §10.4.2: live storage and region ordering.
+fn packed_local_static_neighbors_check(env: &[(&str, &str)]) {
+    let text = run_source(
+        include_str!("../issue_cases/pr369_static_neighbors.sv"),
+        env,
+    );
+    assert!(
+        text.contains("ALL PASS") && !text.contains("FAIL"),
+        "{text}"
+    );
+}
+#[test]
+fn packed_local_static_neighbors() {
+    packed_local_static_neighbors_check(&[]);
+}
+#[test]
+fn packed_local_static_neighbors_eager() {
+    packed_local_static_neighbors_check(&[("XEZIM_METHOD_TIER", "0")]);
+}
+#[test]
+fn packed_local_static_neighbors_interpreted() {
+    packed_local_static_neighbors_check(&[("XEZIM_COMPILE_METHODS", "0")]);
 }

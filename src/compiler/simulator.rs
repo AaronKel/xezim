@@ -71623,9 +71623,6 @@ impl Simulator {
         &self,
         e: &'e Expression,
     ) -> Option<(&'e Expression, &'e str, Vec<PendingSel<'e>>)> {
-        if !Self::select_of_select(e) {
-            return None;
-        }
         let mut steps = Vec::new();
         let mut cur = e;
         loop {
@@ -71659,7 +71656,10 @@ impl Simulator {
         let ExprKind::Ident(h) = &cur.kind else {
             return None;
         };
-        if steps.len() < 2 || h.root.is_some() || h.path.len() != 1 || !h.path[0].selects.is_empty()
+        if steps.is_empty()
+            || h.root.is_some()
+            || h.path.len() != 1
+            || !h.path[0].selects.is_empty()
         {
             return None;
         }
@@ -71700,12 +71700,11 @@ impl Simulator {
             return None;
         }
         let dt = self.module.var_decl_types.get(name)?;
-        let (hops, total) = self.packed_hops(dt, &steps)?;
+        let (hops, total, two) = self.packed_hops(dt, &steps)?;
         let cur = self.local_stack.last()?.get(name)?;
         if cur.is_real || cur.width != total {
             return None;
         }
-        let two = super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types);
         Some((root, name, steps, hops, two))
     }
 
@@ -71824,7 +71823,11 @@ impl Simulator {
     /// dimension (a packed struct with none left is a vector of its bits), a
     /// member moves to its field. Also returns the width of `dt`. `None`
     /// when the type has no packed layout or a step does not fit it.
-    fn packed_hops(&self, dt: &DataType, steps: &[PendingSel]) -> Option<(Vec<PackedHop>, u32)> {
+    fn packed_hops(
+        &self,
+        dt: &DataType,
+        steps: &[PendingSel],
+    ) -> Option<(Vec<PackedHop>, u32, bool)> {
         fn width(dims: &[(i64, i64)], bw: u32) -> Option<u32> {
             dims.iter().try_fold(bw, |w, &(l, r)| {
                 w.checked_mul(u32::try_from((l - r).unsigned_abs() + 1).ok()?)
@@ -71832,6 +71835,7 @@ impl Simulator {
         }
         let (mut dims, mut agg, mut bw) = self.packed_shape(dt)?;
         let total = width(&dims, bw)?;
+        let mut two = super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types);
         let mut hops = Vec::with_capacity(steps.len());
         let mut d = 0usize;
         for step in steps {
@@ -71868,11 +71872,15 @@ impl Simulator {
                         return None;
                     }
                     hops.push(PackedHop::Field(off));
+                    two = super::elaborate::is_type_two_state_resolved(
+                        mdt,
+                        &self.module.typedef_types,
+                    );
                     (dims, agg, bw, d) = (md, ma, mb, 0);
                 }
             }
         }
-        Some((hops, total))
+        Some((hops, total, two))
     }
 
     /// Evaluate the selects `steps` placed by `packed_hops`, in order. Returns
@@ -71982,7 +71990,7 @@ impl Simulator {
     /// value. `None` when `lhs` is not such a select (the arms below take
     /// it); `Some(false)` when it names no bits.
     fn frame_packed_select_write(&mut self, lhs: &Expression, val: &Value) -> Option<bool> {
-        let (_, name, steps, hops, two) = self.frame_packed_target(lhs)?;
+        let (root, _, steps, hops, two) = self.frame_packed_target(lhs)?;
         let (w, sel) = self.packed_hops_eval(&hops, &steps);
         let Some((lsb, src, len)) = sel else {
             return Some(false);
@@ -71996,14 +72004,12 @@ impl Simulator {
         if two && v.has_xz() {
             v = v.to_two_state();
         }
-        let slot = self.local_stack.last_mut()?.get_mut(name)?;
-        let mut changed = false;
-        for b in 0..len as usize {
-            let (at, nb) = (lsb as usize + b, v.get_bit(src as usize + b));
-            if slot.get_bit(at) != nb {
-                slot.set_bit(at, nb);
-                changed = true;
-            }
+        // §6.21: selected stores use the same live cell as whole stores.
+        // A frame snapshot can be stale after a recursive static-local write.
+        let mut stored = self.eval_expr(root);
+        let changed = stored.copy_bits_from(lsb as usize, &v, src as usize, len as usize);
+        if changed {
+            self.assign_value(root, &stored);
         }
         Some(changed)
     }
@@ -72133,8 +72139,12 @@ impl Simulator {
             }
             DataType::IntegerVector { .. }
             | DataType::IntegerAtom { .. }
-            | DataType::Implicit { .. }
-            | DataType::Enum(_) => {}
+            | DataType::Implicit { .. } => {}
+            DataType::Enum(_) => {
+                // §6.19: an enum's base declaration supplies its bit labels,
+                // including a typedef base and an implicit int base.
+                dimensions = self.packed_shape(dt)?.0;
+            }
             _ => return None,
         }
         Some((element, dimensions, width))
@@ -72515,6 +72525,21 @@ impl Simulator {
         }
     }
 
+    fn packed_local_static_key(&self, name: &str) -> Option<String> {
+        if self.in_const_param_eval || !self.static_local_names.contains(name) {
+            return None;
+        }
+        let key = self.static_local_key_for(name)?;
+        self.static_local_keys.contains(&key).then_some(key)
+    }
+
+    fn packed_local_value(&self, name: &str) -> Option<Value> {
+        if let Some(key) = self.packed_local_static_key(name) {
+            return self.static_local_vars.get(&key).cloned();
+        }
+        self.get_local_or_signal(name)
+    }
+
     fn read_declared_packed_access(&mut self, expr: &Expression) -> Option<Value> {
         let access = self.declared_packed_access(expr)?;
         if access.unpacked != 0 || access.width == 0 {
@@ -72523,7 +72548,7 @@ impl Simulator {
         let value = if let Some((class, spec, member)) = &access.static_target {
             self.static_read_in(class, spec.clone(), member)?
         } else {
-            self.get_local_or_signal(&access.storage)?
+            self.packed_local_value(&access.storage)?
         };
         let end = access.offset.checked_add(access.width)?;
         if end > value.width {
@@ -72542,7 +72567,7 @@ impl Simulator {
         let mut stored = if let Some((class, spec, member)) = &access.static_target {
             self.static_read_in(class, spec.clone(), member)?
         } else {
-            self.get_local_or_signal(&access.storage)?
+            self.packed_local_value(&access.storage)?
         };
         if access.offset.checked_add(access.width)? > stored.width {
             return None;
@@ -72567,6 +72592,9 @@ impl Simulator {
         if let Some((class, spec, member)) = access.static_target {
             self.static_write_in(&class, spec, &member, stored);
         } else {
+            if let Some(key) = self.packed_local_static_key(&access.storage) {
+                self.static_local_vars.insert(key, stored.clone());
+            }
             self.set_local_or_signal(&access.storage, stored);
         }
         Some(changed)
