@@ -292,8 +292,8 @@ fn method_boost_enabled() -> bool {
 /// lowering, register allocation, block layout. Stale entries with an old
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
-// Typed local bindings change the compiled instruction stream.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3042;
+// §11.8.2: operand type propagation changes the instruction stream.
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3043;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1553,7 +1553,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB016";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB017";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -77497,6 +77497,115 @@ impl Simulator {
     /// Evaluate expression with a context width hint (for proper shift sizing).
     /// When ctx_width > 0, shift operators widen their left operand to ctx_width.
     pub fn eval_expr_ctx(&mut self, expr: &Expression, ctx_width: u32) -> Value {
+        self.eval_expr_ctx_inner(expr, ctx_width, false)
+    }
+
+    fn eval_expr_typed(&mut self, expr: &Expression, ctx_width: u32, unsigned: bool) -> Value {
+        let mut value = self.eval_expr_ctx_inner(expr, ctx_width, unsigned);
+        if unsigned && !value.is_real {
+            value.is_signed = false;
+        }
+        value
+    }
+
+    /// Declared expression signedness without executing conditional arms or
+    /// calls. Consulted only when a nested shift needs type propagation.
+    #[inline(never)]
+    fn expression_signed_hint(&mut self, expr: &Expression) -> Option<bool> {
+        fn joint(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+            if left == Some(false) || right == Some(false) {
+                Some(false)
+            } else if left == Some(true) && right == Some(true) {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        match &expr.kind {
+            ExprKind::Number(n) => Some(self.eval_number(n).is_signed),
+            ExprKind::Ident(h) => self.plain_ident_read(h).map(|v| v.is_signed).or_else(|| {
+                let name = self.resolve_hier_name(h);
+                self.signal_name_to_id
+                    .get(name.as_ref())
+                    .map(|&id| self.signal_signed[id])
+                    .or_else(|| {
+                        self.module.var_decl_types.get(name.as_ref()).map(|dt| {
+                            super::elaborate::is_type_signed_resolved(
+                                dt,
+                                &self.module.typedef_types,
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        self.get_expr_type_name(expr)
+                            .and_then(|name| self.concrete_type_signed(&name))
+                    })
+            }),
+            ExprKind::Paren(e) => self.expression_signed_hint(e),
+            ExprKind::Unary {
+                op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot,
+                operand,
+            } => self.expression_signed_hint(operand),
+            ExprKind::Unary { .. } => Some(false),
+            ExprKind::Binary {
+                op:
+                    BinaryOp::ShiftLeft
+                    | BinaryOp::ShiftRight
+                    | BinaryOp::ArithShiftLeft
+                    | BinaryOp::ArithShiftRight
+                    | BinaryOp::Power,
+                left,
+                ..
+            } => self.expression_signed_hint(left),
+            ExprKind::Binary {
+                op:
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitXnor,
+                left,
+                right,
+            } => {
+                let l = self.expression_signed_hint(left);
+                let r = self.expression_signed_hint(right);
+                joint(l, r)
+            }
+            ExprKind::Binary { .. } => Some(false),
+            ExprKind::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                let t = self.expression_signed_hint(then_expr);
+                let e = self.expression_signed_hint(else_expr);
+                joint(t, e)
+            }
+            ExprKind::Concatenation(_)
+            | ExprKind::Replication { .. }
+            | ExprKind::RangeSelect { .. }
+            | ExprKind::StringLiteral(_) => Some(false),
+            ExprKind::Call { func, .. } => self.call_return_type(func).map(|dt| {
+                super::elaborate::is_type_signed_resolved(&dt, &self.module.typedef_types)
+            }),
+            ExprKind::SystemCall { name, .. } if name == "$signed" => Some(true),
+            ExprKind::SystemCall { name, .. } if name == "$unsigned" => Some(false),
+            _ => self
+                .get_expr_type_name(expr)
+                .and_then(|name| self.concrete_type_signed(&name)),
+        }
+    }
+
+    fn eval_expr_ctx_inner(
+        &mut self,
+        expr: &Expression,
+        ctx_width: u32,
+        unsigned_context: bool,
+    ) -> Value {
         // §18.7 receiver-prefixed reads inside `obj.randomize() with {…}`
         // (see `strip_rand_receiver_expr`).
         if self.rand_receiver.is_some() {
@@ -77718,6 +77827,25 @@ impl Simulator {
             if let Some(v) = self.eval_unpacked_call_member(expr) {
                 return v;
             }
+        }
+        // §13.4.1: a nested class's bare static function uses exactly the
+        // same dispatch as its parenthesized call, retaining the full scope
+        // and specialization before the value-read path strips wrappers.
+        if let ExprKind::MemberAccess { expr: recv, member } = &expr.kind
+            && !matches!(&recv.kind, ExprKind::Ident(h) if h.path.len() == 1)
+            && let Some(root) = Self::class_scope_root(recv)
+            && (self.module.classes.contains_key(root) || self.module.packages.contains(root))
+            && !self
+                .local_stack
+                .last()
+                .is_some_and(|f| f.contains_key(root))
+            && !self.signal_name_to_id.contains_key(root)
+            && let Some(scope) = Self::class_scope_chain(recv)
+            && let Some((base, _)) = self.resolve_class_scope_prefix(&scope)
+            && self.is_static_method(&base, &member.name)
+            && self.class_parameterless_function(&base, &member.name)
+        {
+            return self.eval_call(expr, &[]);
         }
         // A parameterized-class specialization (`C#(...)`) in value context
         // evaluates as its base reference — strip the `Specialization`
@@ -79001,7 +79129,7 @@ impl Simulator {
                 let v = if ctx_width > 0
                     && matches!(op, UnaryOp::Minus | UnaryOp::BitNot | UnaryOp::Plus)
                 {
-                    let v0 = self.eval_expr_ctx(operand, ctx_width);
+                    let v0 = self.eval_expr_typed(operand, ctx_width, unsigned_context);
                     if ctx_width > v0.width {
                         v0.resize(ctx_width)
                     } else {
@@ -79359,11 +79487,31 @@ impl Simulator {
                 );
                 // Operands the width probe had to evaluate are kept and
                 // reused below instead of being evaluated again.
+                let has_shift = (is_arith_or_bitwise
+                    || is_comparison
+                    || matches!(op, BinaryOp::Div | BinaryOp::Mod))
+                    && (super::bytecode::has_context_shift(left)
+                        || super::bytecode::has_context_shift(right));
                 let mut pre_l: Option<Value> = None;
                 let mut pre_r: Option<Value> = None;
                 let self_det_w = if is_arith_or_bitwise {
-                    let (lw, lv) = self.width_probe(left);
-                    let (rw, rv) = self.width_probe(right);
+                    // A shift's count and carry-aware width estimate do not
+                    // size its parent expression (§11.6.1). Keep fallback
+                    // values for operands whose declared width is unavailable.
+                    let (lw, lv) = if has_shift {
+                        self.lrm_self_width(left)
+                            .map(|w| (w, None))
+                            .unwrap_or_else(|| self.width_probe(left))
+                    } else {
+                        self.width_probe(left)
+                    };
+                    let (rw, rv) = if has_shift {
+                        self.lrm_self_width(right)
+                            .map(|w| (w, None))
+                            .unwrap_or_else(|| self.width_probe(right))
+                    } else {
+                        self.width_probe(right)
+                    };
                     // §11.8.2: a real operand is 64 bits wide, so only then
                     // can `+ - *` have a real operand; each integral operand
                     // is then converted from its self-determined value (the
@@ -79496,9 +79644,41 @@ impl Simulator {
                     }
                     pre_r = Some(r0);
                 }
+                // §11.8.2: propagate unsigned type into nested shifts before
+                // their operands widen. Type probes never execute calls.
+                let joint_unsigned = if is_arith_or_bitwise
+                    || matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                    || is_comparison
+                {
+                    (!is_comparison && unsigned_context)
+                        || (has_shift
+                            && (pre_l
+                                .as_ref()
+                                .map(|v| v.is_signed)
+                                .or_else(|| self.expression_signed_hint(left))
+                                == Some(false)
+                                || pre_r
+                                    .as_ref()
+                                    .map(|v| v.is_signed)
+                                    .or_else(|| self.expression_signed_hint(right))
+                                    == Some(false)))
+                } else if widens_left {
+                    unsigned_context
+                } else {
+                    false
+                };
+                let left_unsigned =
+                    joint_unsigned && (!is_comparison || super::bytecode::has_context_shift(left));
+                let right_unsigned =
+                    joint_unsigned && (!is_comparison || super::bytecode::has_context_shift(right));
                 let mut l = match pre_l.take() {
-                    Some(v) => v,
-                    None => self.eval_expr_ctx(left, self_det_w),
+                    Some(mut v) => {
+                        if left_unsigned && !v.is_real {
+                            v.is_signed = false;
+                        }
+                        v
+                    }
+                    None => self.eval_expr_typed(left, self_det_w, left_unsigned),
                 };
                 // §11.4.8 zero-mask elision. `0 & anything` is 0 for EVERY
                 // value the other side can take — `0 & x` and `0 & z` are both
@@ -79533,13 +79713,16 @@ impl Simulator {
                         | BinaryOp::ArithShiftLeft
                         | BinaryOp::ArithShiftRight
                 );
-                let mut r = if let Some(v) = pre_r {
+                let mut r = if let Some(mut v) = pre_r {
+                    if right_unsigned && !v.is_real {
+                        v.is_signed = false;
+                    }
                     v
                 } else if is_shift_op {
                     let rw = self.infer_width(right);
                     self.eval_expr_ctx(right, rw)
                 } else {
-                    self.eval_expr_ctx(right, self_det_w)
+                    self.eval_expr_typed(right, self_det_w, right_unsigned)
                 };
                 // IEEE 1800-2023 §6.16 / Table 6-9: the `==`/`!=` operators
                 // are 2-STATE when applied to the `string` data type — they
@@ -79757,11 +79940,23 @@ impl Simulator {
                     return v;
                 }
                 let c = self.eval_expr(condition);
+                let arms_unsigned = unsigned_context
+                    || ((super::bytecode::has_context_shift(then_expr)
+                        || super::bytecode::has_context_shift(else_expr))
+                        && (self.expression_signed_hint(then_expr) == Some(false)
+                            || self.expression_signed_hint(else_expr) == Some(false)));
+                let arm_ctx = if arms_unsigned {
+                    ctx_width
+                        .max(self.lrm_self_width(then_expr).unwrap_or(0))
+                        .max(self.lrm_self_width(else_expr).unwrap_or(0))
+                } else {
+                    ctx_width
+                };
                 if c.has_unknown() {
                     // IEEE 1800 §11.4.11 Table 11-21: per-bit merge — bit is known
                     // only where both branches agree; otherwise X.
-                    let mut t = self.eval_expr_ctx(then_expr, ctx_width);
-                    let mut e = self.eval_expr_ctx(else_expr, ctx_width);
+                    let mut t = self.eval_expr_typed(then_expr, arm_ctx, arms_unsigned);
+                    let mut e = self.eval_expr_typed(else_expr, arm_ctx, arms_unsigned);
                     // §5.7.1: a fill branch widens to the other branch before
                     // the per-bit merge (resize consumes the fill flag).
                     if t.is_fill && !e.is_fill {
@@ -79785,7 +79980,7 @@ impl Simulator {
                     } else {
                         (else_expr, then_expr)
                     };
-                    let mut v = self.eval_expr_ctx(taken, ctx_width);
+                    let mut v = self.eval_expr_typed(taken, arm_ctx, arms_unsigned);
                     // §11.4.11 + §11.8.1: BOTH branches determine the result
                     // type. If either is unsigned the result is unsigned, and
                     // the narrower branch is then extended by the RESULT's
@@ -81455,7 +81650,7 @@ impl Simulator {
                 let h = self.eval_expr(hi);
                 l.concat_with(&h) // Dummy representation
             }
-            ExprKind::Paren(inner) => self.eval_expr_ctx(inner, ctx_width),
+            ExprKind::Paren(inner) => self.eval_expr_typed(inner, ctx_width, unsigned_context),
             // §8.10 (Syntax 8-2, footnote 23): the parentheseless `new
             // src` shallow-copy constructor. `<expr>` evaluates to an object
             // handle; a fresh object copies the source's fields (deep
