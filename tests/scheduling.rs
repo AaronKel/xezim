@@ -335,3 +335,6 @@ mod next_rest_loop_scope_379;
 
 #[path = "scheduling/clock_edges_385.rs"]
 mod clock_edges_385;
+
+#[path = "scheduling/action_scopes_386.rs"]
+mod action_scopes_386;

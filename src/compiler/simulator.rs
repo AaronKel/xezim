@@ -98093,7 +98093,15 @@ impl Simulator {
         let saved_block_scope = std::mem::take(&mut self.m_block_scope);
         let saved_block_active = std::mem::replace(&mut self.m_block_active, false);
         let saved_m_scope = std::mem::replace(&mut self.m_scope_stack, m_chain);
+        // §16.14.1/§6.21: action-block declarations are local to the
+        // action, including names that shadow the declaring module's signals.
+        self.push_local_frame(HashMap::default());
+        self.push_queue_frame();
+        self.open_decl_shadow_frame();
         self.exec_statement(&stmt);
+        self.close_decl_shadow_frame();
+        self.pop_and_restore_queue_frame();
+        self.pop_local_frame();
         self.current_pid = saved_pid;
         self.current_scope = saved_scope;
         self.m_block_scope = saved_block_scope;
