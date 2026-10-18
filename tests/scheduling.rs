@@ -317,3 +317,6 @@ mod clocking_delivery_356;
 
 #[path = "scheduling/sampled_history_363.rs"]
 mod next_twelve_sampled_history_363;
+
+#[path = "scheduling/sequence_counts_367.rs"]
+mod next_twelve_sequence_counts_367;

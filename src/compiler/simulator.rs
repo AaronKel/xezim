@@ -3471,8 +3471,8 @@ struct SvaClockedSite {
 enum SvaSeq {
     /// A boolean: holds at one cycle.
     Bool(Expression),
-    /// `##[min:max]` (`max == u32::MAX` unbounded).
-    Delay(u32, u32),
+    /// `##[min:max]` (`max == u64::MAX` unbounded).
+    Delay(u64, u64),
     Concat(Vec<SvaSeq>),
     Or(Box<SvaSeq>, Box<SvaSeq>),
     And(Box<SvaSeq>, Box<SvaSeq>),
@@ -3483,20 +3483,20 @@ enum SvaSeq {
     /// `s[*min:max]`.
     Rep {
         seq: Box<SvaSeq>,
-        min: u32,
-        max: u32,
+        min: u64,
+        max: u64,
     },
     /// `b[->min:max]`.
     Goto {
         cond: Expression,
-        min: u32,
-        max: u32,
+        min: u64,
+        max: u64,
     },
     /// `b[=min:max]`.
     NonCon {
         cond: Expression,
-        min: u32,
-        max: u32,
+        min: u64,
+        max: u64,
     },
     /// §16.10 / §16.11 match items, run within the cycle: local variable
     /// assignments and subroutine calls (no cycle of its own).
@@ -3550,6 +3550,10 @@ enum SvaCompound {
     Throughout(Expression, SvaNfa),
     /// Only the earliest match (§16.9.7).
     FirstMatch(SvaNfa),
+    /// §16.7: a counted cycle delay, with no state unrolling or clipping.
+    Delay(u64, u64),
+    /// §16.9.2: counted copies of the unit, one cycle apart.
+    Repeat(SvaNfa, u64, u64),
 }
 
 /// A sequence in flight: `pcs` are the states waiting for the next cycle,
@@ -3586,6 +3590,8 @@ struct SvaSubRun {
     /// operand's latest match (§16.10: an operand's assignments flow out).
     env: SvaEnv,
     ever_env: [SvaEnv; 2],
+    ticks: u64,
+    repeated: Vec<(u64, SvaRun)>,
 }
 
 /// A property body compiled for evaluation (§16.12).
@@ -3719,9 +3725,20 @@ impl SvaNfaBuilder {
     }
 
     /// `unit[*min:max]`: consecutive copies one cycle apart.
-    fn rep(&mut self, u: &SvaRepUnit<'_>, min: u32, max: u32) -> (usize, usize) {
-        const UNROLL_CAP: u32 = 256;
-        let min = min.min(UNROLL_CAP);
+    fn rep(&mut self, u: &SvaRepUnit<'_>, min: u64, max: u64) -> (usize, usize) {
+        // §16.9.2: large counts use run-time counters, preserving the
+        // complete unit (including multi-cycle matches and local variables).
+        if min > 256 || (max != u64::MAX && max > 256) {
+            let unit = match u {
+                SvaRepUnit::Seq(seq) => Self::build(seq),
+                SvaRepUnit::Goto(cond) => Self::build(&SvaSeq::Goto {
+                    cond: (*cond).clone(),
+                    min: 1,
+                    max: 1,
+                }),
+            };
+            return self.sub(SvaCompound::Repeat(unit, min, max));
+        }
         let s = self.state();
         let t = self.state();
         if min == 0 {
@@ -3739,7 +3756,7 @@ impl SvaNfaBuilder {
         if let Some(pe) = prev_end {
             self.add(pe, SvaEdge::Eps(t));
         }
-        if max == u32::MAX {
+        if max == u64::MAX {
             let (cs, ce) = self.unit(u);
             match prev_end {
                 None => self.add(s, SvaEdge::Eps(cs)),
@@ -3748,7 +3765,7 @@ impl SvaNfaBuilder {
             self.add(ce, SvaEdge::Eps(t));
             self.add(ce, SvaEdge::Tick(cs));
         } else {
-            let max = max.min(UNROLL_CAP).max(min);
+            let max = max.max(min);
             for _ in min..max {
                 let (cs, ce) = self.unit(u);
                 match prev_end {
@@ -3771,20 +3788,23 @@ impl SvaNfaBuilder {
                 (s, t)
             }
             SvaSeq::Delay(min, max) => {
+                if *min > 4096 || (*max != u64::MAX && *max > 4096) {
+                    return self.sub(SvaCompound::Delay(*min, *max));
+                }
                 let s = self.state();
                 let mut cur = s;
-                for _ in 0..(*min).min(4096) {
+                for _ in 0..*min {
                     let n = self.state();
                     self.add(cur, SvaEdge::Tick(n));
                     cur = n;
                 }
-                if *max == u32::MAX {
+                if *max == u64::MAX {
                     self.add(cur, SvaEdge::Tick(cur));
                     (s, cur)
                 } else {
                     let t = self.state();
                     self.add(cur, SvaEdge::Eps(t));
-                    for _ in *min..(*max).min(4096).max(*min) {
+                    for _ in *min..(*max).max(*min) {
                         let n = self.state();
                         self.add(cur, SvaEdge::Tick(n));
                         self.add(n, SvaEdge::Eps(t));
@@ -3828,9 +3848,9 @@ impl SvaNfaBuilder {
                 // §16.9.10: `(1[*0:$] ##1 a ##1 1[*0:$]) intersect b`.
                 let span = crate::ast::Span::dummy();
                 let padded = SvaSeq::Concat(vec![
-                    SvaSeq::Delay(0, u32::MAX),
+                    SvaSeq::Delay(0, u64::MAX),
                     (**a).clone(),
-                    SvaSeq::Delay(0, u32::MAX),
+                    SvaSeq::Delay(0, u64::MAX),
                     SvaSeq::Bool(Self::true_lit(span)),
                 ]);
                 self.sub(SvaCompound::Intersect(Self::build(&padded), Self::build(b)))
@@ -95717,31 +95737,24 @@ impl Simulator {
     }
 
     /// §16.9.2 delay bounds of a `##` count: `N`, `[m:n]`, `[m:$]`.
-    fn sva_delay_bounds(&mut self, d: &Expression) -> (u32, u32) {
+    fn sva_delay_bounds(&mut self, d: &Expression) -> (u64, u64) {
         match &d.kind {
             ExprKind::Range(lo, hi) => self.sva_bounds_pair(lo, hi),
-            ExprKind::Dollar => (0, u32::MAX),
+            ExprKind::Dollar => (0, u64::MAX),
             ExprKind::Paren(inner) => self.sva_delay_bounds(inner),
             _ => {
-                let n = self.eval_expr(d).to_u64().unwrap_or(1).min(u32::MAX as u64) as u32;
+                let n = self.eval_expr(d).to_u64().unwrap_or(1);
                 (n, n)
             }
         }
     }
 
-    fn sva_bounds_pair(&mut self, lo: &Expression, hi: &Expression) -> (u32, u32) {
-        let l = self
-            .eval_expr(lo)
-            .to_u64()
-            .unwrap_or(0)
-            .min(u32::MAX as u64) as u32;
+    fn sva_bounds_pair(&mut self, lo: &Expression, hi: &Expression) -> (u64, u64) {
+        let l = self.eval_expr(lo).to_u64().unwrap_or(0);
         let h = if matches!(hi.kind, ExprKind::Dollar) {
-            u32::MAX
+            u64::MAX
         } else {
-            self.eval_expr(hi)
-                .to_u64()
-                .unwrap_or(l as u64)
-                .min(u32::MAX as u64) as u32
+            self.eval_expr(hi).to_u64().unwrap_or(l)
         };
         (l, h.max(l))
     }
@@ -95806,7 +95819,7 @@ impl Simulator {
                 )
             }
             ExprKind::SystemCall { name, args } if name.starts_with("$sva_") => {
-                let bounds = |this: &mut Self| -> (u32, u32) {
+                let bounds = |this: &mut Self| -> (u64, u64) {
                     match (args.get(1), args.get(2)) {
                         (Some(lo), Some(hi)) => this.sva_bounds_pair(lo, hi),
                         _ => (1, 1),
@@ -96308,6 +96321,8 @@ impl Simulator {
                             ever: [false, false],
                             env: env.clone(),
                             ever_env: [Vec::new(), Vec::new()],
+                            ticks: 0,
+                            repeated: Vec::new(),
                         };
                         let (m, alive) = self.sva_sub_advance(nfa, &mut sub);
                         for menv in m {
@@ -96338,6 +96353,51 @@ impl Simulator {
             return (Vec::new(), false);
         };
         match &**comp {
+            SvaCompound::Delay(min, max) => {
+                let out = if sub.ticks >= *min {
+                    vec![sub.env.clone()]
+                } else {
+                    Vec::new()
+                };
+                let alive = *max == u64::MAX || sub.ticks < *max;
+                sub.ticks = sub.ticks.saturating_add(1);
+                (out, alive)
+            }
+            SvaCompound::Repeat(unit, min, max) => {
+                let mut out = Vec::new();
+                if sub.ticks == 0 {
+                    sub.ticks = 1;
+                    if *min == 0 {
+                        out.push(sub.env.clone());
+                    }
+                    if *max > 0 {
+                        sub.repeated.push((0, SvaRun::with_env(sub.env.clone())));
+                    }
+                }
+                let mut keep = Vec::new();
+                for (count, mut run) in std::mem::take(&mut sub.repeated) {
+                    let (matches, alive) = self.sva_run_advance(unit, &mut run, false);
+                    if alive {
+                        keep.push((count, run));
+                    }
+                    for env in matches {
+                        let next = count.saturating_add(1);
+                        if next >= *min {
+                            out.push(env.clone());
+                        }
+                        if *max == u64::MAX || next < *max {
+                            let next = if *max == u64::MAX {
+                                next.min((*min).max(1))
+                            } else {
+                                next
+                            };
+                            keep.push((next, SvaRun::with_env(env)));
+                        }
+                    }
+                }
+                sub.repeated = keep;
+                (out, !sub.repeated.is_empty())
+            }
             SvaCompound::FirstMatch(inner) => {
                 let (m, alive) = self.sva_run_advance(inner, &mut sub.runs[0], true);
                 if !m.is_empty() {
@@ -97139,12 +97199,8 @@ impl Simulator {
                     None => live.push(st),
                 }
             }
-            // An attempt that can never finish (`s_eventually` of a signal
-            // that never rises, `##[1:$]`) must not grow without bound.
-            const SVA_MAX_ATTEMPTS: usize = 1024;
-            if live.len() > SVA_MAX_ATTEMPTS {
-                live.drain(..live.len() - SVA_MAX_ATTEMPTS);
-            }
+            // §16.7: an attempt with a long legal delay remains live;
+            // dropping it at a fixed queue depth changes assertion results.
             self.sva_sites[i].attempts = live;
             self.restore_preponed(saved);
             self.sva_sites[i].sampled_ids = sampled_ids;
