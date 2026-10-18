@@ -4772,8 +4772,8 @@ fn vector_fragment_width(frag: &str) -> Option<u32> {
 fn atom_type_keyword_width(name: &str) -> Option<u32> {
     let name = name
         .trim()
-        .strip_suffix("unsigned")
-        .or_else(|| name.trim().strip_suffix("signed"))
+        .strip_suffix(" unsigned")
+        .or_else(|| name.trim().strip_suffix(" signed"))
         .unwrap_or(name.trim())
         .trim_end();
     Some(match name {
@@ -119205,9 +119205,9 @@ impl Simulator {
     fn bound_type_dt(&self, b: &str) -> Option<DataType> {
         use crate::ast::types::{IntegerAtomType as A, IntegerVectorType as V, Signing};
         let span = crate::ast::Span::dummy();
-        let (base, signing) = if let Some(base) = b.strip_suffix("unsigned") {
+        let (base, signing) = if let Some(base) = b.strip_suffix(" unsigned") {
             (base.trim_end(), Some(Signing::Unsigned))
-        } else if let Some(base) = b.strip_suffix("signed") {
+        } else if let Some(base) = b.strip_suffix(" signed") {
             (base.trim_end(), Some(Signing::Signed))
         } else {
             (b, None)
@@ -153218,20 +153218,60 @@ impl Simulator {
         reps.get(&key).cloned()
     }
 
-    /// Remove whitespace outside of double-quoted string literals so that
+    /// Normalize layout whitespace outside of double-quoted string literals so that
     /// sig fragments that differ only in spacing (the parser's spaced
     /// reconstruction `special_comp # ( 1 )` vs a typedef-resolved
     /// `special_comp#(1)`) key to the same per-spec static cell.
     fn normalize_spec_ws(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         let mut in_str = false;
-        for ch in s.chars() {
+        let mut chars = s.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
             if ch == '"' {
                 in_str = !in_str;
                 out.push(ch);
             } else if in_str {
                 out.push(ch);
-            } else if !ch.is_whitespace() {
+            } else if ch.is_whitespace() {
+                let mut next = index + ch.len_utf8();
+                while let Some(&(i, c)) = chars.peek() {
+                    if !c.is_whitespace() {
+                        break;
+                    }
+                    next = i + c.len_utf8();
+                    chars.next();
+                }
+                // §6.11 / §8.25: `byte unsigned` is a qualified builtin,
+                // while `byteunsigned` can name an unrelated typedef.
+                let word = out
+                    .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or("");
+                let integral = matches!(
+                    word,
+                    "byte"
+                        | "shortint"
+                        | "int"
+                        | "longint"
+                        | "integer"
+                        | "time"
+                        | "bit"
+                        | "logic"
+                        | "reg"
+                );
+                let tail = &s[next..];
+                let signing = tail
+                    .strip_prefix("unsigned")
+                    .or_else(|| tail.strip_prefix("signed"))
+                    .is_some_and(|rest| {
+                        rest.chars()
+                            .next()
+                            .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+                    });
+                if integral && signing {
+                    out.push(' ');
+                }
+            } else {
                 out.push(ch);
             }
         }
@@ -161953,8 +161993,8 @@ impl Simulator {
     /// Whether the type named by a type-parameter binding is 2-state.
     fn concrete_type_two_state(&self, name: &str) -> bool {
         let base = name
-            .strip_suffix("unsigned")
-            .or_else(|| name.strip_suffix("signed"))
+            .strip_suffix(" unsigned")
+            .or_else(|| name.strip_suffix(" signed"))
             .unwrap_or(name)
             .trim_end();
         match base {
@@ -162051,14 +162091,14 @@ impl Simulator {
     /// Signedness of the integral type a type parameter is bound to, by
     /// name: a built-in atom or a typedef. `None` when it cannot be told.
     fn concrete_type_signed(&self, name: &str) -> Option<bool> {
-        if let Some(base) = name.strip_suffix("unsigned") {
+        if let Some(base) = name.strip_suffix(" unsigned") {
             if atom_type_keyword_width(base.trim_end()).is_some()
                 || vector_fragment_width(name).is_some()
             {
                 return Some(false);
             }
         }
-        if let Some(base) = name.strip_suffix("signed") {
+        if let Some(base) = name.strip_suffix(" signed") {
             if atom_type_keyword_width(base.trim_end()).is_some() {
                 return Some(true);
             }
