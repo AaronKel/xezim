@@ -474,3 +474,6 @@ mod package_value_name_collision;
 mod class_type_name_collision;
 #[path = "types/wide_equality.rs"]
 mod wide_equality;
+
+#[path = "types/declaration_scope_p1.rs"]
+mod declaration_scope_p1;

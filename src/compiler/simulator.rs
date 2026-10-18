@@ -3288,6 +3288,7 @@ type LoopVarSnapshot = (
     Option<String>,
     bool,
     Option<Vec<(String, u32, u32)>>,
+    (Option<u32>, bool),
 );
 
 /// `instance_assoc_member`'s class-only verdict for a bare name inside a
@@ -4114,8 +4115,8 @@ struct ProcessContext {
     task_string_formals: Vec<TaskFrameStrings>,
 }
 
-/// The formals of one task frame whose string-ness differs from the global
-/// `string_signals` set (see `Simulator::task_string_formals`).
+/// Frame-local string classifications for task formals and scalar locals.
+/// They remain authoritative while other processes change global metadata.
 #[derive(Debug, Clone)]
 struct TaskFrameStrings {
     /// `local_gen_stack` generation of the task's frame.
@@ -4264,6 +4265,8 @@ struct PortPlan {
     fixed_width: Option<u32>,
     /// `is_type_signed` of the declared type (declaration only).
     signed: bool,
+    /// A direct scalar two-state declaration; independent of specialization.
+    two_state: bool,
     /// `is_virtual_iface_type` is false whatever the specialization: neither
     /// an interface nor a type reference, or a plain class (type tables).
     never_vif: bool,
@@ -4340,6 +4343,13 @@ struct BlockScopeSave {
     /// Enclosing frame entries (bare names and unpacked-struct leaves) the
     /// block's declarations shadow.
     shadowed: Vec<(String, Value)>,
+    /// §6.21: declared layouts and scalar types displaced by this block.
+    declarations: Vec<DeclShadow>,
+    /// The enclosing frame's string-kind overlay, not the global name table.
+    string_kinds: Vec<(String, Option<bool>)>,
+    /// A suspend-aware for loop closes its variable scope at the same sentinel.
+    loop_vars: Vec<LoopVarSnapshot>,
+    owns_loop_frame: bool,
     /// Enclosing collection renames (`local_dyn`) the block's collection
     /// declarations shadow, moved aside so the inner declaration cannot
     /// clean the outer storage up.
@@ -7130,8 +7140,8 @@ pub struct Simulator {
     /// Snapshot at frame entry, restore at frame exit, so a
     /// frame can never leak an add OR a remove to its caller.
     string_signals_removed: Vec<Vec<String>>,
-    /// §13.5 / §6.16: the `string` formals of each active TASK frame of the
-    /// running process, keyed by the frame's generation (`local_gen_stack`).
+    /// §6.21/§13.5/§6.16: string classifications of task formals and scalar
+    /// locals, keyed by their frame generation (`local_gen_stack`).
     /// A task can suspend, so its formals must not enter the global
     /// `string_signals` set: while it waits, or after `disable fork` kills
     /// it, another subroutine's same-named packed formal would read as a
@@ -10980,20 +10990,9 @@ impl Simulator {
             // avoid perturbing auto-loop-var / signal-name bookkeeping.
             fn frameless_locals(stmt: &Statement) -> std::collections::HashSet<String> {
                 let mut out = std::collections::HashSet::new();
-                // Named and unnamed process-block bodies are handled
-                // identically (the flattening executor / later auto-naming make
-                // the distinction immaterial), so collect the body's top-level
-                // locals regardless of whether the outer SeqBlock carries a
-                // label.
-                if let StatementKind::SeqBlock { stmts, .. } = &stmt.kind {
-                    for s in stmts.iter() {
-                        if let StatementKind::VarDecl { declarators, .. } = &s.kind {
-                            for d in declarators.iter() {
-                                out.insert(d.name.name.clone());
-                            }
-                        }
-                    }
-                }
+                Simulator::for_each_decl_name(stmt, &mut |name, _| {
+                    out.insert(name.to_string());
+                });
                 out
             }
             // §26.3: module and package subroutine bodies spell `P::m` the
@@ -11204,6 +11203,31 @@ impl Simulator {
                 if c >= 2 || module_claims(&nm) {
                     taken.insert(nm);
                 }
+            }
+            // §6.21: collisions also include a local inside another
+            // process's nested block. Rename those declarations innermost first.
+            let mut nested_number = 0;
+            for b in module
+                .initial_blocks
+                .iter_mut()
+                .map(|b| &mut b.stmt)
+                .chain(module.always_blocks.iter_mut().map(|b| &mut b.stmt))
+                .chain(deferred_always.iter_mut().filter_map(|d| match d {
+                    DeferredAlways::Eager(ab) => Some(&mut ab.stmt),
+                    DeferredAlways::Lazy { .. } => None,
+                }))
+                .chain(module.final_blocks.iter_mut().map(|b| &mut b.stmt))
+            {
+                Self::rename_nested_shadowed(
+                    b,
+                    &|n| taken.contains(n),
+                    &mut Vec::new(),
+                    &mut nested_number,
+                    "pc",
+                    0,
+                    "",
+                    &mut Vec::new(),
+                );
             }
             for (i, ib) in module.initial_blocks.iter_mut().enumerate() {
                 if let Some(new_stmt) = super::elaborate::rename_process_shadowed_locals(
@@ -16443,12 +16467,15 @@ impl Simulator {
         if !is_resolved_int {
             return None;
         }
-        // §7.4.1: packed dimensions on the reference itself (`M [1:0]` with
-        // `typedef bit [31:0] M`) multiply the typedef's width; the chain
-        // above resolves to the element type alone.
-        let own_dims = matches!(dt, DT::TypeReference { dimensions, .. } if !dimensions.is_empty());
+        // §7.4.1/§6.18: the named typedef width includes packed dimensions
+        // on every alias in the chain, not just its terminal element type.
+        let named_width = matches!(dt, DT::TypeReference { name, dimensions, .. }
+            if !dimensions.is_empty()
+                || super::elaborate::lookup_scoped_type(name, &self.module.typedefs)
+                    .is_some_and(|width| *width > 0));
+        let width_type = if named_width { dt } else { resolved };
         let pw = super::elaborate::resolve_type_width(
-            if own_dims { dt } else { resolved },
+            width_type,
             Some(&self.module.parameters),
             Some(&self.module.typedefs),
         );
@@ -16458,6 +16485,59 @@ impl Simulator {
         let signed =
             super::elaborate::is_type_signed_resolved(&resolved, &self.module.typedef_types);
         Some((pw, signed))
+    }
+
+    /// §13.5/§10.8: scalar formals own their declared width and signing
+    /// before the first frame-local store. Ref/aggregate binding stays with
+    /// its identity/member binders; unresolved class types keep their policy.
+    fn fit_scalar_formal_seed(
+        &self,
+        port: &crate::ast::decl::FunctionPort,
+        mut value: Value,
+    ) -> Value {
+        if !port.dimensions.is_empty() {
+            return value;
+        }
+        let dt = &port.data_type;
+        let integral = match dt {
+            DataType::IntegerAtom { .. } | DataType::IntegerVector { .. } => {
+                self.scalar_formal_integral(dt)
+            }
+            DataType::Implicit { dimensions, .. } if !dimensions.is_empty() => {
+                self.scalar_formal_integral(dt)
+            }
+            DataType::TypeReference {
+                name, type_args, ..
+            } if type_args.is_empty()
+                && !name.has_specialized_scope()
+                && !self.typeref_names_class(dt)
+                && self.local_type_param_concrete(dt).is_none()
+                && !super::elaborate::lookup_scoped_type(
+                    name,
+                    &self.module.typedef_unpacked_dims,
+                )
+                .is_some_and(|dims| !dims.is_empty()) =>
+            {
+                self.scalar_formal_integral(dt)
+            }
+            _ => None,
+        };
+        if let Some((width, signed)) = integral {
+            if value.is_real {
+                value = Self::real_to_int(value.to_f64(), width.max(1));
+            } else if width > 0 && width != value.width {
+                value = value.resize_for_assign(width);
+            }
+            value.is_signed = signed;
+            if super::elaborate::is_type_two_state_resolved(dt, &self.module.typedef_types)
+                && value.has_xz()
+            {
+                value = value.to_two_state();
+            }
+        } else if super::elaborate::is_type_real(dt) && !value.is_real {
+            value = Value::from_f64(value.to_f64());
+        }
+        value
     }
 
     /// Given a resolved struct DataType, return a list of (field_name, bit_offset, width)
@@ -53287,6 +53367,7 @@ impl Simulator {
                                             i += 1;
                                             continue;
                                         }
+                                        self.refresh_bound_task_string_kinds(&td.ports);
                                         let frame = self.class_task_body_frame(&tm, stmt.span);
                                         // Chain the caller's tail instead of copying it onto the end of
                                         // the spliced body (ProcCont::pushed_frame).
@@ -53487,6 +53568,7 @@ impl Simulator {
                                     self.ensure_spec_statics(&sb, &ss);
                                     self.current_spec = Some((sb, ss));
                                 }
+                                self.refresh_bound_task_string_kinds(&td.ports);
                                 self.task_cleanup.push(cleanup);
                                 let frame = self.class_task_body_frame(&tm, stmt.span);
                                 // Chain the caller's tail instead of copying it onto the end of
@@ -54555,6 +54637,20 @@ impl Simulator {
                 if condition.is_some()
                     && (self.stmt_has_event_wait(body) || self.stmt_is_blocking(body))
                 {
+                    // §12.7.1: retain the enclosing declaration, and close the
+                    // automatic loop scope after the final resumed iteration.
+                    let names: Vec<String> = init
+                        .iter()
+                        .filter_map(|fi| match fi {
+                            ForInit::VarDecl { name, .. } => Some(name.name.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    let saved = self.snapshot_loop_vars(&names);
+                    let owns_loop_frame = self.local_stack.is_empty() && !names.is_empty();
+                    if owns_loop_frame {
+                        self.push_loop_frame();
+                    }
                     for fi in init {
                         match fi {
                             ForInit::VarDecl {
@@ -54570,8 +54666,11 @@ impl Simulator {
                                 );
                                 self.widths.insert(name.name.clone(), w);
                                 let mut rv = v.resize(w);
-                                if super::elaborate::is_type_signed(data_type) {
-                                    rv.is_signed = true;
+                                rv.is_signed = self.type_is_signed_concrete(data_type);
+                                if rv.is_signed {
+                                    self.signed_signals.insert(name.name.clone());
+                                } else {
+                                    self.signed_signals.remove(&name.name);
                                 }
                                 if let Some(frame) = self.local_stack.last_mut() {
                                     frame.insert(name.name.clone(), rv);
@@ -54631,11 +54730,23 @@ impl Simulator {
                             },
                             stmt.span,
                         );
-                        let f: Arc<[Statement]> = Arc::from(vec![while_stmt]);
+                        let f: Arc<[Statement]> = Arc::from(vec![
+                            while_stmt,
+                            Statement::new(StatementKind::Null, stmt.span),
+                        ]);
                         self.blocking_cont_cache
                             .insert(for_key, (Arc::clone(&pc.stmts), f.clone()));
                         f
                     };
+                    if !saved.is_empty() {
+                        self.block_scope_saves.push(BlockScopeSave {
+                            frame_key: Self::frame_key(&frame),
+                            frame_gen: self.local_gen_stack.last().copied().unwrap_or(0),
+                            loop_vars: saved,
+                            owns_loop_frame,
+                            ..Default::default()
+                        });
+                    }
                     // Chain the caller's tail rather than copying it (ProcCont::pushed_frame).
                     let cont = pc.pushed_frame(frame, pc.start + i + 1);
                     self.continue_stmts_or_trampoline(pid, cont);
@@ -56138,10 +56249,25 @@ impl Simulator {
             let plain = Self::type_is_plain_scalar(data_type);
             for d in declarators {
                 let nm = d.name.name.as_str();
+                let type_changes = match self.module.var_decl_types.get(nm) {
+                    Some(old) => !Self::dt_trivially_equal(old, data_type),
+                    None => self.widths.contains_key(nm),
+                };
+                if type_changes {
+                    sv.declarations.push(DeclShadow {
+                        width: self.widths.get(nm).copied(),
+                        signed: self.signed_signals.contains(nm),
+                        real: self.real_signals.contains(nm),
+                        string: self.string_signals.contains(nm),
+                        meta: self.snapshot_formal_metadata(nm),
+                    });
+                }
                 let frame = self.local_stack.last()?;
                 if let Some(v) = frame.get(nm) {
                     if !sv.shadowed.iter().any(|(n, _)| n == nm) {
                         sv.shadowed.push((nm.to_string(), v.clone()));
+                        sv.string_kinds
+                            .push((nm.to_string(), self.task_frame_string_flag(nm)));
                     }
                 }
                 if plain && d.dimensions.is_empty() {
@@ -56171,7 +56297,7 @@ impl Simulator {
     /// variables go out of scope and the enclosing ones they shadowed are
     /// visible again. A `static` block variable keeps its persistent value;
     /// only the frame's view of it ends here.
-    fn block_scope_exit(&mut self, stmts: &[Statement], sv: BlockScopeSave) {
+    fn block_scope_exit(&mut self, stmts: &[Statement], mut sv: BlockScopeSave) {
         if self.local_gen_stack.last().copied().unwrap_or(0) != sv.frame_gen
             || self.local_stack.is_empty()
         {
@@ -56234,7 +56360,7 @@ impl Simulator {
             }
         }
         if let Some(frame) = self.local_stack.last_mut() {
-            for (k, v) in sv.shadowed {
+            for (k, v) in sv.shadowed.drain(..) {
                 frame.insert(k, v);
             }
         }
@@ -56243,6 +56369,21 @@ impl Simulator {
                 ld.extend(sv.dyn_shadowed);
             }
         }
+        self.restore_decl_shadows(sv.declarations);
+        for (name, kind) in sv.string_kinds {
+            if let Some(kind) = kind {
+                self.record_frame_string_kind(&name, kind);
+            } else if let Some(&g) = self.local_gen_stack.last() {
+                if let Some(e) = self.task_string_formals.iter_mut().find(|e| e.fgen == g) {
+                    e.strings.retain(|n| n != &name);
+                    e.others.retain(|n| n != &name);
+                }
+            }
+        }
+        if sv.owns_loop_frame {
+            self.pop_loop_frame();
+        }
+        self.restore_loop_vars(&sv.loop_vars);
     }
 
     /// §6.21 for a synchronous loop: open the body block's scope once for
@@ -68187,25 +68328,10 @@ impl Simulator {
                             .join(".");
                         let last_idx = self.local_stack.len() - 1;
                         if self.local_stack[last_idx].contains_key(joined.as_str()) {
-                            // §10.7: on assignment to a sized local, resize
-                            // the RHS to the local's DECLARED width so a
-                            // narrow signed literal sign-extends (e.g.
-                            // `logic [63:0] mask = -1` must yield all-ones).
-                            // The declared width is read from the `widths`
-                            // table (populated at VarDecl time), NOT from the
-                            // currently-stored value — the stored width drifts
-                            // as differently-sized RHS values flow through and
-                            // would corrupt string/handle locals. If no
-                            // declared width is recorded (method formals,
-                            // pattern bindings), leave the value untouched.
-                            //
-                            // WIDTH: a value WIDER than the declared width is
-                            // TRUNCATED to it (LRM assignment semantics, e.g.
-                            // `byte b; b = $urandom` keeps only the low 8
-                            // bits). STRING locals are exempt: xezim models a
-                            // `string` as a 1024-bit packed value and must not
-                            // truncate its text; the same `is_str` guard as
-                            // the signal-store path is used.
+                            // §6.21/§10.7: a frame-local integral value keeps its
+                            // declared width and signing on every store. Bare-name
+                            // metadata may currently describe a different process's
+                            // same-named declaration, so it cannot type this store.
                             let is_str = hier.path.last().is_some_and(|s| {
                                 self.string_signals.contains(&s.name.name)
                                     || self.p_local_is_string(&s.name.name)
@@ -68233,8 +68359,10 @@ impl Simulator {
                     // Check local stack
                     if !self.local_stack.is_empty() {
                         let last_idx = self.local_stack.len() - 1;
-                        if let Some(prev_is_real) =
-                            self.local_stack[last_idx].get(name).map(|p| p.is_real)
+                        if let Some((prev_is_real, local_width, local_signed)) = self.local_stack
+                            [last_idx]
+                            .get(name)
+                            .map(|p| (p.is_real, p.width, p.is_signed))
                         {
                             // §10.7: on assignment to a sized local, resize
                             // the RHS to the local's DECLARED width so a
@@ -68253,15 +68381,15 @@ impl Simulator {
                             // $urandom` keeps only the low 8 bits). STRING
                             // locals are exempt (1024-bit internal packed
                             // text).
-                            let is_str = self.string_signals.contains(name.as_str())
-                                || self.p_local_is_string(name);
+                            let is_str = self.p_local_is_string(name);
                             let fitted = if prev_is_real && !val.is_real && !is_str {
                                 // §6.12.2: an integral value assigned to a REAL
                                 // local converts; stored as integral bits, a
                                 // `real t; t = k; h = t / 2;` divided as integers.
                                 Value::from_f64(val.to_f64())
                             } else if !val.is_real && !is_str {
-                                if let Some(&target_w) = self.widths.get(name) {
+                                if local_width > 0 {
+                                    let target_w = local_width;
                                     let mut f = if val.width != target_w {
                                         val.resize_for_assign(target_w)
                                     } else {
@@ -68274,7 +68402,7 @@ impl Simulator {
                                     // otherwise stored the unsized literal's
                                     // SIGNED stamp, and the counter wrapped
                                     // negative at 8 (ivtest sv_foreach3 hang).
-                                    f.is_signed = self.signed_signals.contains(name.as_str());
+                                    f.is_signed = local_signed;
                                     f
                                 } else {
                                     val.clone()
@@ -68287,16 +68415,7 @@ impl Simulator {
                                 // 32.55 forever (uart AVIP baud clock never toggled).
                                 let (w, signed) = self.local_stack[last_idx]
                                     .get(name)
-                                    .map(|p| {
-                                        (
-                                            self.widths
-                                                .get(name)
-                                                .copied()
-                                                .unwrap_or(p.width)
-                                                .max(1),
-                                            p.is_signed,
-                                        )
-                                    })
+                                    .map(|p| (p.width.max(1), p.is_signed))
                                     .unwrap_or((32, true));
                                 let mut f = Self::real_to_int(val.to_f64(), w);
                                 f.is_signed = signed;
@@ -85552,7 +85671,7 @@ impl Simulator {
         let is_vif_handle = !is_class_handle
             && matches!(data_type, crate::ast::types::DataType::TypeReference { .. })
             && Self::dt_is_virtual_iface(data_type, &self.module);
-        let default_v = if is_real_type {
+        let mut default_v = if is_real_type {
             Value::from_f64(0.0)
         } else if two_state || is_class_handle || w0 == 0 || unknown_typeref_handle || is_vif_handle
         {
@@ -85560,6 +85679,9 @@ impl Simulator {
         } else {
             Value::new(w)
         };
+        // §6.11.3: the initial cell carries its declared signing before its
+        // first assignment. Frame-local stores use this stable type stamp.
+        default_v.is_signed = decl_signed;
         // §6.21: a local of an `initial`/`always`/`final` block is static
         // unless declared `automatic` — one variable, initialized once (its
         // initializer is not re-run when the block is entered again). Such a
@@ -86987,6 +87109,11 @@ impl Simulator {
                 } else {
                     self.forget_string_flag(&d.name.name);
                 }
+                // §6.21: another process may declare a same-named string
+                // while this frame is parked. Keep this declaration's kind
+                // with the frame, independently of the global name tables.
+                let is_string = self.declared_name_is_string(&d.name.name);
+                self.record_frame_string_kind(&d.name.name, is_string);
                 // Record a class-typed local's type so a later
                 // separate `name = new();` knows what to construct.
                 // Covergroup-typed locals (§19.8) are recorded too:
@@ -102663,6 +102790,11 @@ impl Simulator {
                 total
             }
             ExprKind::Ident(h) => {
+                if let Some(name) = self.frame_bound_bare_name(h) {
+                    if let Some(v) = self.local_stack.last().and_then(|f| f.get(name)) {
+                        return v.width.max(1);
+                    }
+                }
                 let is_ambiguous_leaf = h.path.len() == 1 && !h.path[0].name.name.contains('.');
                 if let Some(id) = h.cached_signal_id.get() {
                     if !is_ambiguous_leaf {
@@ -108993,13 +109125,14 @@ impl Simulator {
                     self.var_typedef_types.get(n).cloned(),
                     self.fe_trusted_types.contains(n),
                     self.module.packed_struct_fields.get(n).cloned(),
+                    (self.widths.get(n).copied(), self.signed_signals.contains(n)),
                 )
             })
             .collect()
     }
 
     fn restore_loop_vars(&mut self, saved: &[LoopVarSnapshot]) {
-        for (n, _cur, _had_frame, prior_td, was_trusted, prior_ps) in saved {
+        for (n, _cur, _had_frame, prior_td, was_trusted, prior_ps, _) in saved {
             self.meta_note(n);
             match prior_td {
                 Some(t) => {
@@ -109027,7 +109160,22 @@ impl Simulator {
                 }
             }
         }
-        for (n, cur, had_frame, _, _, _) in saved {
+        for (n, _, _, _, _, _, (width, signed)) in saved {
+            match width {
+                Some(w) => {
+                    self.widths.insert(n.clone(), *w);
+                }
+                None => {
+                    self.widths.remove(n);
+                }
+            }
+            if *signed {
+                self.signed_signals.insert(n.clone());
+            } else {
+                self.signed_signals.remove(n);
+            }
+        }
+        for (n, cur, had_frame, _, _, _, _) in saved {
             if *had_frame {
                 if let Some(m) = self.local_stack.last_mut() {
                     match cur {
@@ -115526,7 +115674,17 @@ impl Simulator {
 
     fn pop_loop_frame(&mut self) {
         if let Some(g) = self.local_gen_stack.last() {
-            self.loop_frame_gens.remove(g);
+            // §9.3.2: a surviving fork child still owns its capture frame.
+            // Keep that generation classified as a process frame after the
+            // parent leaves the loop; task/call-frame lifetime rules differ.
+            let inherited = self.fork_baselines.keys().any(|pid| {
+                self.process_contexts
+                    .get(pid)
+                    .is_some_and(|ctx| ctx.local_gen_stack.contains(g))
+            });
+            if !inherited {
+                self.loop_frame_gens.remove(g);
+            }
         }
         self.pop_local_frame();
     }
@@ -115619,7 +115777,11 @@ impl Simulator {
     fn pop_local_frame(&mut self) {
         let pair = self.local_type_stack.pop();
         self.recycle_local_types(pair);
-        self.local_gen_stack.pop();
+        if let Some(g) = self.local_gen_stack.pop() {
+            if self.task_string_formals.last().is_some_and(|e| e.fgen == g) {
+                self.task_string_formals.pop();
+            }
+        }
         if let Some(mut f) = self.local_stack.pop() {
             if self.frame_pool.len() < 64 {
                 f.clear();
@@ -115632,7 +115794,11 @@ impl Simulator {
     fn pop_local_frame_take(&mut self) -> Option<HashMap<String, Value>> {
         let pair = self.local_type_stack.pop();
         self.recycle_local_types(pair);
-        self.local_gen_stack.pop();
+        if let Some(g) = self.local_gen_stack.pop() {
+            if self.task_string_formals.last().is_some_and(|e| e.fgen == g) {
+                self.task_string_formals.pop();
+            }
+        }
         self.local_stack.pop()
     }
 
@@ -124712,6 +124878,11 @@ impl Simulator {
     /// `T _t;` where `T`→`string`) through the active specialization so the
     /// `%p` argument quoting matches the concrete bound type.
     fn p_local_is_string(&self, name: &str) -> bool {
+        self.task_frame_string_flag(name)
+            .unwrap_or_else(|| self.declared_name_is_string(name))
+    }
+
+    fn declared_name_is_string(&self, name: &str) -> bool {
         use crate::ast::types::{DataType, SimpleType};
         let Some(mut dt) = self.module.var_decl_types.get(name) else {
             return self.string_signals.contains(name);
@@ -135509,6 +135680,132 @@ impl Simulator {
         }
     }
 
+    fn record_frame_string_kind(&mut self, name: &str, is_string: bool) {
+        let Some(&fgen) = self.local_gen_stack.last() else {
+            return;
+        };
+        let pos = match self
+            .task_string_formals
+            .iter()
+            .rposition(|e| e.fgen == fgen)
+        {
+            Some(pos) => pos,
+            None => {
+                self.task_string_formals.push(TaskFrameStrings {
+                    fgen,
+                    strings: Vec::new(),
+                    others: Vec::new(),
+                });
+                self.task_string_formals.len() - 1
+            }
+        };
+        let e = &mut self.task_string_formals[pos];
+        let (keep, remove) = if is_string {
+            (&mut e.strings, &mut e.others)
+        } else {
+            (&mut e.others, &mut e.strings)
+        };
+        remove.retain(|n| n != name);
+        if !keep.iter().any(|n| n == name) {
+            keep.push(name.to_string());
+        }
+    }
+
+    /// Resolve this formal's string kind without discarding an explicit
+    /// typedef scope or a declaring alias's lexical scope.
+    fn frame_formal_is_string(&self, dt: &DataType) -> bool {
+        if self.plain_class_ref(dt).is_some() {
+            return false;
+        }
+        let mut current = dt;
+        let mut prefix = String::new();
+        let mut seen = Vec::<String>::new();
+        for _ in 0..16 {
+            if Self::is_string_data_type(current) {
+                return true;
+            }
+            let DataType::TypeReference { name, .. } = current else {
+                return false;
+            };
+            let leaf = name.name.name.as_str();
+            let scoped = name.has_scope();
+            let lexical = (!scoped && !prefix.is_empty()).then(|| format!("{prefix}::{leaf}"));
+            let lexical = lexical.filter(|key| self.module.typedef_types.contains_key(key));
+            let key = if scoped {
+                name.qualified()
+            } else if let Some(key) = lexical {
+                key
+            } else {
+                // A bare runtime type parameter wins over a same-named
+                // global alias. A target reached through a package alias
+                // instead keeps the package's lexical type lookup.
+                let parameter_site = prefix.is_empty()
+                    || self
+                        .module
+                        .classes
+                        .get(&prefix)
+                        .is_some_and(|cd| cd.type_param_names.iter().any(|n| n == leaf));
+                if parameter_site {
+                    let bound = self.resolve_type_param_binding(leaf).or_else(|| {
+                        let h = self.this_stack.last().copied().flatten()?;
+                        self.heap.get(h)?.as_ref()?.type_bindings.get(leaf).cloned()
+                    });
+                    if let Some(bound) = bound {
+                        if bound == "string" {
+                            return true;
+                        }
+                        if seen.contains(&bound) {
+                            return false;
+                        }
+                        seen.push(bound.clone());
+                        let Some(next) = self.module.typedef_types.get(&bound) else {
+                            return false;
+                        };
+                        prefix = bound
+                            .rsplit_once("::")
+                            .map_or(String::new(), |(p, _)| p.to_string());
+                        current = next;
+                        continue;
+                    }
+                }
+                leaf.to_string()
+            };
+            if seen.contains(&key) {
+                return false;
+            }
+            seen.push(key.clone());
+            // lookup_scoped_type permits a leaf fallback. An explicitly
+            // qualified declaration must not bind an unrelated leaf alias.
+            let Some(next) = self.module.typedef_types.get(&key) else {
+                return false;
+            };
+            prefix = key
+                .rsplit_once("::")
+                .map_or(String::new(), |(p, _)| p.to_string());
+            current = next;
+        }
+        false
+    }
+
+    /// Reclassify a bound blocking method task after its callee context is
+    /// active. Replace the entry already owned by TaskCleanup; do not push
+    /// another entry or change its teardown ownership.
+    fn refresh_bound_task_string_kinds(&mut self, ports: &[crate::ast::decl::FunctionPort]) {
+        let Some(&fgen) = self.local_gen_stack.last() else {
+            return;
+        };
+        let Some(pos) = self
+            .task_string_formals
+            .iter()
+            .rposition(|e| e.fgen == fgen)
+        else {
+            return;
+        };
+        if let Some(entry) = self.task_frame_strings(fgen, ports) {
+            self.task_string_formals[pos] = entry;
+        }
+    }
+
     /// The `task_string_formals` entry for a task frame of generation `fgen`
     /// with formals `ports`, or `None` when no formal needs one.
     fn task_frame_strings(
@@ -135520,9 +135817,10 @@ impl Simulator {
         let mut others = Vec::new();
         for port in ports {
             let n = &port.name.name;
-            if Self::is_string_data_type(&port.data_type) {
+            if self.frame_formal_is_string(&port.data_type) {
                 strings.push(n.clone());
-            } else if self.string_signals.contains(n.as_str()) {
+            } else {
+                // A different process may declare a string of this name later.
                 others.push(n.clone());
             }
         }
@@ -145965,54 +146263,7 @@ impl Simulator {
             } else {
                 Value::zero(32)
             };
-            // §13.5.2 / §6.10 / §10.7: a scalar integral formal adopts its
-            // declared port's width and signedness, so `input signed [5:0] v`
-            // sign-extends `v` in later arithmetic and a `real` actual bound to
-            // an integral formal rounds to an integer. Only plain integral port
-            // types qualify — real / string / chandle / struct / class formals
-            // keep the caller value untouched (resizing a string to its
-            // 1024-bit storage width would corrupt it).
-            // A bare `Implicit` with no dimensions is a shared-type second
-            // declarator (`input int a, b;` — `b` inherits `a`'s type) whose
-            // width can't be resolved standalone; skip it so the caller value
-            // isn't truncated. Implicit WITH dims (`input signed [5:0] v`) still
-            // qualifies.
-            if matches!(
-                &port.data_type,
-                crate::ast::types::DataType::IntegerVector { .. }
-                    | crate::ast::types::DataType::IntegerAtom { .. }
-            ) || matches!(
-                &port.data_type,
-                crate::ast::types::DataType::Implicit { dimensions, .. }
-                    if !dimensions.is_empty()
-            ) {
-                let pw = super::elaborate::resolve_type_width(
-                    &port.data_type,
-                    Some(&self.module.parameters),
-                    Some(&self.module.typedefs),
-                );
-                val = if val.is_real {
-                    Self::real_to_int(val.to_f64(), pw.max(1))
-                } else if pw > 0 && pw != val.width {
-                    // resize_for_assign (not resize) so a signed source with an
-                    // X/Z MSB widens with X/Z, matching assignment to the formal.
-                    // pw == 0 means the width couldn't be resolved (e.g. a
-                    // shared-type second declarator `input int a, b`) — keep the
-                    // caller value rather than truncating it to nothing.
-                    val.resize_for_assign(pw)
-                } else {
-                    val
-                };
-                val.is_signed = super::elaborate::is_type_signed_resolved(
-                    &port.data_type,
-                    &self.module.typedef_types,
-                );
-            } else if super::elaborate::is_type_real(&port.data_type) && !val.is_real {
-                // §6.12.2: an integral actual bound to a `real`/`shortreal`
-                // formal converts to floating point, so later real arithmetic
-                // in the body (e.g. `x /= 2`) is done in the real domain.
-                val = Value::from_f64(val.to_f64());
-            }
+            val = self.fit_scalar_formal_seed(port, val);
             if let DataType::TypeReference {
                 name: tn,
                 type_args,
@@ -146123,7 +146374,7 @@ impl Simulator {
         // initial value is the type default: x for a 4-state type, 0 for a
         // 2-state one. An empty `function integer y(); endfunction` returns
         // 'bx (ivtest br_gh337); seeding zero unconditionally masked that.
-        let ret_init = if super::elaborate::is_type_real(&fd.return_type) {
+        let mut ret_init = if super::elaborate::is_type_real(&fd.return_type) {
             Value::from_f64(0.0)
         } else if match &ret_tp {
             Some((_, c)) => self.concrete_type_two_state(c),
@@ -146133,6 +146384,7 @@ impl Simulator {
         } else {
             Value::new(ret_w)
         };
+        ret_init.is_signed = ret_signed;
         // §13.3.1/§13.4.1: a STATIC-lifetime function's implicit return
         // variable persists across calls — a path that exits without
         // assigning returns the PREVIOUS call's value, not a fresh default.
@@ -147174,7 +147426,11 @@ impl Simulator {
         if frame.epoch != self.nested_run_epoch {
             return;
         }
-        for d in frame.saves.into_iter().rev() {
+        self.restore_decl_shadows(frame.saves);
+    }
+
+    fn restore_decl_shadows(&mut self, saves: Vec<DeclShadow>) {
+        for d in saves.into_iter().rev() {
             let name = d.meta.name.clone();
             match d.width {
                 Some(w) => {
@@ -147595,6 +147851,7 @@ impl Simulator {
                         Some(a) => self.eval_expr(a),
                         None => Value::zero(32),
                     };
+                    let val = self.fit_scalar_formal_seed(port, val);
                     locals.insert(port.name.name.clone(), val);
                     if let Some(a) = actual.filter(|a| i < args.len() || Self::is_lvalue_expr(a)) {
                         output_bindings.push((port.name.name.clone(), a.clone()));
@@ -147656,45 +147913,12 @@ impl Simulator {
                     } else {
                         Value::zero(32)
                     };
-                    // §13.5.1/§10.7: a scalar integral formal adopts the port's
-                    // width and signedness. Widen with the ARG's own signedness
-                    // first (so an unsigned x-MSB actual zero-extends, not X-
-                    // extends), THEN stamp the formal's signedness — otherwise a
-                    // negative default/arg reads unsigned.
-                    if matches!(
-                        &port.data_type,
-                        crate::ast::types::DataType::IntegerVector { .. }
-                            | crate::ast::types::DataType::IntegerAtom { .. }
-                    ) || matches!(
-                        &port.data_type,
-                        crate::ast::types::DataType::Implicit { dimensions, .. }
-                            if !dimensions.is_empty()
-                    ) {
-                        let pw = super::elaborate::resolve_type_width(
-                            &port.data_type,
-                            Some(&self.module.parameters),
-                            Some(&self.module.typedefs),
-                        );
-                        val = if val.is_real {
-                            Self::real_to_int(val.to_f64(), pw.max(1))
-                        } else if pw > 0 && pw != val.width {
-                            val.resize_for_assign(pw)
-                        } else {
-                            val
-                        };
-                        val.is_signed = super::elaborate::is_type_signed_resolved(
-                            &port.data_type,
-                            &self.module.typedef_types,
-                        );
-                    } else if super::elaborate::is_type_real(&port.data_type) {
-                        // §13.3.1: an integral actual CONVERTS to a real
-                        // formal (the function path and the compiled inline
-                        // both do); bound as integral bits, `dt / 2` divided
-                        // as integers.
-                        if !val.is_real {
-                            val = Value::from_f64(val.to_f64());
-                        }
-                    } else if self.type_is_signed_concrete(&port.data_type) {
+                    val = self.fit_scalar_formal_seed(port, val);
+                    // Preserve runtime-bound type-parameter signing, without
+                    // resolving its width through a module default.
+                    if !Self::type_is_plain_scalar(&port.data_type)
+                        && self.type_is_signed_concrete(&port.data_type)
+                    {
                         val.is_signed = true;
                     }
                     locals.insert(port.name.name.clone(), val);
@@ -165585,6 +165809,14 @@ impl Simulator {
                     class_ref,
                     fixed_width,
                     signed: super::elaborate::is_type_signed(dt),
+                    two_state: port.dimensions.is_empty()
+                        && matches!(
+                            dt,
+                            DataType::IntegerAtom { .. }
+                                | DataType::IntegerVector { .. }
+                                | DataType::Implicit { .. }
+                        )
+                        && super::elaborate::is_type_two_state(dt),
                     never_vif,
                 }
             })
@@ -166314,6 +166546,14 @@ impl Simulator {
                                 val
                             };
                             val.is_signed = signed;
+                            if val.has_xz()
+                                && super::elaborate::is_type_two_state_resolved(
+                                    &port.data_type,
+                                    &self.module.typedef_types,
+                                )
+                            {
+                                val = val.to_two_state();
+                            }
                         } else if self.type_is_signed_concrete(&port.data_type) {
                             // A TYPE-PARAMETER formal (`T t` with `T`->`int`)
                             // isn't a resolvable integral typedef, so
@@ -166350,6 +166590,9 @@ impl Simulator {
                         val.is_signed = pp.signed;
                     } else if plan.ports[i].signed {
                         val.is_signed = true;
+                    }
+                    if plan.ports[i].two_state && val.has_xz() {
+                        val = val.to_two_state();
                     }
                     if let DataType::TypeReference {
                         name: tn,
@@ -166479,7 +166722,7 @@ impl Simulator {
                     // string Value, not a 32-bit int — otherwise an implicit
                     // `funcname = {a, "b", ...}` string-concat assignment
                     // coerces to the int's 32-bit width and reads back empty.
-                    let init = if let (ClassMethodKind::Function(f), Some(rp)) =
+                    let mut init = if let (ClassMethodKind::Function(f), Some(rp)) =
                         (&method.kind, plan.ret.as_ref())
                     {
                         if rp.decl_string {
@@ -166528,6 +166771,13 @@ impl Simulator {
                     } else {
                         Value::zero(32)
                     };
+                    if let Some(rp) = plan.ret.as_ref()
+                        && rp.class.is_none()
+                        && !rp.decl_string
+                        && !rp.collection
+                    {
+                        init.is_signed = rp.signed;
+                    }
                     if !locals.contains_key(rn) {
                         locals.insert(rn.to_string(), init);
                     }
@@ -166785,6 +167035,14 @@ impl Simulator {
                 {
                     self.return_value = Some(cval);
                 } else {
+                    // §6.16/§13.5: classify the callee's formal types under
+                    // its active specialization, independently of global
+                    // string flags. Common frame teardown removes this entry.
+                    if let Some(&fgen) = self.local_gen_stack.last() {
+                        if let Some(entry) = self.task_frame_strings(fgen, ports) {
+                            self.task_string_formals.push(entry);
+                        }
+                    }
                     // Mark string-typed return variable, params, and class
                     // properties only when the AST interpreter actually runs
                     // this body (compiled bytecode never reads `string_signals`).
