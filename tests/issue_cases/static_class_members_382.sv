@@ -913,5 +913,3 @@ module tb_top;
     $finish;
   end
 endmodule
-
-
