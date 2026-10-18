@@ -4733,7 +4733,8 @@ fn vector_fragment_width(frag: &str) -> Option<u32> {
         .or_else(|| frag.strip_prefix("reg"))?;
     let rest = rest
         .trim_start()
-        .strip_prefix("signed")
+        .strip_prefix("unsigned")
+        .or_else(|| rest.trim_start().strip_prefix("signed"))
         .unwrap_or(rest)
         .trim();
     if !rest.starts_with('[') {
@@ -4757,6 +4758,12 @@ fn vector_fragment_width(frag: &str) -> Option<u32> {
 /// where the type parses as a bare identifier (§6.11, §20.6.2). Returns None
 /// for non-type names so a same-named signal/typedef path is used instead.
 fn atom_type_keyword_width(name: &str) -> Option<u32> {
+    let name = name
+        .trim()
+        .strip_suffix("unsigned")
+        .or_else(|| name.trim().strip_suffix("signed"))
+        .unwrap_or(name.trim())
+        .trim_end();
     Some(match name {
         "integer" | "int" => 32,
         "shortint" => 16,
@@ -7841,8 +7848,10 @@ pub struct Simulator {
     /// so a cached block is always byte-identical to a fresh compile of the
     /// same instance. String keys are never cached (HashMaps intern to u32).
     compiled_class_method_ids: HashMap<String, u32>,
-    compiled_method_block_cache:
-        HashMap<(u32, u32, std::rc::Rc<Vec<u32>>, u32), super::bytecode::CompiledMethodOutcome>,
+    compiled_method_block_cache: HashMap<
+        (u32, u32, u32, std::rc::Rc<Vec<u32>>, u32),
+        super::bytecode::CompiledMethodOutcome,
+    >,
     compiled_method_admission: Option<std::rc::Rc<super::bytecode::MethodAdmission>>,
     persisted_method_context_hash: Option<u64>,
     /// class-perf Step 7b: prebound compiled-method gates, keyed (cid, mid).
@@ -119074,7 +119083,14 @@ impl Simulator {
     fn bound_type_dt(&self, b: &str) -> Option<DataType> {
         use crate::ast::types::{IntegerAtomType as A, IntegerVectorType as V, Signing};
         let span = crate::ast::Span::dummy();
-        let atom = match b {
+        let (base, signing) = if let Some(base) = b.strip_suffix("unsigned") {
+            (base.trim_end(), Some(Signing::Unsigned))
+        } else if let Some(base) = b.strip_suffix("signed") {
+            (base.trim_end(), Some(Signing::Signed))
+        } else {
+            (b, None)
+        };
+        let atom = match base {
             "byte" => Some(A::Byte),
             "shortint" => Some(A::ShortInt),
             "int" => Some(A::Int),
@@ -119086,7 +119102,7 @@ impl Simulator {
         if let Some(kind) = atom {
             return Some(DataType::IntegerAtom {
                 kind,
-                signing: None,
+                signing,
                 span,
             });
         }
@@ -126215,6 +126231,15 @@ impl Simulator {
     /// needs) and judges the base kind like `is_type_signed`.
     fn type_is_signed_concrete(&self, dt: &crate::ast::types::DataType) -> bool {
         use crate::ast::types::DataType;
+        // §8.25: the receiver's type argument shadows a same-named global
+        // typedef, including an explicitly unsigned argument.
+        if let DataType::TypeReference { name, .. } = dt
+            && !name.has_scope()
+            && let Some(bound) = self.resolve_type_param_binding(&name.name.name)
+            && let Some(signed) = self.concrete_type_signed(&bound)
+        {
+            return signed;
+        }
         // Fast path: resolvable without a type parameter (typedefs only).
         if super::elaborate::is_type_signed_resolved(dt, &self.module.typedef_types) {
             return true;
@@ -152906,7 +152931,6 @@ impl Simulator {
     /// `unpacked_typedef_type_key`: a type parameter follows its binding, a
     /// typedef its target; built-in types render with their signing.
     fn type_key_of_elem(&self, dt: &DataType, depth: u32) -> Option<String> {
-        use crate::ast::types::{IntegerAtomType, Signing};
         match dt {
             DataType::TypeReference {
                 name,
@@ -152929,16 +152953,6 @@ impl Simulator {
                     return self.type_key_of_elem(&t, depth + 1);
                 }
                 Some(n)
-            }
-            DataType::IntegerAtom { kind, signing, .. } => {
-                let base = crate::elaborate::data_type_to_spec_fragment(dt)?;
-                // `int signed` is `int`; `int unsigned` is another type.
-                let default_signed = !matches!(kind, IntegerAtomType::Time);
-                Some(match signing {
-                    Some(Signing::Unsigned) if default_signed => format!("{} unsigned", base),
-                    Some(Signing::Signed) if !default_signed => format!("{} signed", base),
-                    _ => base,
-                })
             }
             _ => crate::elaborate::data_type_to_spec_fragment(dt),
         }
@@ -161777,7 +161791,12 @@ impl Simulator {
 
     /// Whether the type named by a type-parameter binding is 2-state.
     fn concrete_type_two_state(&self, name: &str) -> bool {
-        match name {
+        let base = name
+            .strip_suffix("unsigned")
+            .or_else(|| name.strip_suffix("signed"))
+            .unwrap_or(name)
+            .trim_end();
+        match base {
             "byte" | "shortint" | "int" | "longint" | "bit" => return true,
             "logic" | "reg" | "integer" | "time" => return false,
             _ => {}
@@ -161871,13 +161890,25 @@ impl Simulator {
     /// Signedness of the integral type a type parameter is bound to, by
     /// name: a built-in atom or a typedef. `None` when it cannot be told.
     fn concrete_type_signed(&self, name: &str) -> Option<bool> {
+        if let Some(base) = name.strip_suffix("unsigned") {
+            if atom_type_keyword_width(base.trim_end()).is_some()
+                || vector_fragment_width(name).is_some()
+            {
+                return Some(false);
+            }
+        }
+        if let Some(base) = name.strip_suffix("signed") {
+            if atom_type_keyword_width(base.trim_end()).is_some() {
+                return Some(true);
+            }
+        }
         match name {
             "byte" | "shortint" | "int" | "longint" | "integer" => return Some(true),
             "bit" | "logic" | "reg" | "time" => return Some(false),
             _ => {}
         }
         if vector_fragment_width(name).is_some() {
-            return Some(name.contains("signed"));
+            return Some(name.contains("signed") && !name.contains("unsigned"));
         }
         let dt = self.module.typedef_types.get(name)?;
         let dt = Self::resolve_type_ref(dt, &self.module.typedef_types);
@@ -169617,6 +169648,7 @@ impl Simulator {
     /// while ordinary in-memory method caching never serializes the design.
     fn persisted_method_key(
         &mut self,
+        handle: usize,
         cname: &str,
         method_name: &str,
         formal_widths: &[u32],
@@ -169654,6 +169686,14 @@ impl Simulator {
             context
         };
         context.hash(&mut h);
+        // §8.25: identical formal widths can still have different local T types.
+        if let Some(inst) = self.heap.get(handle).and_then(|inst| inst.as_ref()) {
+            inst.spec.hash(&mut h);
+            let mut bindings: Vec<_> = inst.type_bindings.iter().collect();
+            bindings.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            bindings.hash(&mut h);
+        }
+        self.current_spec.hash(&mut h);
         cname.hash(&mut h);
         method_name.hash(&mut h);
         formal_widths.hash(&mut h);
@@ -170236,11 +170276,11 @@ impl Simulator {
         };
 
         // Intern the (class, method) identity and build the width signature —
-        // the cache key. All compile inputs for a method are (class id, method
-        // id, formal widths, result width); interned u32 ids + the plan's Rc'd
+        // the cache key. The specialization distinguishes local types even
+        // with identical formal/result widths; interned ids + the plan's Rc'd
         // width Vec (an Rc clone per call, no allocation) so repeated calls to
         // a hot method lower its body ONCE and reuse the block.
-        let key = (cid, mid, pre.formal_widths.clone(), result_width);
+        let key = (cid, mid, spec_id, pre.formal_widths.clone(), result_width);
         let entry = match self.compiled_method_block_cache.get(&key) {
             Some(super::bytecode::CompiledMethodOutcome::Block(e)) => e.clone(),
             // Negative-cached as non-compilable: skip straight to AST.
@@ -170255,7 +170295,13 @@ impl Simulator {
                 // key. A miss falls through to compile-and-store below; a
                 // garbage/corrupt payload is just a miss.
                 let disk_key = method_cache_dir().and_then(|_| {
-                    self.persisted_method_key(cname, method_name, &pre.formal_widths, result_width)
+                    self.persisted_method_key(
+                        handle,
+                        cname,
+                        method_name,
+                        &pre.formal_widths,
+                        result_width,
+                    )
                 });
                 if let Some(k) = disk_key {
                     match self.load_persisted_method(k) {
@@ -170775,8 +170821,8 @@ impl Simulator {
                 });
                 let dpi_fds = self.dpi_import_fd_table();
                 let compiled = {
-                    // §6.18: retain concrete lexical aliases without binding
-                    // specialization-dependent class type parameters.
+                    // §6.18 / §8.25: retain lexical aliases and resolve type
+                    // parameters against this receiver's specialization.
                     let mut local_typedef_types = HashMap::default();
                     let mut unresolved_type_names = HashSet::default();
                     let mut cur = Some(cname.to_string());
@@ -170788,7 +170834,20 @@ impl Simulator {
                         let Some(cd) = self.module.classes.get(&cn) else {
                             break;
                         };
-                        unresolved_type_names.extend(cd.type_param_names.iter().cloned());
+                        for name in &cd.type_param_names {
+                            let binding = self
+                                .obj_type_param(handle, &cn, name)
+                                .and_then(|binding| self.bound_type_dt(&binding));
+                            if let Some(dt) = binding {
+                                // §8.25: compile locals against this receiver's specialization.
+                                local_typedef_types
+                                    .entry(name.clone())
+                                    .or_insert_with(|| dt.clone());
+                                local_typedef_types.insert(format!("{cn}::{name}"), dt);
+                            } else {
+                                unresolved_type_names.insert(name.clone());
+                            }
+                        }
                         for (name, dt) in &cd.typedef_targets {
                             // Keep the declaring class when an inherited alias
                             // is reached by a bare name from a derived method.
@@ -171344,7 +171403,13 @@ impl Simulator {
         // caller's `AssignPendingColl`; we no longer blacklist it here. The
         // instruction guards below (static locals, fallback insns) and the
         // transport in `vm_try_direct_call` keep such a call correct.
-        let key = (cid, mid, pre.formal_widths.clone(), pre.static_result_width);
+        let key = (
+            cid,
+            mid,
+            spec_id,
+            pre.formal_widths.clone(),
+            pre.static_result_width,
+        );
         let Some(super::bytecode::CompiledMethodOutcome::Block(rc_entry)) =
             self.compiled_method_block_cache.get(&key).cloned()
         else {
@@ -171586,7 +171651,7 @@ impl Simulator {
         } else {
             pre.static_result_width
         };
-        let key = (cid, mid, pre.formal_widths.clone(), result_width);
+        let key = (cid, mid, 0, pre.formal_widths.clone(), result_width);
         let Some(super::bytecode::CompiledMethodOutcome::Block(rc_entry)) =
             self.compiled_method_block_cache.get(&key).cloned()
         else {
@@ -171860,7 +171925,13 @@ impl Simulator {
             never(self);
             return None;
         }
-        let key = (cid, mid, pre.formal_widths.clone(), pre.static_result_width);
+        let key = (
+            cid,
+            mid,
+            0,
+            pre.formal_widths.clone(),
+            pre.static_result_width,
+        );
         let Some(super::bytecode::CompiledMethodOutcome::Block(rc_entry)) =
             self.compiled_method_block_cache.get(&key).cloned()
         else {
