@@ -292,8 +292,8 @@ fn method_boost_enabled() -> bool {
 /// lowering, register allocation, block layout. Stale entries with an old
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
-// §11.8.2 / §8.23: operand types and qualified static storage change lowering.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3044;
+// §13.4.1 / §7.6: fixed unpacked return types use the collection channel.
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3045;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1553,7 +1553,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB018";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB019";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -3432,8 +3432,8 @@ struct SvaClockedSite {
     /// flight is cancelled and no new one starts. Evaluated with the current
     /// (unsampled) values, as the LRM's asynchronous reset semantics require.
     disable: Option<Expression>,
-    /// LSB of the most recent observed clock value. Initialised to a
-    /// sentinel (2) so the first tick is treated as "no edge".
+    /// LSB of the most recent clock value: 0, 1, X (2), or Z (3).
+    /// Declarative sites start with the value before Active processes run.
     prev_clock: u8,
     /// Attempts still in flight, oldest first.
     attempts: Vec<SvaState>,
@@ -82569,6 +82569,29 @@ impl Simulator {
         }
     }
 
+    /// §7.6/§13.4.1: snapshot a fixed unpacked return in declaration
+    /// order before its local storage is restored or destroyed. The reserved
+    /// return store has zero-based indices, independently of the source range.
+    fn snapshot_ret_fixed(&mut self, name: &str) -> bool {
+        if self.module.dynamic_arrays.contains(name) {
+            return false;
+        }
+        let Some(&(lo, hi, _)) = self.module.arrays.get(name) else {
+            return false;
+        };
+        let descending = self.module.descending_arrays.contains(name);
+        const RET_SNAP: &str = "__xz_ret_coll__";
+        for pos in 0..=(hi - lo) {
+            let idx = if descending { hi - pos } else { lo + pos };
+            if let Some(v) = self.get_signal_value_by_name(&format!("{name}[{idx}]")) {
+                self.set_signal_value_by_name(&format!("{RET_SNAP}[{pos}]"), v);
+            }
+        }
+        self.set_queue_size(RET_SNAP, (hi - lo + 1) as u64);
+        self.pending_ret_collection = Some(RET_SNAP.to_string());
+        true
+    }
+
     /// The full path's step after evaluating a call RHS: a collection the
     /// call just returned (`pending_ret_collection`) is copied whole into a
     /// collection target. `true` when the assignment is done.
@@ -82590,7 +82613,21 @@ impl Simulator {
             return false;
         };
         if dst != src {
-            self.copy_whole_queue(&dst, &src);
+            if let Some(&(lo, hi, _)) = self.module.arrays.get(&dst)
+                && !self.module.dynamic_arrays.contains(&dst)
+            {
+                // §7.6: whole-array assignment pairs elements in each
+                // declaration's order, including descending/nonzero ranges.
+                let descending = self.module.descending_arrays.contains(&dst);
+                for pos in 0..=(hi - lo) {
+                    let idx = if descending { hi - pos } else { lo + pos };
+                    if let Some(v) = self.get_signal_value_by_name(&format!("{src}[{pos}]")) {
+                        self.set_signal_value_by_name(&format!("{dst}[{idx}]"), v);
+                    }
+                }
+            } else {
+                self.copy_whole_queue(&dst, &src);
+            }
         }
         self.settle_after_proc_write();
         true
@@ -82630,7 +82667,8 @@ impl Simulator {
                 .dyn_name_lookup(bare)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| self.resolve_hier_name(h).into_owned());
-            self.module.dynamic_arrays.contains(&n).then_some(n)
+            (self.module.dynamic_arrays.contains(&n) || self.module.arrays.contains_key(&n))
+                .then_some(n)
         } else {
             None
         };
@@ -90943,6 +90981,8 @@ impl Simulator {
                             } else {
                                 self.pending_ret_collection = Some(n.to_string());
                             }
+                        } else {
+                            self.snapshot_ret_fixed(&n);
                         }
                     }
                     if self.pending_ret_collection.is_none() {
@@ -90998,14 +91038,23 @@ impl Simulator {
                     // class-property collection (`return q[i];`) or a
                     // subroutine local (`return r;`) has no container value;
                     // assemble it from its leaves.
-                    let v = match self.struct_elem_type(e) {
-                        Some(su) => self.pack_struct_elem_ref(e, &su),
-                        None => match self.frame_struct_local(e) {
-                            Some((name, su)) => self
-                                .pack_unpacked_struct(&name, &su)
-                                .unwrap_or_else(|| self.eval_expr(e)),
-                            None => self.eval_expr(e),
-                        },
+                    let v = if self.pending_ret_collection.is_some() {
+                        // §13.4.1: an unpacked return has already been read
+                        // into its collection snapshot. Evaluating its bare
+                        // function-name variable as a scalar would call the
+                        // function again, recursively, because it has no
+                        // packed container value.
+                        Value::zero(32)
+                    } else {
+                        match self.struct_elem_type(e) {
+                            Some(su) => self.pack_struct_elem_ref(e, &su),
+                            None => match self.frame_struct_local(e) {
+                                Some((name, su)) => self
+                                    .pack_unpacked_struct(&name, &su)
+                                    .unwrap_or_else(|| self.eval_expr(e)),
+                                None => self.eval_expr(e),
+                            },
+                        }
                     };
                     if self.struct_colls_possible()
                         && matches!(
@@ -149288,6 +149337,8 @@ impl Simulator {
                     self.pending_ret_collection = Some(n);
                 }
                 self.return_value = Some(Value::zero(32));
+            } else if self.snapshot_ret_fixed(&n) {
+                self.return_value = Some(Value::zero(32));
             }
         }
         // §23.8: stop leaking this frame's string formal names into the
@@ -149709,10 +149760,11 @@ impl Simulator {
             Self::typedef_dims_via_tables(&self.module, start, &name.qualified())
                 .or_else(|| Self::typedef_dims_via_tables(&self.module, start, &name.name.name))
         }?;
-        matches!(
+        (matches!(
             dims.first(),
             Some(UD::Queue { .. } | UD::Unsized(_) | UD::Associative { .. })
-        )
+        ) || (dims.len() == 1
+            && matches!(dims.first(), Some(UD::Range { .. } | UD::Expression { .. }))))
         .then_some(dims)
     }
 
@@ -149732,30 +149784,12 @@ impl Simulator {
     }
 
     fn fn_returns_collection(&self, dt: &DataType) -> bool {
-        use crate::ast::types::{DataType, UnpackedDimension};
-        let mut cur: &DataType = dt;
-        for _ in 0..8 {
-            match cur {
-                DataType::TypeReference {
-                    name, dimensions, ..
-                } if dimensions.is_empty() => {
-                    let tn = &name.name.name;
-                    if let Some(dims) = self.module.typedef_unpacked_dims.get(tn) {
-                        return matches!(
-                            dims.first(),
-                            Some(UnpackedDimension::Queue { .. })
-                                | Some(UnpackedDimension::Unsized(_))
-                        );
-                    }
-                    match self.module.typedef_types.get(tn) {
-                        Some(inner) => cur = inner,
-                        _ => return false,
-                    }
-                }
-                _ => return false,
-            }
-        }
-        false
+        self.fn_ret_coll_dims(dt).is_some_and(|dims| {
+            !matches!(
+                dims.first(),
+                Some(crate::ast::types::UnpackedDimension::Associative { .. })
+            )
+        })
     }
 
     /// Does some `name.<rest>` key exist in `packed_signal_elem_widths`?
