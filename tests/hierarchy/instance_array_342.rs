@@ -47,3 +47,13 @@ fn instance_array_connection_neighbors() {
         8,
     );
 }
+
+/// §7.4.2 / §23.3.3.5: parameter names denote sized dimensions, including
+/// imported and scoped names; real associative index types remain dynamic.
+#[test]
+fn next_rest_parameter_sized_instances() {
+    check(
+        include_str!("../issue_cases/rest_parameter_instances.sv"),
+        8,
+    );
+}
