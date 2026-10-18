@@ -118,10 +118,11 @@ fn static_event_groups_interpreted() {
 #[test]
 fn module_class_type_names_retain_their_instance_paths() {
     let text = check(SCOPES, &[], 13);
-    let got: Vec<_> = text
+    let mut got: Vec<_> = text
         .lines()
         .filter(|line| line.starts_with("T|type "))
         .collect();
+    got.sort();
     assert_eq!(
         got,
         [
@@ -133,4 +134,61 @@ fn module_class_type_names_retain_their_instance_paths() {
             "T|type top.u6 class top/u6/holder",
         ]
     );
+}
+
+const ALIAS_INITIALIZERS: &str =
+    include_str!("../issue_cases/module_class_static_initializers_382.sv");
+#[test]
+fn module_class_aliases_initialize_once() {
+    check(ALIAS_INITIALIZERS, &[], 7);
+}
+#[test]
+fn module_class_aliases_initialize_once_eager() {
+    check(ALIAS_INITIALIZERS, &[("XEZIM_METHOD_TIER", "0")], 7);
+}
+#[test]
+fn module_class_aliases_initialize_once_interpreted() {
+    check(
+        ALIAS_INITIALIZERS,
+        &[("XEZIM_COMPILE_METHODS", "0"), ("XEZIM_PROC_FSM", "0")],
+        7,
+    );
+}
+
+#[test]
+fn warm_design_cache_keeps_module_class_initializers_single() {
+    let dir =
+        std::env::temp_dir().join(format!("xezim_class_init_cache_382_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("top.sv");
+    std::fs::write(&source, ALIAS_INITIALIZERS).unwrap();
+    let cache = dir.join("cache");
+    for warm in [false, true] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xezim"))
+            .arg("--cache-dir")
+            .arg(&cache)
+            .args(["--verbose", "-s", "top"])
+            .arg(&source)
+            .env_remove("XEZIM_METHOD_TIER")
+            .env_remove("XEZIM_COMPILE_METHODS")
+            .env_remove("XEZIM_PROC_FSM")
+            .env_remove("XEZIM_ALLOW_IMPLICIT_STATIC")
+            .output()
+            .expect("run cached static class initializers");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success() && !text.contains("FAIL"), "{text}");
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("PASS "))
+                .count(),
+            7,
+            "{text}"
+        );
+        assert_eq!(text.contains("CACHE] hit"), warm, "{text}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

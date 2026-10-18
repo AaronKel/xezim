@@ -292,8 +292,8 @@ fn method_boost_enabled() -> bool {
 /// lowering, register allocation, block layout. Stale entries with an old
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
-// §11.8.2: operand type propagation changes the instruction stream.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3043;
+// §11.8.2 / §8.23: operand types and qualified static storage change lowering.
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3044;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1553,7 +1553,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB017";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB018";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -18786,6 +18786,19 @@ impl Simulator {
             .module
             .classes
             .iter()
+            // §6.8 / §8.9: a module class's compatibility alias is the
+            // same type as its instance-qualified entry, not a second
+            // declaration whose initializer may execute again.
+            .filter(|(cn, cd)| {
+                cd.declaring_module.is_none()
+                    || *cn == &cd.name
+                    || !self.module.classes.get(&cd.name).is_some_and(|canonical| {
+                        // Cached designs reconstruct separate Arcs for
+                        // aliases; declaration identity survives that.
+                        canonical.name == cd.name
+                            && canonical.declaring_module == cd.declaring_module
+                    })
+            })
             .flat_map(|(cn, cd)| {
                 cd.property_inits
                     .iter()
@@ -77898,11 +77911,11 @@ impl Simulator {
         // same dispatch as its parenthesized call, retaining the full scope
         // and specialization before the value-read path strips wrappers.
         if let ExprKind::MemberAccess { expr: recv, member } = &expr.kind
+            && !matches!(&recv.kind, ExprKind::Ident(h) if h.path.len() == 1)
             && self
                 .class_member_names()
                 .static_methods
                 .contains(&member.name)
-            && !matches!(&recv.kind, ExprKind::Ident(h) if h.path.len() == 1)
             && let Some(root) = Self::class_scope_root(recv)
             && (self.module.classes.contains_key(root) || self.module.packages.contains(root))
             && !self
@@ -99623,7 +99636,8 @@ impl Simulator {
     /// §8/§23.9: the instance whose copy of class `cname` runs here, when
     /// `cname` is declared inside a (non-top) module with several instances:
     /// the instance a module-class method runs in, else the one holding the
-    /// executing process. None otherwise (one shared class).
+    /// executing process. Instance-qualified class keys already own their
+    /// storage and need no extra instance suffix.
     #[cold]
     #[inline(never)]
     fn modclass_static_inst(&self, cname: &str) -> Option<String> {
@@ -99632,22 +99646,29 @@ impl Simulator {
             Some(v) => v,
             None => {
                 let top = self.module.name.as_str();
-                let paths = self
-                    .module
-                    .classes
-                    .get(cname)
-                    .and_then(|cd| cd.declaring_module.as_deref())
-                    .filter(|m| *m != top)
-                    .map(|enc| {
-                        self.module
-                            .instances
-                            .iter()
-                            .filter(|i| i.def_name == enc)
-                            .map(|i| i.path.clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|p| p.len() > 1)
-                    .map(std::rc::Rc::new);
+                let paths = self.module.classes.get(cname).and_then(|cd| {
+                    let enc = cd.declaring_module.as_deref().filter(|m| *m != top)?;
+                    let paths = self
+                        .module
+                        .instances
+                        .iter()
+                        .filter(|i| i.def_name == enc)
+                        .map(|i| i.path.clone())
+                        .collect::<Vec<_>>();
+                    // §8.3 / §23.6: canonical module-class names already
+                    // include their owner. Adding it again made reads miss
+                    // the initialized cell and execute its initializer twice.
+                    if cd.name == cname
+                        && paths.iter().any(|owner| {
+                            cname
+                                .strip_prefix(owner.as_str())
+                                .is_some_and(|rest| rest.starts_with('.'))
+                        })
+                    {
+                        return None;
+                    }
+                    (paths.len() > 1).then(|| std::rc::Rc::new(paths))
+                });
                 self.modclass_insts
                     .borrow_mut()
                     .insert(cname.to_string(), paths.clone());
