@@ -9113,9 +9113,16 @@ struct SampledWatch {
     edge: EdgeKind,
     /// Simple-signal operand: sampled PREPONED via the prev-value snapshot.
     sig_id: Option<usize>,
-    /// General operand fallback: evaluated at edge time (post-slot values).
+    /// General operand, evaluated using the slot-entry snapshot.
     expr: Expression,
     hist: std::collections::VecDeque<Value>,
+    /// §16.9.3: only qualifying sampled clock ticks enter this history.
+    gate: Option<Expression>,
+    /// An action's gating expression is evaluated in its Reactive context.
+    action_gate: bool,
+    pending_sample: Option<(u64, Value)>,
+    sample_ids: Vec<usize>,
+    slot_values: Vec<(usize, Value)>,
     depth: usize,
     /// Time of the most recent sample. A PROCEDURAL `$past` runs before this
     /// slot's sampler (an SVA site after it), so the reader checks whether the
@@ -59923,11 +59930,22 @@ impl Simulator {
                 break;
             }
         }
+        if edge_code.is_none()
+            && let Some(si) = self.active_sva_site
+        {
+            let site = &self.sva_sites[si];
+            edge_code = Some(match site.edge {
+                1 => 2,
+                2 => 0,
+                _ => 1,
+            });
+            clk_id = self
+                .signal_name_to_id
+                .get(site.clock_signal.as_str())
+                .copied();
+        }
         if edge_code.is_none() {
             // Procedural context + default clocking: infer from it.
-            if self.active_sva_site.is_some() {
-                return None;
-            }
             // No default clocking: fall back to the clock inferred from the
             // enclosing always block. Without this, procedural `$rose(a)`
             // inside `always @(posedge clk)` had no history at all — `prev`
@@ -59940,23 +59958,38 @@ impl Simulator {
                     self.activation_scope.borrow().as_deref().unwrap_or(""),
                     !self.sampled_registering,
                 )?;
-                let operand = args.first()?.clone();
-                let site = expr.span.start;
-                let widx = self.sampled_watch_for(site, &operand, ec, cid, n)?;
-                return Some(self.sampled_cur_and_past(widx, &operand, n));
+                edge_code = Some(ec);
+                clk_id = Some(cid);
             }
-            let (clk_str, _) = self.clocking_meta.get("__xz_default_clocking")?.clone();
-            // clocking_meta stores the bare clock SIGNAL name (the parser
-            // drops the event's edge); default clocking events are
-            // overwhelmingly posedge — same assumption the `##N` cycle-delay
-            // machinery makes.
-            edge_code = Some(1);
-            clk_id = self.signal_name_to_id.get(clk_str.trim()).copied();
+            if edge_code.is_none() {
+                let (clk_str, _) = self.clocking_meta.get("__xz_default_clocking")?.clone();
+                // clocking_meta stores the bare clock SIGNAL name (the parser
+                // drops the event's edge); default clocking events are
+                // overwhelmingly posedge — same assumption the `##N` cycle-delay
+                // machinery makes.
+                edge_code = Some(1);
+                clk_id = self.signal_name_to_id.get(clk_str.trim()).copied();
+            }
         }
         let clk_id = clk_id?;
         let operand = args.first()?.clone();
         let site = expr.span.start;
         let widx = self.sampled_watch_for(site, &operand, edge_code.unwrap_or(0), clk_id, n)?;
+        if let ExprKind::SystemCall { name, .. } = &expr.kind {
+            if name == "$past" {
+                self.sampled_watches[widx].gate = args
+                    .get(2)
+                    .filter(|a| !matches!(a.kind, ExprKind::Null | ExprKind::Empty))
+                    .cloned();
+                if self.sampled_registering
+                    && let Some(g) = args.get(2)
+                {
+                    let mut ids = Vec::new();
+                    self.collect_sva_signal_ids(g, &mut ids);
+                    self.add_sampled_watch_ids(widx, &ids);
+                }
+            }
+        }
         Some(self.sampled_cur_and_past(widx, &operand, n))
     }
 
@@ -60202,7 +60235,15 @@ impl Simulator {
                 // failures (no clock resolvable) — eval falls back.
                 let ex = e.clone();
                 let ar = args.clone();
-                let _ = self.sampled_fn_via_watch(&ex, &ar, 1);
+                let depth = if name == "$past" {
+                    ar.get(1)
+                        .filter(|a| !matches!(a.kind, ExprKind::Null | ExprKind::Empty))
+                        .map(|a| self.eval_expr(a).to_u64().unwrap_or(1) as usize)
+                        .unwrap_or(1)
+                } else {
+                    1
+                };
+                let _ = self.sampled_fn_via_watch(&ex, &ar, depth);
             }
             ExprKind::SystemCall { args, .. } | ExprKind::Call { args, .. } => {
                 for a in args {
@@ -60213,7 +60254,17 @@ impl Simulator {
                 self.scan_sampled_expr(left);
                 self.scan_sampled_expr(right);
             }
-            ExprKind::Unary { operand, .. } => self.scan_sampled_expr(operand),
+            ExprKind::Unary { operand, .. } | ExprKind::Paren(operand) => {
+                self.scan_sampled_expr(operand)
+            }
+            ExprKind::SvaClocked { body, .. } => self.scan_sampled_expr(body),
+            ExprKind::RangeSelect {
+                expr, left, right, ..
+            } => {
+                self.scan_sampled_expr(expr);
+                self.scan_sampled_expr(left);
+                self.scan_sampled_expr(right);
+            }
             ExprKind::Conditional {
                 condition,
                 then_expr,
@@ -60272,7 +60323,24 @@ impl Simulator {
             return w.clone();
         }
         let width = self.signal_widths.get(id).copied().unwrap_or(1).min(64);
-        Value::from_inline(self.prev_val[id], self.prev_xz[id], width)
+        let mut v = Value::from_inline(self.prev_val[id], self.prev_xz[id], width);
+        v.is_signed = self.signal_signed.get(id).copied().unwrap_or(false);
+        v
+    }
+
+    fn add_sampled_watch_ids(&mut self, idx: usize, ids: &[usize]) {
+        for &sid in ids {
+            if !self.sampled_watches[idx].sample_ids.contains(&sid) {
+                self.sampled_watches[idx].sample_ids.push(sid);
+            }
+            if !self.preponed_ids.contains(&sid) {
+                self.preponed_ids.push(sid);
+            }
+            if !self.edge_signal_ids.contains(&sid) {
+                self.edge_signal_ids.push(sid);
+                self.seed_prev_from_current(sid);
+            }
+        }
     }
 
     /// Get-or-create the sampled watch for a call site. Registers the clock
@@ -60302,7 +60370,12 @@ impl Simulator {
             2 => EdgeKind::Negedge,
             _ => EdgeKind::AnyEdge,
         };
-        let sig_id = self.get_lhs_signal_id(operand);
+        let sig_id = match &operand.kind {
+            ExprKind::Ident(h) if h.path.iter().all(|p| p.selects.is_empty()) => {
+                self.get_lhs_signal_id(operand)
+            }
+            _ => None,
+        };
         // A signal registered here at run time has no preponed snapshot yet,
         // and the snapshot pass only runs for a slot that wrote something —
         // a declaration-initialised operand (`logic [7:0] v = 8'hA5;`) is
@@ -60339,12 +60412,20 @@ impl Simulator {
             sig_id,
             expr: operand.clone(),
             hist: std::collections::VecDeque::new(),
+            gate: None,
+            action_gate: false,
+            pending_sample: None,
+            sample_ids: Vec::new(),
+            slot_values: Vec::new(),
             depth: depth + 1,
             last_sample_time: None,
             slot_val: None,
             slot_time: None,
             default,
         });
+        let mut sample_ids = Vec::new();
+        self.collect_sva_signal_ids(operand, &mut sample_ids);
+        self.add_sampled_watch_ids(i, &sample_ids);
         let scope = self.sampled_scope();
         self.sampled_watch_site
             .entry(site)
@@ -60358,12 +60439,18 @@ impl Simulator {
     fn tick_sampled_watches(&mut self) {
         for i in 0..self.sampled_watches.len() {
             if self.sampled_watches[i].slot_time != Some(self.time) {
-                if let Some(sid) = self.sampled_watches[i].sig_id {
-                    let v = self.preponed_value_of(sid);
-                    let w = &mut self.sampled_watches[i];
-                    w.slot_val = Some(v);
-                    w.slot_time = Some(self.time);
-                }
+                let ids = self.sampled_watches[i].sample_ids.clone();
+                let vals = ids
+                    .into_iter()
+                    .map(|sid| (sid, self.preponed_value_of(sid)))
+                    .collect();
+                let slot_val = self.sampled_watches[i]
+                    .sig_id
+                    .map(|sid| self.preponed_value_of(sid));
+                let w = &mut self.sampled_watches[i];
+                w.slot_values = vals;
+                w.slot_val = slot_val;
+                w.slot_time = Some(self.time);
             }
             let (clk_id, edge) = {
                 let w = &self.sampled_watches[i];
@@ -60372,23 +60459,53 @@ impl Simulator {
             if !self.check_edge_id(clk_id, edge) {
                 continue;
             }
-            self.sampled_watches[i].last_sample_time = Some(self.time);
-            let w = &self.sampled_watches[i];
-            let sample = match w.sig_id {
-                Some(_) if w.slot_time == Some(self.time) && w.slot_val.is_some() => {
-                    w.slot_val.clone().unwrap()
-                }
-                Some(sid) => self.preponed_value_of(sid),
-                None => {
-                    let e = self.sampled_watches[i].expr.clone();
-                    self.eval_expr(&e)
-                }
+            let mut saved = self.sampled_watches[i].slot_values.clone();
+            for (sid, v) in &mut saved {
+                std::mem::swap(&mut self.signal_table[*sid], v);
+            }
+            let gate = self.sampled_watches[i].gate.clone();
+            let deferred_gate = self.sampled_watches[i].action_gate && gate.is_some();
+            let qualifies =
+                deferred_gate || gate.as_ref().is_none_or(|g| self.eval_expr(g).is_true());
+            let sample = if qualifies {
+                let e = self.sampled_watches[i].expr.clone();
+                Some(self.eval_expr(&e))
+            } else {
+                None
             };
-            let w = &mut self.sampled_watches[i];
-            w.hist.push_front(sample);
-            let cap = w.depth + 1;
-            while w.hist.len() > cap {
-                w.hist.pop_back();
+            for (sid, v) in saved.into_iter().rev() {
+                self.signal_table[sid] = v;
+            }
+            if let Some(sample) = sample {
+                let w = &mut self.sampled_watches[i];
+                if deferred_gate {
+                    w.pending_sample = Some((self.time, sample));
+                    continue;
+                }
+                w.last_sample_time = Some(self.time);
+                w.hist.push_front(sample);
+                while w.hist.len() > w.depth + 1 {
+                    w.hist.pop_back();
+                }
+            }
+        }
+    }
+
+    /// §16.9.3 / §16.14.1: the operand is sampled in Preponed, but an
+    /// action block's unsampled gate is evaluated after NBA, before actions.
+    fn finish_action_sampled_watches(&mut self) {
+        for i in 0..self.sampled_watches.len() {
+            let Some((time, sample)) = self.sampled_watches[i].pending_sample.take() else {
+                continue;
+            };
+            let gate = self.sampled_watches[i].gate.clone();
+            if gate.as_ref().is_none_or(|g| self.eval_expr(g).is_true()) {
+                let w = &mut self.sampled_watches[i];
+                w.last_sample_time = Some(time);
+                w.hist.push_front(sample);
+                while w.hist.len() > w.depth + 1 {
+                    w.hist.pop_back();
+                }
             }
         }
     }
@@ -72431,6 +72548,21 @@ impl Simulator {
             // inside an SVA clocked body; falls back to current
             // value when no active site (compile-time use).
             "$past" => {
+                let n = args
+                    .get(1)
+                    .filter(|a| !matches!(a.kind, ExprKind::Null | ExprKind::Empty))
+                    .map(|a| self.eval_expr(a).to_u64().unwrap_or(1) as usize)
+                    .unwrap_or(1);
+                if let Some((_, past)) = self.sampled_fn_via_watch(expr, args, n) {
+                    return past.unwrap_or_else(|| {
+                        Value::new(
+                            args.first()
+                                .map(|a| self.infer_width(a))
+                                .unwrap_or(1)
+                                .max(1),
+                        )
+                    });
+                }
                 // Inside a concurrent assertion the site's per-cycle ring is the
                 // history (index N = N clock ticks ago, sampled values).
                 if let Some(site_idx) = self.active_sva_site {
@@ -96535,6 +96667,41 @@ impl Simulator {
             disable_scope,
             ctl,
         });
+        // §16.9.3: the assertion's leading clock also clocks sampled calls
+        // used only in its action blocks; history starts before the first tick.
+        if let Some(&cid) = self
+            .signal_name_to_id
+            .get(self.sva_sites.last().unwrap().clock_signal.as_str())
+        {
+            let ec = match edge {
+                1 => 2,
+                2 => 0,
+                _ => 1,
+            };
+            let saved_scope = self.activation_scope.borrow().clone();
+            *self.activation_scope.borrow_mut() =
+                Some(self.sva_sites.last().unwrap().scope.clone());
+            let old_registering = self.sampled_registering;
+            let old_site = self.active_sva_site.replace(self.sva_sites.len() - 1);
+            self.sampled_registering = true;
+            let body_stmt = Statement::new(
+                StatementKind::Expr(body_expanded.clone()),
+                body_expanded.span,
+            );
+            self.record_sampled_sites(&body_stmt, ec, cid);
+            self.scan_sampled_expr(&body_expanded);
+            for action in [&a.action, &a.else_action].into_iter().flatten() {
+                let first = self.sampled_watches.len();
+                self.record_sampled_sites(action, ec, cid);
+                self.scan_sampled_stmt(action);
+                for watch in &mut self.sampled_watches[first..] {
+                    watch.action_gate = true;
+                }
+            }
+            self.sampled_registering = old_registering;
+            self.active_sva_site = old_site;
+            *self.activation_scope.borrow_mut() = saved_scope;
+        }
     }
 
     /// Tally one finished attempt on a site: cover sites count matches only.
@@ -96621,10 +96788,30 @@ impl Simulator {
     /// changes on the clock edge has an identical preponed and live value.
     fn collect_sva_signal_ids(&self, expr: &Expression, out: &mut Vec<usize>) {
         match &expr.kind {
-            ExprKind::Ident(_) => {
-                if let Some(id) = self.get_lhs_signal_id(expr) {
-                    out.push(id);
+            ExprKind::Ident(h) => {
+                // A field may be parsed as a hierarchical identifier instead
+                // of MemberAccess. Sample its nearest owning aggregate too.
+                let name = self.resolve_hier_name(h);
+                let mut prefix = name.as_ref();
+                loop {
+                    if let Some(&id) = self.signal_name_to_id.get(prefix) {
+                        out.push(id);
+                    }
+                    match prefix.rsplit_once('.') {
+                        Some((p, _)) => prefix = p,
+                        None => break,
+                    }
                 }
+            }
+            ExprKind::MemberAccess { expr: base, .. } => {
+                // Packed fields may have mirrored leaf signals. Sample them
+                // together with the aggregate that owns the selected bits.
+                if let Some(parts) = Self::flatten_member_path(expr) {
+                    if let Some(&id) = self.signal_name_to_id.get(parts.join(".").as_str()) {
+                        out.push(id);
+                    }
+                }
+                self.collect_sva_signal_ids(base, out);
             }
             ExprKind::Unary { operand, .. } => self.collect_sva_signal_ids(operand, out),
             ExprKind::Binary { left, right, .. } => {
@@ -96834,6 +97021,7 @@ impl Simulator {
         // property probe the object's members first.
         let saved_this = std::mem::take(&mut self.this_stack);
         let saved_cls = std::mem::take(&mut self.class_context_stack);
+        self.finish_action_sampled_watches();
         self.tick_sva_sites_inner();
         self.this_stack = saved_this;
         self.class_context_stack = saved_cls;
@@ -96891,6 +97079,8 @@ impl Simulator {
             // this fire's predicates must read through the sampled-value overlay.
             let sampled_ids = std::mem::take(&mut self.sva_sites[i].sampled_ids);
             let prev_active = self.active_sva_site.replace(i);
+            let prev_activation_scope = self.activation_scope.borrow().clone();
+            *self.activation_scope.borrow_mut() = Some(self.sva_sites[i].scope.clone());
             // LRM §16.9.3: refresh the past-value snapshots BEFORE anything
             // evaluates, so `$past(<sig>)` in a consequent that comes due
             // this tick reads the previous cycle's sample too.
@@ -96906,6 +97096,7 @@ impl Simulator {
                 self.sva_sites[i].matured.clear();
                 self.sva_sites[i].sampled_ids = sampled_ids;
                 self.active_sva_site = prev_active;
+                *self.activation_scope.borrow_mut() = prev_activation_scope;
                 continue;
             }
             let saved = self.install_preponed(&sampled_ids);
@@ -96984,6 +97175,7 @@ impl Simulator {
                 }
             }
             self.active_sva_site = prev_active;
+            *self.activation_scope.borrow_mut() = prev_activation_scope;
         }
     }
 

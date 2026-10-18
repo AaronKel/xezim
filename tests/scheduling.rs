@@ -314,3 +314,6 @@ mod waiter_cont_anyedge_wake;
 
 #[path = "scheduling/clocking_delivery_356.rs"]
 mod clocking_delivery_356;
+
+#[path = "scheduling/sampled_history_363.rs"]
+mod next_twelve_sampled_history_363;
