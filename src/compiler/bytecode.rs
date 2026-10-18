@@ -14829,6 +14829,20 @@ impl<'a> BytecodeCompiler<'a> {
                         let r = self.alloc_reg();
                         self.emit(Insn::Move(r, src));
                         self.emit(Insn::Resize(r, w));
+                        // §6.24.1: a named two-state type also converts X/Z.
+                        if let Some(types) = self.typedef_types {
+                            if target
+                                .as_ref()
+                                .and_then(|name| types.get(name))
+                                .is_some_and(|dt| {
+                                    crate::compiler::elaborate::is_type_two_state_resolved(
+                                        dt, types,
+                                    )
+                                })
+                            {
+                                self.emit(Insn::DropXz(r));
+                            }
+                        }
                         if signed {
                             self.emit(Insn::SetSigned(r));
                         } else {
@@ -27599,8 +27613,14 @@ pub fn lower_two_state(
             eprintln!("[TS-DUMP]   {i:>3} {ti:?}");
         }
     }
-    let tsx =
-        !has_wide && !has_wait && !has_wild_case && !has_case_eq && out.iter().all(tsx_insn_ok);
+    // §6.24.1: DropXz is a no-op only for clean two-state registers.
+    // The X-plane executor must use the original stream for such a cast.
+    let tsx = !has_wide
+        && !has_wait
+        && !has_wild_case
+        && !has_case_eq
+        && !cb.instructions.iter().any(|i| matches!(i, Insn::DropXz(_)))
+        && out.iter().all(tsx_insn_ok);
     Some(TwoStateBlock {
         insns: out,
         num_regs: cb.num_regs,
