@@ -7119,6 +7119,18 @@ impl<'a> BytecodeCompiler<'a> {
     /// Is this expression statically known to produce a STRING value?
     /// (Literal, `string` signal, `string`-bound formal, or a nested
     /// `$sformatf`.) Conservative: false means "unknown", not "packed".
+    /// §5.9 / §6.16: literals acquire textual ordering only in a string context.
+    fn expr_has_string_type_static(&self, e: &Expression) -> bool {
+        match &e.kind {
+            ExprKind::StringLiteral(_) => false,
+            ExprKind::Paren(inner) => self.expr_has_string_type_static(inner),
+            ExprKind::Concatenation(parts) => {
+                parts.iter().any(|e| self.expr_has_string_type_static(e))
+            }
+            _ => self.expr_is_string_static(e),
+        }
+    }
+
     fn expr_is_string_static(&self, e: &Expression) -> bool {
         match &e.kind {
             ExprKind::StringLiteral(_) => true,
@@ -13413,7 +13425,9 @@ impl<'a> BytecodeCompiler<'a> {
                         | BinaryOp::Gt
                         | BinaryOp::Geq
                 ) && self.expr_is_string_static(left)
-                    && self.expr_is_string_static(right);
+                    && self.expr_is_string_static(right)
+                    && (self.expr_has_string_type_static(left)
+                        || self.expr_has_string_type_static(right));
                 let sub_ctx = if string_cmp {
                     0
                 } else if is_self_determined {
@@ -13547,10 +13561,7 @@ impl<'a> BytecodeCompiler<'a> {
                     // side's unused capacity was X padding — an empty-string
                     // compare always was. Same StrOp routing as the
                     // relational arm below.
-                    BinaryOp::Eq | BinaryOp::Neq
-                        if self.expr_is_string_static(left)
-                            && self.expr_is_string_static(right) =>
-                    {
+                    BinaryOp::Eq | BinaryOp::Neq if string_cmp => {
                         let cmp = self.alloc_reg();
                         self.emit(Insn::StrOp(cmp, StrOpKind::Order, Box::new(vec![l, r])));
                         let z = self.alloc_reg();
@@ -13579,10 +13590,7 @@ impl<'a> BytecodeCompiler<'a> {
                     // ("abc" < "b" is TRUE lexicographically, false
                     // numerically) — route through the native strcmp and
                     // compare its signed difference against zero.
-                    BinaryOp::Lt | BinaryOp::Leq | BinaryOp::Gt | BinaryOp::Geq
-                        if self.expr_is_string_static(left)
-                            && self.expr_is_string_static(right) =>
-                    {
+                    BinaryOp::Lt | BinaryOp::Leq | BinaryOp::Gt | BinaryOp::Geq if string_cmp => {
                         let cmp = self.alloc_reg();
                         self.emit(Insn::StrOp(cmp, StrOpKind::Order, Box::new(vec![l, r])));
                         let z = self.alloc_reg();

@@ -138,3 +138,6 @@ mod string_raw_bytes;
 
 #[path = "strings/vpi_clocking_357.rs"]
 mod vpi_clocking_357;
+
+#[path = "strings/literal_order_360.rs"]
+mod next_twelve_literal_order_360;

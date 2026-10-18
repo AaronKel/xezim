@@ -293,7 +293,7 @@ fn method_boost_enabled() -> bool {
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
 // Typed local bindings change the compiled instruction stream.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3039;
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3040;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1553,7 +1553,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB013";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB014";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -76359,6 +76359,17 @@ impl Simulator {
     /// named sides must be plain scalar names (`cmp_name_scalar`). The rest
     /// is the arm's own sizing, evaluation order, real promotion and
     /// integral compare.
+    /// §5.9 / §6.16: a literal is integral until a string-typed operand
+    /// supplies a string context. Parentheses do not supply that context.
+    fn operand_has_string_type(&mut self, e: &Expression) -> bool {
+        match &e.kind {
+            ExprKind::StringLiteral(_) => false,
+            ExprKind::Paren(inner) => self.operand_has_string_type(inner),
+            ExprKind::Concatenation(parts) => parts.iter().any(|e| self.operand_has_string_type(e)),
+            _ => self.operand_is_string(e),
+        }
+    }
+
     fn plain_compare(
         &mut self,
         op: BinaryOp,
@@ -78043,7 +78054,8 @@ impl Simulator {
                     UnaryOp::Plus => v,
                     UnaryOp::Minus => {
                         let mut r = Value::zero(v.width).sub(&v).resize(v.width);
-                        r.is_signed = true;
+                        // §11.8.1: unary minus preserves its operand type.
+                        r.is_signed = v.is_signed;
                         r
                     }
                     UnaryOp::LogNot => v.logic_not(),
