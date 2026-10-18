@@ -3609,6 +3609,12 @@ enum SvaNode {
         overlap: bool,
         cons: Box<SvaNode>,
     },
+    /// §16.12.9: at least one antecedent match has a successful consequent.
+    Followed {
+        ante: SvaNfa,
+        overlap: bool,
+        cons: Box<SvaNode>,
+    },
     And(Box<SvaNode>, Box<SvaNode>),
     Or(Box<SvaNode>, Box<SvaNode>),
     /// §16.12.6 `s_eventually e`: holds once `e` samples true.
@@ -3637,6 +3643,12 @@ enum SvaState {
         matched_any: bool,
         /// Consequent evaluations `(ticks until they start, state)`.
         cons: Vec<(u32, SvaState)>,
+    },
+    Followed {
+        ante: SvaRun,
+        ante_alive: bool,
+        cons: Vec<(u32, SvaState)>,
+        vacuous: bool,
     },
     And {
         a: Box<SvaState>,
@@ -96073,7 +96085,7 @@ impl Simulator {
         };
         match node {
             SvaNode::Seq(nfa, _) => inject(nfa),
-            SvaNode::Impl { ante, .. } => inject(ante),
+            SvaNode::Impl { ante, .. } | SvaNode::Followed { ante, .. } => inject(ante),
             SvaNode::Not(inner) => Self::sva_inject_init(inner, init),
             SvaNode::And(a, b) | SvaNode::Or(a, b) => {
                 Self::sva_inject_init(a, init);
@@ -96101,6 +96113,18 @@ impl Simulator {
                     Self::sva_inject_init(&mut node, &items);
                 }
                 node
+            }
+            ExprKind::SystemCall { name, args }
+                if matches!(
+                    name.as_str(),
+                    "$sva_follow_overlap" | "$sva_follow_nonoverlap"
+                ) && args.len() == 2 =>
+            {
+                SvaNode::Followed {
+                    ante: self.sva_build_seq(&args[0]),
+                    overlap: name == "$sva_follow_overlap",
+                    cons: Box::new(self.sva_compile_node(&args[1])),
+                }
             }
             ExprKind::Binary { op, left, right }
                 if matches!(op, BinaryOp::OrMinusArrow | BinaryOp::OrFatArrow) =>
@@ -96158,7 +96182,8 @@ impl Simulator {
         match (node, st) {
             (SvaNode::Seq(_, strong), SvaState::Seq(_)) => *strong,
             (SvaNode::Eventually(_), SvaState::Leaf(_)) => true,
-            (SvaNode::Impl { cons: cn, .. }, SvaState::Impl { cons, .. }) => {
+            (SvaNode::Impl { cons: cn, .. }, SvaState::Impl { cons, .. })
+            | (SvaNode::Followed { cons: cn, .. }, SvaState::Followed { cons, .. }) => {
                 cons.iter().any(|(_, cs)| Self::sva_strong_pending(cn, cs))
             }
             (SvaNode::And(na, nb), SvaState::And { a, b, ra, rb })
@@ -96204,6 +96229,14 @@ impl Simulator {
             ExprKind::SystemCall { name, args } if name == "$sva_locals" => {
                 args.last().is_some_and(Self::sva_has_property_op)
             }
+            ExprKind::SystemCall { name, .. }
+                if matches!(
+                    name.as_str(),
+                    "$sva_follow_overlap" | "$sva_follow_nonoverlap"
+                ) =>
+            {
+                true
+            }
             ExprKind::Binary { op, left, right } => {
                 matches!(op, BinaryOp::OrMinusArrow | BinaryOp::OrFatArrow)
                     || (matches!(op, BinaryOp::SvaAnd | BinaryOp::SeqOr)
@@ -96241,6 +96274,12 @@ impl Simulator {
                 ante_alive: true,
                 matched_any: false,
                 cons: Vec::new(),
+            },
+            SvaNode::Followed { .. } => SvaState::Followed {
+                ante: SvaRun::with_env(env.clone()),
+                ante_alive: true,
+                cons: Vec::new(),
+                vacuous: false,
             },
             SvaNode::And(a, b) => SvaState::And {
                 a: Box::new(Self::sva_new_state(a, env)),
@@ -96610,6 +96649,66 @@ impl Simulator {
                         SvaOutcome::Pass
                     } else {
                         SvaOutcome::Vacuous
+                    })
+                } else {
+                    None
+                }
+            }
+            (
+                SvaNode::Followed {
+                    ante,
+                    overlap,
+                    cons: cons_node,
+                },
+                SvaState::Followed {
+                    ante: arun,
+                    ante_alive,
+                    cons,
+                    vacuous,
+                },
+            ) => {
+                // Unlike implication, one successful match suffices. Failure of
+                // one consequent must not discard other possible match points.
+                let mut fresh = Vec::new();
+                if *ante_alive {
+                    let (matches, alive) = self.sva_run_advance(ante, arun, false);
+                    *ante_alive = alive;
+                    for env in matches {
+                        fresh.push(Self::sva_new_state(cons_node, &env));
+                    }
+                }
+                let mut keep = Vec::new();
+                for (mut delay, mut cst) in cons.drain(..) {
+                    delay = delay.saturating_sub(1);
+                    if delay > 0 {
+                        keep.push((delay, cst));
+                        continue;
+                    }
+                    match self.sva_advance(cons_node, &mut cst) {
+                        Some(SvaOutcome::Pass) => return Some(SvaOutcome::Pass),
+                        Some(SvaOutcome::Vacuous) => *vacuous = true,
+                        Some(SvaOutcome::Fail) => {}
+                        None => keep.push((0, cst)),
+                    }
+                }
+                for mut cst in fresh {
+                    if *overlap {
+                        match self.sva_advance(cons_node, &mut cst) {
+                            Some(SvaOutcome::Pass) => return Some(SvaOutcome::Pass),
+                            Some(SvaOutcome::Vacuous) => *vacuous = true,
+                            Some(SvaOutcome::Fail) => {}
+                            None => keep.push((0, cst)),
+                        }
+                    } else {
+                        keep.push((1, cst));
+                    }
+                }
+                *cons = keep;
+                if !*ante_alive && cons.is_empty() {
+                    Some(if *vacuous {
+                        SvaOutcome::Vacuous
+                    } else {
+                        SvaOutcome::Fail
                     })
                 } else {
                     None

@@ -326,3 +326,6 @@ mod next_twelve_finish_barrier_371;
 
 #[path = "scheduling/generated_assertions_374.rs"]
 mod next_rest_generated_assertions_374;
+
+#[path = "scheduling/followed_by_375.rs"]
+mod next_rest_followed_by_375;
