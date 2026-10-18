@@ -2019,8 +2019,23 @@ struct WaiterValueCtx {
 /// raw `(this_handle, field_name)`; `->`/`@` inside a method both resolve to
 /// the same `this`, so a trigger and a wait on the same object match.
 #[derive(Clone)]
+enum InstanceEventKeys {
+    One((usize, String)),
+    Any(Vec<(usize, String)>),
+}
+
+impl InstanceEventKeys {
+    fn contains(&self, key: &(usize, String)) -> bool {
+        match self {
+            Self::One(own) => own == key,
+            Self::Any(keys) => keys.contains(key),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct InstanceEventWaiter {
-    key: (usize, String),
+    key: InstanceEventKeys,
     pid: usize,
     continuation: ProcCont,
 }
@@ -54205,6 +54220,38 @@ impl Simulator {
                         return;
                     }
                     TimingControl::Event(event) => {
+                        // §9.4.2 / §15.5: an OR of class events parks on
+                        // their identities, not signal sensitivities (class
+                        // events have no signal-table slot). One waiter owns
+                        // the whole group and is removed after its first wake.
+                        if let EventControl::EventExpr(terms) = event
+                            && terms.len() > 1
+                            && terms.iter().all(|t| {
+                                t.edge.is_none()
+                                    && t.iff.is_none()
+                                    && Self::class_scope_chain(&t.expr).is_some()
+                            })
+                        {
+                            let keys: Option<Vec<_>> = terms
+                                .iter()
+                                .map(|term| {
+                                    self.expr_instance_event_field_general(&term.expr)
+                                        .or_else(|| {
+                                            Self::plain_ident_name(&term.expr)
+                                                .and_then(|n| self.resolve_this_event_field(&n))
+                                        })
+                                        .or_else(|| self.static_class_event_key(&term.expr))
+                                })
+                                .collect();
+                            if let Some(keys) = keys {
+                                self.instance_event_waiters.push(InstanceEventWaiter {
+                                    key: InstanceEventKeys::Any(keys),
+                                    pid,
+                                    continuation: pc.pushed_body(body, pc.start + i + 1),
+                                });
+                                return;
+                            }
+                        }
                         // §14.11 `##0`: SYNCHRONIZE to the default clocking
                         // event — a no-op when the process is already
                         // executing in the time slot of that event (its edge
@@ -54244,7 +54291,7 @@ impl Simulator {
                                 // Chain the caller's tail rather than copying it (ProcCont::pushed_body).
                                 let cont = pc.pushed_body(body, pc.start + i + 1);
                                 self.instance_event_waiters.push(InstanceEventWaiter {
-                                    key,
+                                    key: InstanceEventKeys::One(key),
                                     pid,
                                     continuation: cont,
                                 });
@@ -54271,7 +54318,7 @@ impl Simulator {
                                 // Chain the caller's tail rather than copying it.
                                 let cont = pc.pushed_body(body, pc.start + i + 1);
                                 self.instance_event_waiters.push(InstanceEventWaiter {
-                                    key,
+                                    key: InstanceEventKeys::One(key),
                                     pid,
                                     continuation: cont,
                                 });
@@ -54327,7 +54374,7 @@ impl Simulator {
                         if let Some(key) = static_ev {
                             let cont = pc.pushed_body(body, pc.start + i + 1);
                             self.instance_event_waiters.push(InstanceEventWaiter {
-                                key,
+                                key: InstanceEventKeys::One(key),
                                 pid,
                                 continuation: cont,
                             });
@@ -90651,7 +90698,7 @@ impl Simulator {
                         }
                         if let Some(key) = key {
                             self.instance_event_waiters.push(InstanceEventWaiter {
-                                key,
+                                key: InstanceEventKeys::One(key),
                                 pid: wpid,
                                 continuation: wake,
                             });
@@ -90674,7 +90721,7 @@ impl Simulator {
                                 let cont = vec![*stmt.clone()];
                                 let pid = self.current_pid;
                                 self.instance_event_waiters.push(InstanceEventWaiter {
-                                    key,
+                                    key: InstanceEventKeys::One(key),
                                     pid,
                                     continuation: cont.into(),
                                 });
@@ -90695,7 +90742,7 @@ impl Simulator {
                                 let cont = vec![*stmt.clone()];
                                 let pid = self.current_pid;
                                 self.instance_event_waiters.push(InstanceEventWaiter {
-                                    key,
+                                    key: InstanceEventKeys::One(key),
                                     pid,
                                     continuation: cont.into(),
                                 });
@@ -92374,6 +92421,13 @@ impl Simulator {
     /// and the property's static cell name. It has no backing signal: a wait
     /// on it fell through to the NBA-region yield and woke at once.
     fn static_class_event_key(&self, e: &Expression) -> Option<(usize, String)> {
+        // §8.25 / §15.5: specialized triggers and waits use the same cell.
+        if let Some(spec) =
+            self.resolve_call_spec_params(Self::extract_call_spec(e), &self.current_spec)
+            && let ExprKind::MemberAccess { member, .. } = &e.kind
+        {
+            return self.static_class_event_key_named_spec(&spec.0, &member.name, Some(&spec));
+        }
         let (cls, field): (String, &str) = match &e.kind {
             ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
                 match h.path.as_slice() {
@@ -92393,10 +92447,25 @@ impl Simulator {
             },
             _ => return None,
         };
-        self.static_class_event_key_named(&cls, field)
+        if self.module.classes.contains_key(&cls) {
+            self.static_class_event_key_named(&cls, field)
+        } else {
+            let (base, sig) = self.resolve_class_scope_prefix(&cls)?;
+            let spec = sig.map(|sig| (base.clone(), sig));
+            self.static_class_event_key_named_spec(&base, field, spec.as_ref())
+        }
     }
 
     fn static_class_event_key_named(&self, cls: &str, field: &str) -> Option<(usize, String)> {
+        self.static_class_event_key_named_spec(cls, field, None)
+    }
+
+    fn static_class_event_key_named_spec(
+        &self,
+        cls: &str,
+        field: &str,
+        spec: Option<&(String, String)>,
+    ) -> Option<(usize, String)> {
         if !self.class_member_names().static_or_param.contains(field) {
             return None;
         }
@@ -92419,7 +92488,7 @@ impl Simulator {
                 {
                     return None;
                 }
-                return self.static_prop_key(cls, field).map(|k| (0, k));
+                return self.static_prop_key_spec(cls, field, spec).map(|k| (0, k));
             }
             cur = cd.extends.clone();
         }
@@ -92981,7 +93050,7 @@ impl Simulator {
         }
         let mut woken = Vec::new();
         self.instance_event_waiters.retain(|w| {
-            if w.key == key {
+            if w.key.contains(&key) {
                 woken.push((w.pid, w.continuation.clone()));
                 false
             } else {
