@@ -323,3 +323,6 @@ mod next_twelve_sequence_counts_367;
 
 #[path = "scheduling/finish_barrier_371.rs"]
 mod next_twelve_finish_barrier_371;
+
+#[path = "scheduling/generated_assertions_374.rs"]
+mod next_rest_generated_assertions_374;
