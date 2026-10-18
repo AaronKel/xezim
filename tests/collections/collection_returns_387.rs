@@ -45,7 +45,11 @@ fn neighbours_387() {
 }
 
 #[test]
-fn scalar_local_shadows_fixed_array_387() {
+fn scalar_locals_shadow_module_collections_387() {
     let out = output(include_str!("../issue_cases/return_shadow_387.sv"));
     assert!(out.iter().any(|s| s == "T|shadow|17 2 3"), "{out:?}");
+    assert!(
+        out.iter().any(|s| s == "T|dynamic_shadow|18 19 4 5 6 7"),
+        "{out:?}"
+    );
 }
