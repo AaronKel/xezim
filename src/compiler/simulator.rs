@@ -292,8 +292,8 @@ fn method_boost_enabled() -> bool {
 /// lowering, register allocation, block layout. Stale entries with an old
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
-// CmpBranchConst changes the serialized instruction stream.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3037;
+// Typed local bindings change the compiled instruction stream.
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3038;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1553,7 +1553,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB011";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB012";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -22776,6 +22776,7 @@ impl Simulator {
         compiler.set_cast_widths(&self.cast_widths);
         compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
         compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+        compiler.set_typedef_types(&self.module.typedef_types);
         compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
         compiler.set_assoc_arrays(&self.module.associative_arrays);
         compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -30644,6 +30645,7 @@ impl Simulator {
             );
             compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
             compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+            compiler.set_typedef_types(&self.module.typedef_types);
             compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
             compiler.set_assoc_arrays(&self.module.associative_arrays);
             compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -31045,6 +31047,7 @@ impl Simulator {
                 );
                 compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+                compiler.set_typedef_types(&self.module.typedef_types);
                 compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
                 compiler.set_assoc_arrays(&self.module.associative_arrays);
                 compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -31084,6 +31087,7 @@ impl Simulator {
                 delay_compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 delay_compiler
                     .set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+                delay_compiler.set_typedef_types(&self.module.typedef_types);
                 delay_compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
                 delay_compiler.set_assoc_arrays(&self.module.associative_arrays);
                 delay_compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -37465,6 +37469,7 @@ impl Simulator {
                 );
                 compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+                compiler.set_typedef_types(&self.module.typedef_types);
                 compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
                 compiler.set_assoc_arrays(&self.module.associative_arrays);
                 compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -37547,6 +37552,7 @@ impl Simulator {
                 );
                 compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                 compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+                compiler.set_typedef_types(&self.module.typedef_types);
                 compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
                 compiler.set_assoc_arrays(&self.module.associative_arrays);
                 compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -38304,6 +38310,7 @@ impl Simulator {
                     );
                     compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
                     compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+                    compiler.set_typedef_types(&self.module.typedef_types);
                     compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
                     compiler.set_assoc_arrays(&self.module.associative_arrays);
                     compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -52342,6 +52349,7 @@ impl Simulator {
             );
             compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
             compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+            compiler.set_typedef_types(&self.module.typedef_types);
             compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
             compiler.set_assoc_arrays(&self.module.associative_arrays);
             compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -52574,6 +52582,7 @@ impl Simulator {
             );
             compiler.set_packed_elem_widths(&self.module.packed_signal_elem_widths);
             compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+            compiler.set_typedef_types(&self.module.typedef_types);
             compiler.set_assoc_elem_widths(&self.module.assoc_elem_widths);
             compiler.set_assoc_arrays(&self.module.associative_arrays);
             compiler.set_packed_full_dims(&self.module.packed_full_dims);
@@ -169508,6 +169517,49 @@ impl Simulator {
                 });
                 let dpi_fds = self.dpi_import_fd_table();
                 let compiled = {
+                    // §6.18: retain concrete lexical aliases without binding
+                    // specialization-dependent class type parameters.
+                    let mut local_typedef_types = HashMap::default();
+                    let mut unresolved_type_names = HashSet::default();
+                    let mut cur = Some(cname.to_string());
+                    let mut seen = HashSet::default();
+                    while let Some(cn) = cur {
+                        if !seen.insert(cn.clone()) {
+                            break;
+                        }
+                        let Some(cd) = self.module.classes.get(&cn) else {
+                            break;
+                        };
+                        unresolved_type_names.extend(cd.type_param_names.iter().cloned());
+                        for (name, dt) in &cd.typedef_targets {
+                            // Keep the declaring class when an inherited alias
+                            // is reached by a bare name from a derived method.
+                            local_typedef_types.entry(name.clone()).or_insert_with(|| {
+                                let span = crate::ast::Span::dummy();
+                                DataType::TypeReference {
+                                    name: crate::ast::types::TypeName {
+                                        scopes: vec![crate::ast::types::TypeScope {
+                                            name: crate::ast::Identifier {
+                                                name: cn.clone(),
+                                                span,
+                                            },
+                                            type_args: vec![],
+                                        }],
+                                        name: crate::ast::Identifier {
+                                            name: name.clone(),
+                                            span,
+                                        },
+                                        span,
+                                    },
+                                    dimensions: vec![],
+                                    type_args: vec![],
+                                    span,
+                                }
+                            });
+                            local_typedef_types.insert(format!("{cn}::{name}"), dt.clone());
+                        }
+                        cur = cd.extends.clone();
+                    }
                     let mut compiler = BytecodeCompiler::new(
                         &self.signal_name_to_id,
                         &self.signal_signed,
@@ -169515,6 +169567,14 @@ impl Simulator {
                         &self.module.arrays,
                         &self.widths,
                     );
+                    compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
+                    compiler.set_typedef_types(&self.module.typedef_types);
+                    compiler.set_method_formal_types(ports);
+                    if let CompiledBodyKind::Function(function) = kind {
+                        compiler.set_method_return_type(&function.return_type);
+                    }
+                    compiler.set_local_typedef_types(local_typedef_types);
+                    compiler.set_unresolved_type_names(unresolved_type_names);
                     compiler.method_admission = Some(admission);
                     // issue-301 plan fact: multi-dim packed coll elements.
                     compiler.coll_elem_packed_dims = (*pre.coll_elem_packed_dims).clone();
@@ -169523,6 +169583,31 @@ impl Simulator {
                         body,
                         &mut compiler.typedef_coll_strings,
                     );
+                    // Formal aliases need the same unpacked-shape exclusion
+                    // as body-local aliases before adding scalar register facts.
+                    for port in ports {
+                        if let DataType::TypeReference { name, .. } = &port.data_type {
+                            let dims = super::elaborate::lookup_scoped_type(
+                                name,
+                                &self.module.typedef_unpacked_dims,
+                            )
+                            .filter(|dims| !dims.is_empty())
+                            .cloned()
+                            .or_else(|| {
+                                let owner = name
+                                    .scopes
+                                    .last()
+                                    .map_or(cname, |scope| scope.name.name.as_str());
+                                Self::typedef_dims_via_tables(&self.module, owner, &name.name.name)
+                                    .filter(|dims| !dims.is_empty())
+                            });
+                            if let Some(dims) = dims {
+                                compiler
+                                    .typedef_coll_dims
+                                    .insert(super::bytecode::type_name_key(name), dims);
+                            }
+                        }
+                    }
                     compiler.set_dpi_import_fds(dpi_fds);
                     if method_trace_enabled() {
                         compiler.scope_hint = Some(format!("{}.{}", cname, method_name));

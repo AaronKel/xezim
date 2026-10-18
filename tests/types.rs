@@ -477,3 +477,6 @@ mod wide_equality;
 
 #[path = "types/declaration_scope_p1.rs"]
 mod declaration_scope_p1;
+
+#[path = "types/compiled_typedef_362.rs"]
+mod compiled_typedef_362;
