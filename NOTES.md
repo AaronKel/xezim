@@ -103,7 +103,8 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   loops expose canonical scope names in VPI, waveforms and coverage (§27.4, §27.6).
   (#374 and #380, reported by akashlevy)
 * Compiled class methods retain each specialization's local types, widths,
-  signing and value sets, including inherited bindings (§8.25).
+  signing and value sets, including inherited bindings. Qualified built-in
+  types remain distinct from typedef names (§8.25).
   (#378, reported by akashlevy)
 * Added regressions for signed inlined input formals and timed loop scope
   cleanup (§12.7.1, §13.5.1). (#376 and #379, reported by akashlevy)
