@@ -77,6 +77,37 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   across calls and recursion (§6.21, §13.3, §13.4).
   (#349 and #355, reported by akashlevy)
 
+* Unpacked port connections match elements in declaration order, including
+  descending and negative ranges, slices and multidimensional arrays (§7.6).
+  (#358, reported by akashlevy)
+* Unary minus preserves operand signing and width, packed string literals use
+  integral ordering in numeric comparisons, and casts through typedef chains
+  retain signing and convert X/Z to zero for two-state targets (§5.9, §6.18,
+  §6.24.1, §11.8.1). (#359–#361 and #377, reported by akashlevy)
+* Sampled-value functions retain explicit clocks, independent history depths,
+  gated samples and slot-entry values of aggregate fields. Assertion action
+  blocks evaluate their gates after NBA updates (§16.9.3).
+  (#363, #364, #366 and #370, reported by akashlevy)
+* Fixed-array declaration patterns initialize every element, and whole-array
+  nonblocking assignments snapshot their right-hand sides before scheduling
+  updates, including negative ranges and multiple dimensions (§10.4.2, §10.9.1).
+  (#365 and #381, reported by akashlevy)
+* Long assertion delays and repetitions retain their complete bounds.
+  Followed-by properties parse with right association and evaluate alternative
+  sequence matches without treating an unmatched antecedent as vacuous success
+  (§16.9.2, §16.12.9). (#367 and #375, reported by akashlevy)
+* `$finish` stops procedural, compiled and callback-driven execution immediately.
+  Final procedures run before end-of-simulation callbacks (§9.2.3, §20.2).
+  (#371–#373, reported by akashlevy)
+* Generated assertions substitute their genvar values, and unnamed generate
+  loops expose canonical scope names in VPI, waveforms and coverage (§27.4, §27.6).
+  (#374 and #380, reported by akashlevy)
+* Compiled class methods retain each specialization's local types, widths,
+  signing and value sets, including inherited bindings (§8.25).
+  (#378, reported by akashlevy)
+* Added regressions for signed inlined input formals and timed loop scope
+  cleanup (§12.7.1, §13.5.1). (#376 and #379, reported by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
