@@ -59,6 +59,24 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   the slot-entry samples of `#1step` inputs (§14.4, §14.13, §38.36).
   (#356 and #357, reported by akashlevy)
 
+* Streaming concatenations read every element of class-member queues and
+  arrays, including slices and reversed byte streams (§11.4.14).
+  (#340, reported by urbanij)
+* Arrays of module instances split ANSI-port and expression connections,
+  preserve declared direction in every dimension, and drive output
+  concatenations through their writable parts. Unpacked connections match
+  the instances left to left (§23.3.3.5).
+  (#342 and #343, reported by akashlevy)
+* Nested packed selections retain declared dimension ranges and struct
+  member offsets in locals, formals, results and unpacked-array elements.
+  Selected writes to static class properties update their shared storage
+  (§7.4.1, §8.9, §11.5.1).
+  (#346 and #352–#354, reported by akashlevy)
+* Explicit static subroutine initializers run once before initial processes.
+  Static subroutine arrays, queues and associative arrays retain one store
+  across calls and recursion (§6.21, §13.3, §13.4).
+  (#349 and #355, reported by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
@@ -82,6 +100,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   An explicit `XEZIM_METHOD_TIER` also attempts compilation on a later call
   after enough interpreted loop iterations, including `foreach`; default
   admission continues to use call counts. (#326, contributed by Thomasb81)
+
+**Command line**
+
+* `--tee <file>` copies stdout/stderr and DPI/VPI output to a transcript while
+  retaining console output. `-vcd` and `-vcd dumpon` enable source-driven VCD
+  dumping like `--wave`. (#347, reported by akashlevy)
 
 **Maintenance**
 
