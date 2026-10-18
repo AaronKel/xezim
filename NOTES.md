@@ -114,6 +114,17 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   elements retain their clock and reset connections (§7.4.2, §23.3.3.5).
   (#342 and #343, reported by akashlevy)
 
+* Nonblocking selections of static subroutine locals preserve NBA-region
+  ordering, capture indices when scheduled, and retain their declaration-owned
+  storage after return or suspension. Partial and delayed writes preserve
+  unrelated bits and source order (§6.21, §10.4.2, §23.9).
+  (#368, contributed by akashlevy)
+* Nested packed local selections retain enum base ranges, ascending labels,
+  partial out-of-range behavior and live static storage. Two-state struct
+  members convert X/Z independently of four-state neighbors
+  (§6.19, §6.21, §7.4.1, §11.5.1).
+  (#369, contributed by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
