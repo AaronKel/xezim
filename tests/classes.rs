@@ -759,3 +759,6 @@ mod string_frame_teardown;
 
 #[path = "classes/property_seed_order.rs"]
 mod property_seed_order;
+
+#[path = "classes/static_select_346.rs"]
+mod static_select_346;

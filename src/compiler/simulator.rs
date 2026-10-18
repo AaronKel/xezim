@@ -293,7 +293,7 @@ fn method_boost_enabled() -> bool {
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
 // Typed local bindings change the compiled instruction stream.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3038;
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3039;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1553,7 +1553,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB012";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB013";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -3236,6 +3236,8 @@ type PropOwners = HashMap<String, (String, Arc<super::elaborate::ElaboratedClass
 /// none of them skips the per-class checks for that kind.
 struct ClassMemberNames {
     statics: HashSet<String>,
+    /// Cheap prefilter for selected static-property accesses.
+    static_first: [bool; 256],
     vif_props: HashSet<String>,
     /// First bytes of the `vif_props` names: a cheap prefilter for the
     /// member-chain checks that ask whether a name can be a vif property.
@@ -4315,6 +4317,24 @@ struct DeclShadow {
     real: bool,
     string: bool,
     meta: FormalMetadataSnapshot,
+}
+
+/// One selected region of a declared packed value (§7.4.1 / §11.5.1).
+struct DeclaredPackedAccess {
+    storage: String,
+    is_signed: bool,
+    static_target: Option<(String, Option<(String, String)>, String)>,
+    offset: u32,
+    width: u32,
+    dimensions: Vec<(i64, i64)>,
+    element_type: DataType,
+    unpacked: usize,
+}
+
+/// A known static root either supports packed access or retains its own path.
+enum DeclaredStaticAccess {
+    Packed(DeclaredPackedAccess),
+    Other,
 }
 
 /// One subroutine activation's displaced declarations, restored when it
@@ -68295,6 +68315,13 @@ impl Simulator {
             lhs
         };
 
+        // Packed geometry applies after reference, interface and $ rewrites.
+        if (self.needs_declared_packed_access(lhs) || self.needs_static_packed_access(lhs))
+            && let Some(changed) = self.write_declared_packed_access(lhs, val)
+        {
+            return changed;
+        }
+
         // §7.4.6 / §11.5.1: an ELEMENT index containing x or z selects nothing,
         // so the write is discarded — `a['hx] = v` must leave every element
         // alone. The index folded to 0 through `to_u64`, so it silently
@@ -71366,6 +71393,487 @@ impl Simulator {
             }
         }
         w.max(1)
+    }
+
+    /// Cold nested-select path: walk the declaration instead of guessing
+    /// bit offsets from the current value. An unpacked index changes storage;
+    /// a packed index changes the region within that storage.
+    fn declared_packed_type(&self, dt: &DataType) -> Option<(DataType, Vec<(i64, i64)>, u32)> {
+        let width = super::elaborate::resolve_type_width(
+            dt,
+            Some(&self.module.parameters),
+            Some(&self.module.typedefs),
+        );
+        if width == 0 {
+            return None;
+        }
+        let query = super::elaborate::type_query_dims_of(
+            dt,
+            Some(&self.module.parameters),
+            Some(&self.module.typedefs),
+            Some(&self.module.typedef_types),
+        );
+        let mut dimensions = query.dims;
+        let mut element =
+            super::elaborate::resolve_typedef_chain(dt, &self.module.typedef_types).clone();
+        match &mut element {
+            DataType::Struct(su) if su.packed => {
+                for d in &su.dimensions {
+                    let crate::ast::types::PackedDimension::Range { left, right, .. } = d else {
+                        return None;
+                    };
+                    dimensions.push((
+                        super::elaborate::const_eval_i64_with_params(
+                            left,
+                            Some(&self.module.parameters),
+                        )?,
+                        super::elaborate::const_eval_i64_with_params(
+                            right,
+                            Some(&self.module.parameters),
+                        )?,
+                    ));
+                }
+                su.dimensions.clear();
+            }
+            DataType::IntegerVector { .. }
+            | DataType::IntegerAtom { .. }
+            | DataType::Implicit { .. }
+            | DataType::Enum(_) => {}
+            _ => return None,
+        }
+        Some((element, dimensions, width))
+    }
+
+    /// §8.9: selected static properties share the same class cell as a
+    /// whole-property write, including a member reached through an object.
+    fn declared_static_packed_root(&mut self, expr: &Expression) -> Option<DeclaredStaticAccess> {
+        let (class, spec, member) = match &expr.kind {
+            ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                if self.frame_bound_bare_name(h).is_some()
+                    || (h.path.len() == 1 && self.dyn_name_lookup(&h.path[0].name.name).is_some())
+                {
+                    return None;
+                }
+                if h.path.len() == 1 {
+                    let member = h.path[0].name.name.clone();
+                    if let Some(class) = self.class_context_stack.last().cloned().flatten() {
+                        (class, None, member)
+                    } else {
+                        let handle = self.this_stack.last().copied().flatten()?;
+                        let (class, spec) =
+                            self.static_member_target(handle, None, None, &member)?;
+                        (class, spec, member)
+                    }
+                } else if h.path.len() == 2 {
+                    let first = &h.path[0].name.name;
+                    let member = &h.path[1].name.name;
+                    if self.module.classes.contains_key(first) {
+                        (first.clone(), None, member.clone())
+                    } else {
+                        let handle = self.eval_ident_handle(first)?;
+                        let (class, spec) =
+                            self.static_member_target(handle, Some(first), None, member)?;
+                        (class, spec, member.clone())
+                    }
+                } else {
+                    return None;
+                }
+            }
+            ExprKind::MemberAccess { expr: recv, member } => {
+                if let ExprKind::Ident(h) = &recv.kind
+                    && h.path.len() == 1
+                    && self.module.classes.contains_key(&h.path[0].name.name)
+                {
+                    (h.path[0].name.name.clone(), None, member.name.clone())
+                } else {
+                    let handle = match &recv.kind {
+                        ExprKind::This => self.this_stack.last().copied().flatten()?,
+                        ExprKind::Ident(h) if h.path.len() == 1 => {
+                            self.eval_ident_handle(&h.path[0].name.name)?
+                        }
+                        _ => return None,
+                    };
+                    let (class, spec) =
+                        self.static_member_target(handle, None, None, &member.name)?;
+                    (class, spec, member.name.clone())
+                }
+            }
+            _ => return None,
+        };
+        if !self.member_is_static_prop(&class, &member) {
+            return None;
+        }
+        let access = (|| {
+            // §8.9 / §7.4: static collections retain their collection
+            // backing store; their element type is not the property's shape.
+            if self.member_is_static_coll(&class, &member)
+                || self.static_fixed_key_in(&class, &member).is_some()
+            {
+                return None;
+            }
+            self.static_prop_key_spec(&class, &member, spec.as_ref())?;
+            let (dt, unpacked) = self.class_property_decl_type(&class, &member)?;
+            if !unpacked.is_empty() {
+                return None;
+            }
+            let (element_type, dimensions, width) = self.declared_packed_type(&dt)?;
+            // Static structs have an aliased member holder; retain its existing
+            // read/write paths instead of creating a second backing value.
+            if matches!(element_type, DataType::Struct(_)) {
+                return None;
+            }
+            Some(DeclaredPackedAccess {
+                storage: String::new(),
+                is_signed: super::elaborate::is_type_signed_resolved(
+                    &dt,
+                    &self.module.typedef_types,
+                ),
+                static_target: Some((class, spec, member)),
+                offset: 0,
+                width,
+                dimensions,
+                element_type,
+                unpacked: 0,
+            })
+        })();
+        Some(match access {
+            Some(value) => DeclaredStaticAccess::Packed(value),
+            None => DeclaredStaticAccess::Other,
+        })
+    }
+
+    fn declared_packed_access(&mut self, expr: &Expression) -> Option<DeclaredPackedAccess> {
+        match &expr.kind {
+            ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                if !self.class_member_names().statics.is_empty()
+                    && let Some(access) = self.declared_static_packed_root(expr)
+                {
+                    return match access {
+                        DeclaredStaticAccess::Packed(value) => Some(value),
+                        DeclaredStaticAccess::Other => None,
+                    };
+                }
+                let name = self
+                    .frame_bound_bare_name(h)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.resolve_hier_name(h).into_owned());
+                // Associative keys retain their key-type conversion path.
+                if self.is_associative_array(&name) {
+                    return None;
+                }
+                let dt = self.module.var_decl_types.get(&name)?;
+                let (element_type, dimensions, width) = self.declared_packed_type(dt)?;
+                let unpacked = if let Some((dims, _)) = self.module.arrays_nd.get(&name) {
+                    dims.len()
+                } else if self.module.arrays_2d.contains_key(&name) {
+                    2
+                } else if self.module.arrays.contains_key(&name)
+                    || self.module.dynamic_arrays.contains(&name)
+                {
+                    1
+                } else {
+                    0
+                };
+                Some(DeclaredPackedAccess {
+                    storage: name,
+                    is_signed: super::elaborate::is_type_signed_resolved(
+                        dt,
+                        &self.module.typedef_types,
+                    ),
+                    static_target: None,
+                    offset: 0,
+                    width,
+                    dimensions,
+                    element_type,
+                    unpacked,
+                })
+            }
+            ExprKind::Paren(inner) => self.declared_packed_access(inner),
+            ExprKind::Index { expr: base, index } => {
+                if !Self::cond_expr_is_effect_free(index, false) {
+                    return None;
+                }
+                let mut access = self.declared_packed_access(base)?;
+                let index = self.eval_expr(index).to_index()?;
+                if access.unpacked > 0
+                    || self.module.dynamic_arrays.contains(&access.storage)
+                    || self.module.queue_vars.contains(&access.storage)
+                {
+                    access.storage.push('[');
+                    Self::push_i64(&mut access.storage, index);
+                    access.storage.push(']');
+                    access.unpacked = access.unpacked.saturating_sub(1);
+                    return Some(access);
+                }
+                let (left, right) = access
+                    .dimensions
+                    .first()
+                    .copied()
+                    .unwrap_or((access.width as i64 - 1, 0));
+                if index < left.min(right) || index > left.max(right) {
+                    return None;
+                }
+                let count = u32::try_from(left.abs_diff(right) + 1).ok()?;
+                if access.width % count != 0 {
+                    return None;
+                }
+                access.width /= count;
+                access.is_signed = false;
+                let slot = if left >= right {
+                    index - right
+                } else {
+                    right - index
+                };
+                access.offset = access
+                    .offset
+                    .checked_add((slot as u32).checked_mul(access.width)?)?;
+                if !access.dimensions.is_empty() {
+                    access.dimensions.remove(0);
+                }
+                Some(access)
+            }
+            ExprKind::RangeSelect {
+                expr: base,
+                left,
+                right,
+                kind,
+            } => {
+                if !Self::cond_expr_is_effect_free(left, false)
+                    || !Self::cond_expr_is_effect_free(right, false)
+                {
+                    return None;
+                }
+                let mut access = self.declared_packed_access(base)?;
+                if access.unpacked != 0 {
+                    return None;
+                }
+                let (dl, dr) = access
+                    .dimensions
+                    .first()
+                    .copied()
+                    .unwrap_or((access.width as i64 - 1, 0));
+                let a = self.eval_expr(left).to_index()?;
+                let b = self.eval_expr(right).to_index()?;
+                let (l, r) = match kind {
+                    RangeKind::Constant => (a, b),
+                    RangeKind::IndexedUp if b > 0 => {
+                        if dl >= dr {
+                            (a.checked_add(b - 1)?, a)
+                        } else {
+                            (a, a.checked_add(b - 1)?)
+                        }
+                    }
+                    RangeKind::IndexedDown if b > 0 => {
+                        if dl >= dr {
+                            (a, a.checked_sub(b - 1)?)
+                        } else {
+                            (a.checked_sub(b - 1)?, a)
+                        }
+                    }
+                    _ => return None,
+                };
+                if l < dl.min(dr)
+                    || l > dl.max(dr)
+                    || r < dl.min(dr)
+                    || r > dl.max(dr)
+                    || (l != r && (l > r) != (dl > dr))
+                {
+                    return None;
+                }
+                let count = u32::try_from(dl.abs_diff(dr) + 1).ok()?;
+                if access.width % count != 0 {
+                    return None;
+                }
+                let stride = access.width / count;
+                access.is_signed = false;
+                let slot = if dl >= dr { r - dr } else { dr - r };
+                access.offset = access
+                    .offset
+                    .checked_add((slot as u32).checked_mul(stride)?)?;
+                access.width = u32::try_from(l.abs_diff(r) + 1).ok()?.checked_mul(stride)?;
+                if access.dimensions.is_empty() {
+                    access.dimensions.push((l, r));
+                } else {
+                    access.dimensions[0] = (l, r);
+                }
+                Some(access)
+            }
+            ExprKind::MemberAccess { expr: base, member } => {
+                if !self.class_member_names().statics.is_empty()
+                    && let Some(access) = self.declared_static_packed_root(expr)
+                {
+                    return match access {
+                        DeclaredStaticAccess::Packed(value) => Some(value),
+                        DeclaredStaticAccess::Other => None,
+                    };
+                }
+                let mut access = self.declared_packed_access(base)?;
+                if access.unpacked != 0 || !access.dimensions.is_empty() {
+                    return None;
+                }
+                let DataType::Struct(su) = &access.element_type else {
+                    return None;
+                };
+                let mut remaining = access.width;
+                for m in &su.members {
+                    let (element, dimensions, width) = self.declared_packed_type(&m.data_type)?;
+                    for d in &m.declarators {
+                        if !d.dimensions.is_empty() {
+                            return None;
+                        }
+                        let offset = if su.kind == crate::ast::types::StructUnionKind::Union {
+                            0
+                        } else {
+                            remaining = remaining.checked_sub(width)?;
+                            remaining
+                        };
+                        if d.name.name == member.name {
+                            access.offset = access.offset.checked_add(offset)?;
+                            access.width = width;
+                            access.is_signed = super::elaborate::is_type_signed_resolved(
+                                &m.data_type,
+                                &self.module.typedef_types,
+                            );
+                            access.dimensions = dimensions;
+                            access.element_type = element;
+                            return Some(access);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn needs_declared_packed_access(&self, expr: &Expression) -> bool {
+        match &expr.kind {
+            ExprKind::Index { expr: base, .. } | ExprKind::RangeSelect { expr: base, .. } => {
+                match &base.kind {
+                    ExprKind::MemberAccess { .. } => true,
+                    ExprKind::Index { .. } => {
+                        let mut root = base.as_ref();
+                        while let ExprKind::Index { expr, .. } = &root.kind {
+                            root = expr;
+                        }
+                        let ExprKind::Ident(h) = &root.kind else {
+                            return false;
+                        };
+                        let name = self
+                            .frame_bound_bare_name(h)
+                            .map(std::borrow::Cow::Borrowed)
+                            .unwrap_or_else(|| self.resolve_hier_name(h));
+                        // Ordinary vectors in unpacked memories already use the
+                        // existing fast element path. Only packed geometry needs
+                        // the declaration walk below the unpacked boundary.
+                        self.module
+                            .packed_full_dims
+                            .get(name.as_ref())
+                            .is_some_and(|d| d.len() > 1)
+                            || self.module.packed_struct_fields.contains_key(name.as_ref())
+                    }
+                    _ => false,
+                }
+            }
+            ExprKind::MemberAccess { expr: base, .. } => {
+                matches!(base.kind, ExprKind::Index { .. })
+            }
+            _ => false,
+        }
+    }
+
+    fn needs_static_packed_access(&self, expr: &Expression) -> bool {
+        let mut base = match &expr.kind {
+            ExprKind::Index { expr, .. } | ExprKind::RangeSelect { expr, .. } => expr.as_ref(),
+            _ => return false,
+        };
+        // Values are seeded lazily: an empty value map must not discard the
+        // first selected write. Eligibility comes from the declarations.
+        let names = self.class_member_names();
+        if names.statics.is_empty() {
+            return false;
+        }
+        let candidate = |name: &str| {
+            name.as_bytes()
+                .first()
+                .is_some_and(|&b| names.static_first[b as usize])
+                && names.statics.contains(name)
+        };
+        loop {
+            match &base.kind {
+                ExprKind::Index { expr, .. }
+                | ExprKind::RangeSelect { expr, .. }
+                | ExprKind::Paren(expr) => base = expr,
+                _ => break,
+            }
+        }
+        match &base.kind {
+            ExprKind::Ident(h) if h.path.len() == 1 => {
+                (self.class_context_stack.last().is_some_and(Option::is_some)
+                    || self.this_stack.last().copied().flatten().is_some())
+                    && candidate(&h.path[0].name.name)
+            }
+            ExprKind::Ident(h) if h.path.len() == 2 => candidate(&h.path[1].name.name),
+            ExprKind::MemberAccess { member, .. } => candidate(&member.name),
+            _ => false,
+        }
+    }
+
+    fn read_declared_packed_access(&mut self, expr: &Expression) -> Option<Value> {
+        let access = self.declared_packed_access(expr)?;
+        if access.unpacked != 0 || access.width == 0 {
+            return None;
+        }
+        let value = if let Some((class, spec, member)) = &access.static_target {
+            self.static_read_in(class, spec.clone(), member)?
+        } else {
+            self.get_local_or_signal(&access.storage)?
+        };
+        let end = access.offset.checked_add(access.width)?;
+        if end > value.width {
+            return None;
+        }
+        let mut selected = value.range_select((end - 1) as usize, access.offset as usize);
+        selected.is_signed = access.is_signed;
+        Some(selected)
+    }
+
+    fn write_declared_packed_access(&mut self, expr: &Expression, value: &Value) -> Option<bool> {
+        let access = self.declared_packed_access(expr)?;
+        if access.unpacked != 0 || access.width == 0 {
+            return None;
+        }
+        let mut stored = if let Some((class, spec, member)) = &access.static_target {
+            self.static_read_in(class, spec.clone(), member)?
+        } else {
+            self.get_local_or_signal(&access.storage)?
+        };
+        if access.offset.checked_add(access.width)? > stored.width {
+            return None;
+        }
+        let before = stored.clone();
+        if access.static_target.is_none() && self.forced_names.contains(&access.storage) {
+            return Some(false);
+        }
+        let fitted = if value.has_xz()
+            && super::elaborate::is_type_two_state_resolved(
+                &access.element_type,
+                &self.module.typedef_types,
+            ) {
+            value.to_two_state().resize_for_assign(access.width)
+        } else {
+            value.resize_for_assign(access.width)
+        };
+        for bit in 0..access.width {
+            stored.set_bit((access.offset + bit) as usize, fitted.get_bit(bit as usize));
+        }
+        let changed = stored != before;
+        if let Some((class, spec, member)) = access.static_target {
+            self.static_write_in(&class, spec, &member, stored);
+        } else {
+            self.set_local_or_signal(&access.storage, stored);
+        }
+        Some(changed)
     }
 
     fn select_base_elem_dim(&self, base: &Expression) -> Option<(i64, i64)> {
@@ -76044,6 +76552,11 @@ impl Simulator {
                 {
                     return v;
                 }
+                if matches!(base.kind, ExprKind::Index { .. })
+                    && let Some(v) = self.read_declared_packed_access(expr)
+                {
+                    return v;
+                }
                 if matches!(
                     base.kind,
                     ExprKind::Call { .. } | ExprKind::MemberAccess { .. }
@@ -76073,13 +76586,18 @@ impl Simulator {
                     return v;
                 }
             }
-            ExprKind::Index { expr: base, .. } | ExprKind::RangeSelect { expr: base, .. }
+            ExprKind::Index { expr: base, .. } | ExprKind::RangeSelect { expr: base, .. } => {
                 if matches!(
                     base.kind,
                     ExprKind::Call { .. } | ExprKind::MemberAccess { .. }
-                ) =>
-            {
-                if let Some(v) = self.recv_call_once_eval(expr, ctx_width) {
+                ) && let Some(v) = self.recv_call_once_eval(expr, ctx_width)
+                {
+                    return v;
+                }
+                if (self.needs_declared_packed_access(expr)
+                    || self.needs_static_packed_access(expr))
+                    && let Some(v) = self.read_declared_packed_access(expr)
+                {
                     return v;
                 }
             }
@@ -86360,13 +86878,22 @@ impl Simulator {
                 // makes `pk[i][j][k]` a lane select and the full dims answer
                 // `$size(pk, 3)` / `$dimensions(pk)`. Only the flat element
                 // width was kept, so the packed dims read as one 32-bit one.
-                match super::elaborate::packed_full_dims_of(data_type, &self.module.parameters) {
+                match super::elaborate::packed_full_dims_of(data_type, &self.module.parameters)
+                    .or_else(|| {
+                        super::elaborate::packed_full_dims_chained(
+                            data_type,
+                            &self.module.parameters,
+                            &self.module.typedef_types,
+                        )
+                    }) {
                     Some(fdims) if fdims.len() >= 2 => {
                         if let Some(ew) = super::elaborate::packed_inner_elem_width(
                             data_type,
                             &self.module.parameters,
                             &self.module.typedefs,
-                        ) {
+                        )
+                        .or_else(|| self.ast_decl_elem_width(data_type))
+                        {
                             self.module
                                 .packed_signal_elem_widths
                                 .insert(d.name.name.clone(), ew);
@@ -103394,7 +103921,10 @@ impl Simulator {
                         d.len()
                     } else if self.module.arrays_2d.contains_key(&*n) {
                         2
-                    } else if self.module.arrays.contains_key(&*n) {
+                    } else if self.module.arrays.contains_key(&*n)
+                        || self.module.dynamic_arrays.contains(&*n)
+                        || self.is_associative_array(&n)
+                    {
                         1
                     } else {
                         0
@@ -106693,13 +107223,29 @@ impl Simulator {
     /// declared signedness and, for a 2-state type, x/z bits as 0. Stored at
     /// the RHS's own size, `logic [1:0] s[4] = '{0,1,2,3}` held 32-bit signed
     /// ints, so `s[2]` read -2 and `s[2] == 2` was false. Anything else (an
-    /// associative or dynamic collection, a string or real element) is
-    /// returned unchanged.
+    /// associative collection, a string or real element) is returned
+    /// unchanged. A formal or dynamic element can take its width from the
+    /// array registration when no per-element width was installed.
     fn fit_block_local_array_elem(&self, name: &str, elem_name: &str, val: Value) -> Value {
         if val.is_real || self.is_associative_array(name) || self.is_string_collection(name) {
             return val;
         }
-        let Some(&w) = self.widths.get(elem_name).filter(|&&w| w > 0) else {
+        let width = self
+            .widths
+            .get(elem_name)
+            .copied()
+            .filter(|w| *w > 0)
+            .or_else(|| {
+                self.module
+                    .dynamic_arrays
+                    .contains(name)
+                    .then(|| self.widths.get(name).copied().filter(|w| *w > 0))
+                    .flatten()
+            })
+            .or_else(|| self.module.arrays.get(name).map(|shape| shape.2))
+            .or_else(|| self.module.arrays_2d.get(name).map(|shape| shape.2))
+            .or_else(|| self.module.arrays_nd.get(name).map(|shape| shape.1));
+        let Some(w) = width else {
             return val;
         };
         let Some(dt) = self.module.var_decl_types.get(name) else {
@@ -109944,6 +110490,26 @@ impl Simulator {
                 None => self.module.packed_struct_fields.remove(&name),
             };
         }
+        // §7.4.1: a private array keeps its element's packed geometry.
+        // The declaration registered it under the lexical name before the
+        // storage rename; subsequent selected accesses use the private key.
+        if let Some(dimensions) = self
+            .module
+            .packed_full_dims
+            .get(bare)
+            .filter(|d| d.len() > 1)
+            .cloned()
+        {
+            self.module.packed_full_dims.insert(key.clone(), dimensions);
+            if let Some(width) = self.module.packed_signal_elem_widths.get(bare).copied() {
+                self.module
+                    .packed_signal_elem_widths
+                    .insert(key.clone(), width);
+            }
+            if let Some(dt) = self.module.var_decl_types.get(bare).cloned() {
+                self.module.var_decl_types.insert(key.clone(), dt);
+            }
+        }
         key
     }
 
@@ -109988,6 +110554,8 @@ impl Simulator {
         self.module.queue_max_sizes.remove(key);
         self.module.descending_arrays.remove(key);
         self.module.var_decl_types.remove(key);
+        self.module.packed_full_dims.remove(key);
+        self.module.packed_signal_elem_widths.remove(key);
         self.module.packed_struct_fields.remove(key);
         self.module.array_elem_class.remove(key);
         if !self.local_coll_elems.is_empty()
@@ -146609,12 +147177,9 @@ impl Simulator {
                     || self.module.arrays_2d.contains_key(&port.name.name)
                     || self.module.arrays_nd.contains_key(&port.name.name);
                 if let Some(info) = self.bind_array_arg(port, actual) {
-                    // §21.2.1.7: a formal bound from its default pattern
-                    // records its declared type, as the task path does for
-                    // every formal, or `%p` of the formal printed x.
-                    if info.1.is_empty() {
-                        self.register_formal_type_metadata(&port.name.name, &port.data_type, false);
-                    }
+                    // §7.4.1 / §13.5 / §21.2.1.7: every unpacked formal
+                    // retains its element type, including packed geometry.
+                    self.register_formal_type_metadata(&port.name.name, &port.data_type, false);
                     if is_out {
                         if !info.1.is_empty() {
                             array_writebacks.push(info);
@@ -147931,6 +148496,22 @@ impl Simulator {
             }
         }
         if !no_unpacked_dims {
+            // §7.4.1 / §13.5: unpacked formals still have a packed element
+            // type. Keep that geometry below their unpacked indices.
+            if let Some(dims) = super::elaborate::packed_full_dims_chained(
+                dt,
+                &self.module.parameters,
+                &self.module.typedef_types,
+            )
+            .filter(|dims| dims.len() > 1)
+            {
+                self.module.packed_full_dims.insert(name.to_string(), dims);
+                if let Some(width) = self.ast_decl_elem_width(dt) {
+                    self.module
+                        .packed_signal_elem_widths
+                        .insert(name.to_string(), width);
+                }
+            }
             return;
         }
         // A built-in scalar or a plain class has no element width, struct
@@ -165621,6 +166202,10 @@ impl Simulator {
                     param_first[b as usize] = true;
                 }
             }
+            let mut static_first = [false; 256];
+            for n in &statics {
+                if let Some(&b) = n.as_bytes().first() { static_first[b as usize] = true; }
+            }
             let mut vif_first = [false; 256];
             for n in &vif_props {
                 if let Some(&b) = n.as_bytes().first() {
@@ -165630,6 +166215,7 @@ impl Simulator {
             ClassMemberNames {
                 ident_slow,
                 statics,
+                static_first,
                 vif_props,
                 vif_first,
                 methods,
