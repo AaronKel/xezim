@@ -4103,6 +4103,10 @@ struct ProcessContext {
     local_gen_stack: Vec<u64>,
     local_type_stack: Vec<(HashMap<String, String>, HashMap<String, String>)>,
     class_context_stack: Vec<Option<String>>,
+    /// §8.25: a suspended static task retains its specialization and the
+    /// enclosing bindings, independently of other processes running next.
+    current_spec: Option<(String, String)>,
+    spec_scope_stack: Vec<(String, String)>,
     cg_this: Option<usize>,
     return_value: Option<Value>,
     break_flag: bool,
@@ -50285,6 +50289,8 @@ impl Simulator {
             local_gen_stack: self.local_gen_stack.clone(),
             local_type_stack: self.local_type_stack.clone(),
             class_context_stack: self.class_context_stack.clone(),
+            current_spec: self.current_spec.clone(),
+            spec_scope_stack: self.spec_scope_stack.clone(),
             cg_this: self.cg_this,
             return_value: self.return_value.clone(),
             break_flag: self.break_flag,
@@ -50344,6 +50350,8 @@ impl Simulator {
             && self.local_gen_stack.is_empty()
             && self.local_type_stack.is_empty()
             && self.class_context_stack.is_empty()
+            && self.current_spec.is_none()
+            && self.spec_scope_stack.is_empty()
             && self.cg_this.is_none()
             && self.return_value.is_none()
             && !self.break_flag
@@ -50376,6 +50384,8 @@ impl Simulator {
             local_gen_stack: std::mem::take(&mut self.local_gen_stack),
             local_type_stack: std::mem::take(&mut self.local_type_stack),
             class_context_stack: std::mem::take(&mut self.class_context_stack),
+            current_spec: self.current_spec.take(),
+            spec_scope_stack: std::mem::take(&mut self.spec_scope_stack),
             cg_this: self.cg_this.take(),
             return_value: self.return_value.take(),
             break_flag: std::mem::replace(&mut self.break_flag, false),
@@ -50404,6 +50414,8 @@ impl Simulator {
         self.local_gen_stack = ctx.local_gen_stack;
         self.local_type_stack = ctx.local_type_stack;
         self.class_context_stack = ctx.class_context_stack;
+        self.current_spec = ctx.current_spec;
+        self.spec_scope_stack = ctx.spec_scope_stack;
         self.cg_this = ctx.cg_this;
         self.return_value = ctx.return_value;
         self.break_flag = ctx.break_flag;
@@ -51343,7 +51355,9 @@ impl Simulator {
         let saved_ctx_needed = !self.this_stack.is_empty()
             || !self.local_stack.is_empty()
             || !self.class_context_stack.is_empty()
-            || !self.block_scope_saves.is_empty();
+            || !self.block_scope_saves.is_empty()
+            || self.current_spec.is_some()
+            || !self.spec_scope_stack.is_empty();
         let has_pid_ctx = self.process_contexts.contains_key(&pid);
         if !saved_ctx_needed && !has_pid_ctx {
             // This path skips the context dance, so the per-method locals base
@@ -53748,7 +53762,12 @@ impl Simulator {
                                     pid,
                                     &pc.pushed_frame(frame, pc.start + i + 1),
                                 );
-                                self.current_spec = saved_spec;
+                                // A parked continuation is still executing
+                                // inside its innermost task frame. Snapshot
+                                // that binding; ScopePop restores the caller.
+                                if !self.is_pid_suspended(pid) {
+                                    self.current_spec = saved_spec;
+                                }
                                 return;
                             }
                         }
