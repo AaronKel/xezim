@@ -7108,6 +7108,9 @@ pub struct Simulator {
     /// still read/written route to each cell's shared value only when the
     /// SUBROUTINE-PRECISE key below also matches.)
     static_local_names: HashSet<String>,
+    /// Module/package subroutine statics allocated before procedural code.
+    hoisted_sub_static_names: HashSet<String>,
+    hoisted_static_subroutines: HashSet<String>,
     /// First-byte membership filter over `static_local_names`. The eval
     /// preamble tests EVERY bare identifier against that set, so a designs
     /// with any static subroutine local paid a string hash per expression
@@ -12865,6 +12868,8 @@ impl Simulator {
             }
             m
         };
+        let (hoisted_sub_static_names, hoisted_static_subroutines) =
+            Self::hoist_subroutine_statics(&mut module);
         let mut sim = Self {
             prev_val,
             prev_xz,
@@ -13222,6 +13227,8 @@ impl Simulator {
             m_scope_stack: Vec::new(),
             static_local_vars: HashMap::default(),
             static_local_names: HashSet::default(),
+            hoisted_sub_static_names,
+            hoisted_static_subroutines,
             static_local_first: [false; 256],
             static_local_keys: HashSet::default(),
             static_local_syncs: Vec::new(),
@@ -55772,22 +55779,23 @@ impl Simulator {
                     declarators,
                     data_type,
                 } => {
-                    // Integral and real scalars: what the static-local store
-                    // keeps exactly (an aggregate keeps its per-call storage).
                     if lifetime.is_none()
-                        && matches!(
-                            data_type,
-                            DataType::IntegerAtom { .. }
-                                | DataType::IntegerVector { .. }
-                                | DataType::Real { .. }
-                        )
+                        // Keep the chosen policy for initialized declarations
+                        // without an explicit lifetime, including mixed lists.
+                        && declarators.iter().all(|d| d.init.is_none())
                         && declarators.iter().any(|d| {
-                            d.dimensions.is_empty()
-                                && d.init.is_none()
-                                && super::bytecode::BytecodeCompiler::static_local_carries(
-                                    &d.name.name,
-                                    rest,
-                                )
+                            d.init.is_none()
+                                && (!d.dimensions.is_empty()
+                                    || (matches!(
+                                        data_type,
+                                        DataType::IntegerAtom { .. }
+                                            | DataType::IntegerVector { .. }
+                                            | DataType::Real { .. }
+                                    )
+                                        && super::bytecode::BytecodeCompiler::static_local_carries(
+                                            &d.name.name,
+                                            rest,
+                                        )))
                         })
                     {
                         *lifetime = Some(crate::ast::types::Lifetime::Static);
@@ -55824,6 +55832,302 @@ impl Simulator {
                 _ => {}
             }
         }
+    }
+
+    /// §6.21 / §13.3 / §13.4: module subroutine statics have one
+    /// declaration-owned store, shared by recursion and allocated before
+    /// time zero. Allocate all cells first, then evaluate their initializers.
+    fn hoist_subroutine_statics(
+        module: &mut ElaboratedModule,
+    ) -> (HashSet<String>, HashSet<String>) {
+        fn selected(s: &Statement) -> bool {
+            match &s.kind {
+                StatementKind::VarDecl {
+                    lifetime: Some(crate::ast::types::Lifetime::Static),
+                    declarators,
+                    ..
+                } => declarators
+                    .iter()
+                    .any(|d| d.init.is_some() || !d.dimensions.is_empty()),
+                StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                    stmts.iter().any(selected)
+                }
+                StatementKind::If {
+                    then_stmt,
+                    else_stmt,
+                    ..
+                } => selected(then_stmt) || else_stmt.as_deref().is_some_and(selected),
+                StatementKind::Case { items, .. } => items.iter().any(|i| selected(&i.stmt)),
+                StatementKind::For { body, .. }
+                | StatementKind::While { body, .. }
+                | StatementKind::DoWhile { body, .. }
+                | StatementKind::Repeat { body, .. }
+                | StatementKind::Forever { body }
+                | StatementKind::Foreach { body, .. }
+                | StatementKind::TimingControl { stmt: body, .. }
+                | StatementKind::Wait { stmt: body, .. } => selected(body),
+                _ => false,
+            }
+        }
+        fn collect(
+            s: &Statement,
+            module: &ElaboratedModule,
+            formals: &HashMap<String, Expression>,
+            allocate: &mut Vec<Statement>,
+            initialize: &mut Vec<Statement>,
+            names: &mut HashSet<String>,
+        ) {
+            match &s.kind {
+                StatementKind::VarDecl {
+                    data_type,
+                    lifetime: Some(crate::ast::types::Lifetime::Static),
+                    declarators,
+                } => {
+                    for d in declarators {
+                        if d.init.is_none() && d.dimensions.is_empty() {
+                            continue;
+                        }
+                        names.insert(d.name.name.clone());
+                        let mut storage = d.clone();
+                        storage.init = None;
+                        allocate.push(Statement::new(
+                            StatementKind::VarDecl {
+                                data_type: data_type.clone(),
+                                lifetime: Some(crate::ast::types::Lifetime::Static),
+                                declarators: vec![storage],
+                            },
+                            s.span,
+                        ));
+                        if let Some(init) = &d.init {
+                            let empty = std::collections::HashSet::new();
+                            let rhs = super::elaborate::rewrite_expr(
+                                init,
+                                "",
+                                formals,
+                                &empty,
+                                &HashMap::default(),
+                            );
+                            let lhs = Expression::new(
+                                ExprKind::Ident(HierarchicalIdentifier {
+                                    root: None,
+                                    path: vec![crate::ast::expr::HierPathSegment {
+                                        name: d.name.clone(),
+                                        selects: vec![],
+                                    }],
+                                    span: d.span,
+                                    cached_signal_id: std::cell::Cell::new(None),
+                                    cached_resolved_name: std::cell::OnceCell::new(),
+                                }),
+                                d.span,
+                            );
+                            initialize.push(Statement::new(
+                                StatementKind::BlockingAssign {
+                                    lvalue: lhs,
+                                    rvalue: rhs,
+                                },
+                                s.span,
+                            ));
+                        }
+                    }
+                }
+                StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                    for st in stmts {
+                        collect(st, module, formals, allocate, initialize, names);
+                    }
+                }
+                StatementKind::If {
+                    then_stmt,
+                    else_stmt,
+                    ..
+                } => {
+                    collect(then_stmt, module, formals, allocate, initialize, names);
+                    if let Some(st) = else_stmt {
+                        collect(st, module, formals, allocate, initialize, names);
+                    }
+                }
+                StatementKind::Case { items, .. } => {
+                    for i in items {
+                        collect(&i.stmt, module, formals, allocate, initialize, names);
+                    }
+                }
+                StatementKind::For { body, .. }
+                | StatementKind::While { body, .. }
+                | StatementKind::DoWhile { body, .. }
+                | StatementKind::Repeat { body, .. }
+                | StatementKind::Forever { body }
+                | StatementKind::Foreach { body, .. }
+                | StatementKind::TimingControl { stmt: body, .. }
+                | StatementKind::Wait { stmt: body, .. } => {
+                    collect(body, module, formals, allocate, initialize, names)
+                }
+                _ => {}
+            }
+        }
+        fn prepare(
+            module: &ElaboratedModule,
+            items: &mut Vec<Statement>,
+            ports: &[crate::ast::decl::FunctionPort],
+            routine: &str,
+            ordinal: usize,
+            allocate: &mut Vec<Statement>,
+            initialize: &mut Vec<Statement>,
+            names: &mut HashSet<String>,
+        ) -> bool {
+            if !items.iter().any(selected) {
+                return false;
+            }
+            let span = items
+                .first()
+                .map(|s| s.span)
+                .unwrap_or_else(crate::ast::Span::dummy);
+            let mut body = Statement::new(
+                StatementKind::SeqBlock {
+                    name: Some(crate::ast::Identifier {
+                        name: routine.to_string(),
+                        span,
+                    }),
+                    stmts: std::mem::take(items),
+                },
+                span,
+            );
+            // Rename inner declarations before their enclosing ones so every
+            // static owns a unique cell even when sibling blocks reuse a name.
+            Simulator::rename_nested_shadowed(
+                &mut body,
+                &|_| true,
+                &mut Vec::new(),
+                &mut 0,
+                &format!("psub{ordinal}_"),
+                1,
+                "",
+                &mut Vec::new(),
+            );
+            let mut formals = HashMap::default();
+            for port in ports {
+                let w = super::elaborate::resolve_type_width(
+                    &port.data_type,
+                    Some(&module.parameters),
+                    Some(&module.typedefs),
+                )
+                .max(1);
+                let two = super::elaborate::is_type_two_state_resolved(
+                    &port.data_type,
+                    &module.typedef_types,
+                );
+                let expression = if matches!(
+                    &port.data_type,
+                    DataType::Simple {
+                        kind: crate::ast::types::SimpleType::String,
+                        ..
+                    }
+                ) {
+                    Expression::new(ExprKind::StringLiteral(String::new()), port.span)
+                } else if super::elaborate::is_type_real(&port.data_type) {
+                    Expression::new(
+                        ExprKind::Number(crate::ast::expr::NumberLiteral::Real(0.0)),
+                        port.span,
+                    )
+                } else {
+                    Expression::new(
+                        ExprKind::Number(crate::ast::expr::NumberLiteral::Integer {
+                            size: Some(w),
+                            signed: super::elaborate::is_type_signed_resolved(
+                                &port.data_type,
+                                &module.typedef_types,
+                            ),
+                            base: crate::ast::expr::NumberBase::Binary,
+                            value: if two {
+                                "0".repeat(w as usize)
+                            } else {
+                                "x".repeat(w as usize)
+                            },
+                            cached_val: std::cell::Cell::new(None),
+                        }),
+                        port.span,
+                    )
+                };
+                formals.insert(port.name.name.clone(), expression);
+            }
+            collect(&body, module, &formals, allocate, initialize, names);
+            if let StatementKind::SeqBlock { stmts, .. } = body.kind {
+                *items = stmts;
+            }
+            true
+        }
+        let mut names = HashSet::default();
+        let mut routines = HashSet::default();
+        let mut allocate = Vec::new();
+        let mut initialize = Vec::new();
+        let mut ordinal = 0usize;
+        let mut functions: Vec<_> = module.functions.keys().cloned().collect();
+        functions.sort();
+        let mut rewritten: HashMap<String, Vec<Statement>> = HashMap::default();
+        for key in functions {
+            let Some(original) = module.functions.get(&key) else {
+                continue;
+            };
+            if !original.name.scopes.is_empty() {
+                continue;
+            }
+            let mut fd = original.clone();
+            if let Some(items) = rewritten.get(&fd.name.name.name) {
+                fd.items = items.clone();
+            } else {
+                ordinal += 1;
+                if !prepare(
+                    module,
+                    &mut fd.items,
+                    &fd.ports,
+                    &fd.name.name.name,
+                    ordinal,
+                    &mut allocate,
+                    &mut initialize,
+                    &mut names,
+                ) {
+                    continue;
+                }
+                routines.insert(fd.name.name.name.clone());
+                rewritten.insert(fd.name.name.name.clone(), fd.items.clone());
+            }
+            module.functions.insert(key, fd);
+        }
+        let mut tasks: Vec<_> = module.tasks.keys().cloned().collect();
+        tasks.sort();
+        for key in tasks {
+            let Some(mut td) = module.tasks.remove(&key) else {
+                continue;
+            };
+            if td.name.scopes.is_empty() {
+                ordinal += 1;
+                if prepare(
+                    module,
+                    &mut td.items,
+                    &td.ports,
+                    &td.name.name.name,
+                    ordinal,
+                    &mut allocate,
+                    &mut initialize,
+                    &mut names,
+                ) {
+                    routines.insert(td.name.name.name.clone());
+                }
+            }
+            module.tasks.insert(key, td);
+        }
+        if !allocate.is_empty() {
+            let block = |stmts: Vec<Statement>| super::elaborate::InitialBlock {
+                stmt: Statement::new(
+                    StatementKind::SeqBlock { name: None, stmts },
+                    crate::ast::Span::dummy(),
+                ),
+                scope: String::new(),
+            };
+            module.static_init_blocks.insert(0, block(allocate));
+            if !initialize.is_empty() {
+                module.static_init_blocks.push(block(initialize));
+            }
+        }
+        (names, routines)
     }
 
     /// Would `mark_static_locals` mark anything in `items` (read-only, so a
@@ -85760,6 +86064,12 @@ impl Simulator {
         // running each time, as an automatic one would.
         let explicit_static = matches!(lifetime, Some(crate::ast::types::Lifetime::Static));
         for d in declarators {
+            if explicit_static
+                && !self.static_local_syncs.is_empty()
+                && self.hoisted_sub_static_names.contains(&d.name.name)
+            {
+                continue;
+            }
             if static_block && (explicit_static || d.init.is_none()) {
                 // Done already? (Allocation-free once it is: the activation
                 // after the first.)
@@ -86725,7 +87035,9 @@ impl Simulator {
                     self.exec_statement(&assign);
                 }
             } else {
-                if let Some(task_name) = self.current_static_task.clone() {
+                if !matches!(lifetime, Some(crate::ast::types::Lifetime::Automatic))
+                    && let Some(task_name) = self.current_static_task.clone()
+                {
                     let key = format!("{}.{}", task_name, d.name.name);
                     if !self.static_task_init.insert(key) {
                         continue;
@@ -87349,6 +87661,11 @@ impl Simulator {
                 .unwrap_or_default();
             for d in declarators {
                 let nm = &d.name.name;
+                // Hoisted declarations already use their shared global cell;
+                // never create a second frame-backed scalar mirror.
+                if self.hoisted_sub_static_names.contains(nm) {
+                    continue;
+                }
                 // Skip aggregates: arrays/queues/assoc are not persisted.
                 if !d.dimensions.is_empty()
                     || self.module.arrays.contains_key(nm)
@@ -145818,6 +146135,12 @@ impl Simulator {
 
     fn stmt_is_pure(&mut self, st: &Statement, locals: &HashSet<String>) -> bool {
         match &st.kind {
+            // A declaration-owned static can be written by this call;
+            // treating it as a per-call local hides observable side effects.
+            StatementKind::VarDecl {
+                lifetime: Some(crate::ast::types::Lifetime::Static),
+                ..
+            } => false,
             StatementKind::Null | StatementKind::VarDecl { .. } => true,
             StatementKind::Break | StatementKind::Continue => true,
             StatementKind::Return(e) => e.as_ref().is_none_or(|e| self.expr_is_pure(e, locals)),
@@ -168576,6 +168899,11 @@ impl Simulator {
         fd: &crate::ast::decl::FunctionDeclaration,
         pkg_scope: Option<&str>,
     ) -> Option<Value> {
+        if !self.hoisted_static_subroutines.is_empty()
+            && self.hoisted_static_subroutines.contains(&fd.name.name.name)
+        {
+            return None;
+        }
         let cname = self.free_fn_class_name(pkg_scope);
         let ret_is_string = Self::is_string_data_type(&fd.return_type);
         self.try_run_compiled_method(

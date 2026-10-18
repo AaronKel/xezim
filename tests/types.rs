@@ -480,3 +480,6 @@ mod declaration_scope_p1;
 
 #[path = "types/compiled_typedef_362.rs"]
 mod compiled_typedef_362;
+
+#[path = "types/static_lifetime_p2.rs"]
+mod static_lifetime_p2;
