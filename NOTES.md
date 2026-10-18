@@ -143,6 +143,17 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   boundaries and function side effects are preserved (§11.8.2, §11.4.10).
   (#384, reported by akashlevy)
 
+* Concurrent assertions and covers observe clock edges at time zero and
+  four-state clock transitions, using Preponed samples (§16.5, §9.4.2).
+  (#385, reported by akashlevy)
+* Assertion action blocks preserve generated scope and keep their local
+  declarations separate from module variables (§16.14.1, §23.9, §27.4).
+  (#386, reported by akashlevy)
+* Returning an unpacked function-name variable no longer recurses. Dynamic
+  arrays, queues and fixed arrays retain their elements across return,
+  including descending fixed ranges (§13.4.1, §7.6).
+  (#387, reported by Dragon-Git)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
