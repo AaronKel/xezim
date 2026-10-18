@@ -109,6 +109,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Added regressions for signed inlined input formals and timed loop scope
   cleanup (§12.7.1, §13.5.1). (#376 and #379, reported by akashlevy)
 
+* Instance arrays resolve parameter-named sizes before expansion, including
+  imported, scoped and overridden parameters and multiple dimensions. Interface
+  elements retain their clock and reset connections (§7.4.2, §23.3.3.5).
+  (#342 and #343, reported by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
