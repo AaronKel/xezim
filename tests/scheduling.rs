@@ -329,3 +329,6 @@ mod next_rest_generated_assertions_374;
 
 #[path = "scheduling/followed_by_375.rs"]
 mod next_rest_followed_by_375;
+
+#[path = "scheduling/loop_scope_379.rs"]
+mod next_rest_loop_scope_379;
