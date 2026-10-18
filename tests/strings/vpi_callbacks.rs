@@ -1051,3 +1051,24 @@ fn next_twelve_vpi_finish_stops_awakened_processes() {
     assert!(text.contains("PASS n=2"), "{text}");
     assert!(!text.contains("FAIL"), "{text}");
 }
+
+/// §9.2.3: end callbacks observe writes from every final procedure.
+#[test]
+fn next_rest_issue373_final_before_end_callback() {
+    let (text, success) = run(
+        "final_before_end_373",
+        include_str!("../issue_cases/rest_issue373_1.c"),
+        include_str!("../issue_cases/rest_issue373_0.sv"),
+        &[],
+    );
+    assert!(success, "{text}");
+    assert!(!text.contains("FAIL"), "{text}");
+    assert!(
+        text.contains("cbEndOfSimulation: top.final_ran = 1"),
+        "{text}"
+    );
+    assert!(
+        text.find("final block").unwrap() < text.find("cbEndOfSimulation:").unwrap(),
+        "{text}"
+    );
+}

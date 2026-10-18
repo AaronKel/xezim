@@ -20871,12 +20871,6 @@ impl Simulator {
         {
             self.time = self.max_time;
         }
-        // cbEndOfSimulation, once, after the event loop terminates and before
-        // `final` blocks execute; preceded by cbEnterInteractive when `$stop`
-        // ended the run.
-        if self.vpi_cb_mask != 0 {
-            self.vpi_end_of_simulation();
-        }
         // LRM §9.2.3 — `final` procedures run after the event loop terminates
         // but BEFORE any trace flush. May not contain time-consuming
         // statements (no `#`, `@`, `wait`). We honor that by running each
@@ -20910,6 +20904,11 @@ impl Simulator {
                 self.finished = false;
             }
             self.finished = was_finished;
+        }
+        // §9.2.3: end-of-simulation callbacks observe all final procedures.
+        // cbEnterInteractive has already been delivered if $stop ended the run.
+        if self.vpi_cb_mask != 0 {
+            self.vpi_end_of_simulation();
         }
         if self.code_cov.is_some() {
             self.emit_coverage_summary();
