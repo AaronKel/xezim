@@ -505,3 +505,6 @@ mod let_declaration_scopes;
 mod constraint_inside_wrap;
 #[path = "misc/loop_var_scope_lint.rs"]
 mod loop_var_scope_lint;
+
+#[path = "misc/cli_transcript_347.rs"]
+mod cli_transcript_347;
