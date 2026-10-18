@@ -90981,7 +90981,15 @@ impl Simulator {
                             } else {
                                 self.pending_ret_collection = Some(n.to_string());
                             }
-                        } else {
+                        } else if self
+                            .fn_ret_collection_stack
+                            .last()
+                            .copied()
+                            .unwrap_or(false)
+                            && h.path.iter().all(|seg| seg.selects.is_empty())
+                        {
+                            // A scalar local can shadow a module's fixed
+                            // array; only an unpacked return consumes it whole.
                             self.snapshot_ret_fixed(&n);
                         }
                     }
