@@ -253,3 +253,6 @@ mod instance_array_342;
 
 #[path = "hierarchy/positional_ports_358.rs"]
 mod next_twelve_positional_ports_358;
+
+#[path = "hierarchy/generate_names_380.rs"]
+mod next_rest_generate_names_380;
