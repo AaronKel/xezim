@@ -57702,9 +57702,32 @@ impl Simulator {
         Some(format!("{}.{}", bound_name, member.name))
     }
 
+    /// §23.9: a local or instance property wins over a same-named module
+    /// signal for selected writes, just as it does for whole-variable writes.
+    fn bare_selected_storage_shadows_signal(&self, h: &HierarchicalIdentifier) -> bool {
+        if h.root.is_some() || h.path.len() != 1 || !h.path[0].selects.is_empty() {
+            return false;
+        }
+        let name = &h.path[0].name.name;
+        self.local_stack
+            .last()
+            .is_some_and(|f| f.contains_key(name))
+            || self
+                .this_stack
+                .last()
+                .copied()
+                .flatten()
+                .and_then(|h| self.heap.get(h))
+                .and_then(|o| o.as_ref())
+                .is_some_and(|o| o.properties.contains_key(name))
+    }
+
     fn resolve_nba_target(&mut self, lhs: &Expression) -> Option<usize> {
         match &lhs.kind {
             ExprKind::Ident(hier) => {
+                if self.bare_selected_storage_shadows_signal(hier) {
+                    return None;
+                }
                 let is_ambiguous_leaf =
                     hier.path.len() == 1 && !hier.path[0].name.name.contains('.');
                 // Use cached signal ID if available
@@ -69182,7 +69205,9 @@ impl Simulator {
                 // + HashMap lookup on every call for tight memory-init loops).
                 let target_id: Option<usize> = match &expr.kind {
                     ExprKind::Ident(hier) => {
-                        if let Some(id) = hier.cached_signal_id.get() {
+                        if self.bare_selected_storage_shadows_signal(hier) {
+                            None
+                        } else if let Some(id) = hier.cached_signal_id.get() {
                             Some(id)
                         } else {
                             let name = self.resolve_hier_name(hier);

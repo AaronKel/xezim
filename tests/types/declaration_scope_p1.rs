@@ -24,6 +24,10 @@ fn issue341_declaration_scope() {
     check(include_str!("../issue_cases/issue341_scope.sv"), 1);
 }
 
+#[test]
+fn issue344_declaration_scope() {
+    check(include_str!("../issue_cases/issue344_scope.sv"), 10);
+}
 
 #[test]
 fn issue345_declaration_scope() {
@@ -82,6 +86,21 @@ fn context_declaration_neighbors() {
     );
 }
 
+#[test]
+fn select_declaration_neighbors() {
+    check_lines(
+        include_str!("../issue_cases/p1_select_neighbors.sv"),
+        &[
+            "T|PASS input select 3e",
+            "T|PASS local selects 85",
+            "T|PASS property selects 91",
+            "T|PASS indexed up d0",
+            "T|PASS indexed down 30",
+            "T|PASS module unchanged a5",
+            "T|errors=0",
+        ],
+    );
+}
 
 fn check_lines(src: &str, expected: &[&str]) {
     let sim = simulate(src, 1000).expect("simulate declaration neighbors");
