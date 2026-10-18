@@ -19751,25 +19751,24 @@ impl Simulator {
         }
         // §16.5/§16.14: declarative concurrent assertions exist before
         // Active processes run, including an initial clock's time-zero edge.
-        // Register only the synthetic assertion blocks here; procedural sites
-        // must still capture their variables when their procedure executes.
+        // Extract only synthetic assertion blocks, retaining the existing
+        // storage and streaming behavior of ordinary pending processes.
+        // Procedural sites still capture locals when their procedure executes.
         let declarative = |st: &Statement| matches!(&st.kind, StatementKind::Assertion(a) if a.is_property && !a.procedural);
-        let (sites, initial_blocks): (Vec<_>, Vec<_>) = initial_blocks
-            .into_iter()
-            .partition(|ib| declarative(&ib.stmt));
-        let (pending_sites, pending_initial): (Vec<_>, Vec<_>) = pending_initial
-            .into_iter()
-            .partition(|p| declarative(&p.source));
-        let (early_sites, early): (Vec<_>, Vec<_>) =
-            early.into_iter().partition(|ib| declarative(&ib.stmt));
+        let mut initial_blocks = initial_blocks;
+        let mut pending_initial = pending_initial;
         let saved_pid = self.current_pid;
         let saved_scope = self.current_scope.clone();
         let saved_hint = self.name_resolve_hint.borrow_mut().take();
         let saved_activation = self.activation_scope.borrow_mut().take();
-        for ib in sites
-            .into_iter()
-            .chain(early_sites)
-            .chain(pending_sites.into_iter().map(&mut rename_pending))
+        for ib in initial_blocks
+            .extract_if(.., |ib| declarative(&ib.stmt))
+            .chain(early.extract_if(.., |ib| declarative(&ib.stmt)))
+            .chain(
+                pending_initial
+                    .extract_if(.., |p| declarative(&p.source))
+                    .map(&mut rename_pending),
+            )
         {
             self.current_pid = self.next_pid;
             self.next_pid += 1;
@@ -21053,9 +21052,9 @@ impl Simulator {
     }
 
     /// Detect `initial begin VAR = CONST; forever #d VAR = ~VAR; end`
-    /// and turn it into a ClockGen. Applies the seed assignment in-place
-    /// so subsequent edge detection sees the right starting value, then
-    /// returns a ClockGen to push onto `clock_generators`. Returns None
+    /// and turn it into a ClockGen. With concurrent assertions, the caller
+    /// schedules the seed in Active after Preponed sampling; otherwise seed
+    /// in-place. Return the periodic generator, or None
     /// if the initial block's shape doesn't match.
     fn try_extract_initial_clock_gen(&mut self, stmts: &[Statement]) -> Option<ClockGen> {
         if stmts.len() != 2 {
@@ -149742,7 +149741,8 @@ impl Simulator {
     /// so the caller's `q = f()` copies the full queue (an empty `'{}` must
     /// yield size 0, and `'{a,b}` must keep both elements).
     /// The unpacked dimensions of a function return type that names a
-    /// queue, dynamic or associative array typedef; `None` otherwise.
+    /// queue, dynamic or associative array typedef, or a one-dimensional
+    /// fixed unpacked array; `None` otherwise.
     fn fn_ret_coll_dims(&self, dt: &DataType) -> Option<Vec<crate::ast::types::UnpackedDimension>> {
         use crate::ast::types::UnpackedDimension as UD;
         let DataType::TypeReference {
