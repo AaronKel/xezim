@@ -493,5 +493,8 @@ mod next_twelve_unsigned_negation_359;
 #[path = "types/two_state_casts_361.rs"]
 mod next_twelve_two_state_casts_361;
 
+#[path = "types/input_formals_376.rs"]
+mod next_rest_input_formals_376;
+
 #[path = "types/typedef_casts_377.rs"]
 mod next_rest_typedef_casts_377;
