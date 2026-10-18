@@ -320,3 +320,6 @@ mod next_twelve_sampled_history_363;
 
 #[path = "scheduling/sequence_counts_367.rs"]
 mod next_twelve_sequence_counts_367;
+
+#[path = "scheduling/finish_barrier_371.rs"]
+mod next_twelve_finish_barrier_371;

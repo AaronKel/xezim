@@ -7364,11 +7364,6 @@ pub struct Simulator {
     /// an invocation of each named task. Filled by bind_task_frame, cleared
     /// by unwind_task_frame; a cross-process disable kills the listed pids.
     active_task_pids: HashMap<String, HashSet<usize>>,
-    /// A `$finish` raised by a waiters-first `@(edge)` continuation is held
-    /// until the current time slot's edge blocks AND postponed-side passes
-    /// (SVA actions, $monitor/$strobe) have run — reference simulators still
-    /// fire a final-cycle assertion action or display racing the finish.
-    finish_deferred: bool,
     /// §15.5.5 event variables are HANDLES to synchronization objects:
     /// `ev_alias = ev_b` makes both names one object. Maps an event variable
     /// (or element key `arr[i]`) to the event it currently aliases;
@@ -13331,7 +13326,6 @@ impl Simulator {
             pending_nba_triggers: Vec::new(),
             pending_nba_instance_triggers: Vec::new(),
             active_task_pids: HashMap::default(),
-            finish_deferred: false,
             event_aliases: HashMap::default(),
             nba_fast: Vec::new(),
             // Named signals stay on the dense hot path. Unnamed large-array
@@ -21190,6 +21184,9 @@ impl Simulator {
     /// FIFO rank (`ClockGen::ahead`) has been reached. Returns whether a due
     /// generator was left for later in this slot.
     fn fire_due_clocks(&mut self, ready_only: bool) -> bool {
+        if self.finished {
+            return false;
+        }
         let mut held = false;
         let trace = self.sched_trace_on();
         // Collected inside the &mut borrow of `clock_generators`, printed
@@ -27382,6 +27379,9 @@ impl Simulator {
                     let saved = self.ts_fallback_enter();
                     self.exec_statement(&st);
                     self.ts_fallback_exit(saved);
+                    if self.finished {
+                        return true;
+                    }
                 }
                 TsInsn::SaveSig { sig } => {
                     let (v, x) = self.signal_table[*sig as usize].raw_bits();
@@ -28336,6 +28336,9 @@ impl Simulator {
                         let saved = self.ts_fallback_enter();
                         self.exec_statement(&st);
                         self.ts_fallback_exit(saved);
+                        if self.finished {
+                            return true;
+                        }
                     }
                     TsInsn::SaveSig { sig } => {
                         let (v, x) = self.signal_table[*sig as usize].raw_bits();
@@ -29787,6 +29790,9 @@ impl Simulator {
                         let saved = self.ts_fallback_enter();
                         self.exec_statement(&st);
                         self.ts_fallback_exit(saved);
+                        if self.finished {
+                            return true;
+                        }
                     }
                     TsInsn::SaveSig { sig } => {
                         let (v, x) = self.signal_table[*sig as usize].raw_bits();
@@ -35197,6 +35203,9 @@ impl Simulator {
                 | Insn::RetCollection(..)
                 | Insn::AssignPendingColl(..) => {
                     local_count += self.exec_class_opcode(&insns[pc]);
+                    if self.finished {
+                        break;
+                    }
                 }
                 // Advance a compiled foreach: pop the slot's next key into
                 // the var register; `ok` = 0 at exhaustion (loop exit).
@@ -36173,6 +36182,9 @@ impl Simulator {
                         .entry(reason)
                         .or_insert((0u64, 0u64));
                     ent.0 += 1;
+                    if self.finished {
+                        break;
+                    }
                 }
                 Insn::StmtFallback(payload) => {
                     let s = payload.0.clone();
@@ -36191,6 +36203,10 @@ impl Simulator {
                         .or_insert((0u64, 0u64));
                     e.0 += 1;
                     e.1 += elapsed;
+                    // §20.2: an AST system task can terminate this stream.
+                    if self.finished {
+                        break;
+                    }
                 }
                 Insn::InitLocalColl(payload) => {
                     // class-perf: a function-local QUEUE/unsized-dynarray decl
@@ -46530,7 +46546,7 @@ impl Simulator {
     fn drain_edge_cascade(&mut self, cascade_limit: u32) -> (u64, u64, u64, u64) {
         let (mut t_snap, mut t_nba, mut t_settle, mut t_edges) = (0u64, 0u64, 0u64, 0u64);
         let mut cascade_iter = 0u32;
-        while cascade_iter < cascade_limit {
+        while cascade_iter < cascade_limit && !self.finished {
             // Inactive region precedes the NBA region (§4.5): `#0`
             // continuations parked by this round's active-region work run
             // before its NBAs commit.
@@ -47751,6 +47767,9 @@ impl Simulator {
             accum.t_process += t.elapsed().as_nanos() as u64;
         }
 
+        if self.finished {
+            return;
+        }
         // IEEE 1800-2017 §9.2.2.2: an always_comb with an empty inferred
         // sensitivity list triggers exactly once at time zero, AFTER all
         // initial/always procedures have started (run to their first delay).
@@ -47779,9 +47798,15 @@ impl Simulator {
         let _t = profile_timing.then(std::time::Instant::now);
         // §4.5: inactive (`#0`) continuations run before this slot's NBAs.
         self.drain_inactive_pre_nba();
+        if self.finished {
+            return;
+        }
         // §38.36.2 cbNBASynch: the Pre-NBA region.
         if self.vpi_cb_mask & vpi_cb::m(vpi_cb::CB_NBA_SYNCH) != 0 {
             self.vpi_nba_synch();
+            if self.finished {
+                return;
+            }
         }
         if !self.nba_fast.is_empty()
             || !self.nba_queue.is_empty()
@@ -47820,19 +47845,31 @@ impl Simulator {
         if let Some(t) = _t {
             accum.t_edges += t.elapsed().as_nanos() as u64;
         }
+        if self.finished {
+            return;
+        }
         let (ds, dn, dse, de) = self.drain_edge_cascade(cascade_limit);
         accum.t_snap += ds;
         accum.t_nba += dn;
         accum.t_settle += dse;
         accum.t_edges += de;
+        if self.finished {
+            return;
+        }
 
         // LRM §4.4 region ordering — observed runs after the NBA region
         // has settled but BEFORE the postponed region (which is where
         // $strobe and $monitor live). No-op when no probes are registered.
         self.drain_observed_region();
+        if self.finished {
+            return;
+        }
         // LRM §16.5 SVA clocked property evaluation. Detects edges on
         // each registered clock signal and ticks pending consequents.
         self.tick_sva_sites();
+        if self.finished {
+            return;
+        }
         // LRM §14.3 clocking-block input snapshot — refresh per-cycle
         // sample state so subsequent `cb.<sig>` reads see the pre-edge
         // value (`#1step` input skew).
@@ -47852,17 +47889,23 @@ impl Simulator {
         // region — so they observe post-edge state and this cycle's samples.
         let tick_late_epoch_start = self.late_resume_epoch;
         self.drain_deferred_clocking_conts();
+        if self.finished {
+            return;
+        }
         self.drain_reactive_region();
+        if self.finished {
+            return;
+        }
         self.drain_nba_region_waiters();
+        if self.finished {
+            return;
+        }
         self.fire_vpi_synch_cbs();
+        if self.finished {
+            return;
+        }
         self.check_monitor();
         self.drain_pending_strobes();
-        // Deferred `$finish` from a waiters-first continuation: this time
-        // slot's edge blocks, SVA actions and monitors have all run — stop.
-        if self.finish_deferred {
-            self.finish_deferred = false;
-            self.finished = true;
-        }
         self.dump_write_changes();
 
         // Condition-waiter fixpoint (level-sensitive `wait(expr)` resume).
@@ -47897,8 +47940,17 @@ impl Simulator {
                 self.check_edges();
                 let _ = self.drain_edge_cascade(cascade_limit);
                 self.drain_deferred_clocking_conts();
+                if self.finished {
+                    return;
+                }
                 self.drain_reactive_region();
+                if self.finished {
+                    return;
+                }
                 self.drain_nba_region_waiters();
+                if self.finished {
+                    return;
+                }
                 self.drain_condition_waiters(false, true);
                 late_passes += 1;
                 if self.finished || late_passes > 10_000 || self.late_resume_epoch == epoch_before {
@@ -50862,14 +50914,8 @@ impl Simulator {
             if self.dpi_export_depth > 0 && !self.condition_waiters.is_empty() {
                 self.nested_drain_condition_waiters();
             }
-            // §20.2: a `$finish` the edge delivery above deferred to the end
-            // of this slot (`finish_deferred`, as `run_one_tick` honours it)
-            // stops the run here too. This loop never took it: the slot
-            // ended, the flag stayed set, and a nested scheduler kept
-            // advancing time to `--max-time` (#290).
-            if self.finish_deferred {
-                self.finish_deferred = false;
-                self.finished = true;
+            if self.finished {
+                break;
             }
             // §4.4.2.3: a process resumed above may have parked a `#0`
             // continuation in the Inactive queue. apply_nba for this pass
@@ -50882,7 +50928,7 @@ impl Simulator {
         // Final slot inside the window: its NBA/settle/edge work has already
         // run above, so service it here rather than letting the caller's tick
         // attribute it to the delay's target time.
-        if slot_pending {
+        if slot_pending && !self.finished {
             self.run_postponed_region();
         }
         self.current_pid = saved_pid;
@@ -58345,6 +58391,9 @@ impl Simulator {
     }
 
     fn apply_nba(&mut self) {
+        if self.finished {
+            return;
+        }
         // Value-trace attribution: NBA commits run outside the scheduling
         // process, so current_pid is stale here -- stamp the phase so the
         // drain prints "nba" instead of a misleading process origin.
@@ -60531,6 +60580,9 @@ impl Simulator {
     }
 
     fn check_edges_inner(&mut self, detect_subset: Option<&[usize]>, validate_coverage: bool) {
+        if self.finished {
+            return;
+        }
         // A `#delay` in an edge block's body re-enters here through the
         // synchronous `TimingControl::Delay` arm. That is legitimate — the
         // delay's own region flush must deliver edges made before it — but a
@@ -60615,14 +60667,6 @@ impl Simulator {
             }
             if let Some(t) = _t_w {
                 self.prof_edge_waiters += t.elapsed().as_nanos() as u64;
-            }
-            // A `$finish` from one of these continuations ends the run AFTER
-            // this edge delivery completes: the same edge's always blocks
-            // still fire once (reference-simulator behavior — a final-cycle
-            // `$display` monitor racing the testbench's `$finish` prints).
-            if self.finished {
-                self.finish_deferred = true;
-                self.finished = false;
             }
         }
         // Cheap handle; `self.edge_blocks` stays populated so nested passes and
@@ -61867,6 +61911,9 @@ impl Simulator {
             // no StmtFallback insns (common case: 99%+ of edges don't fall
             // back to AST exec, since bytecode pre-resolves signal IDs).
             for &bi in &sequential_blocks {
+                if self.finished {
+                    break;
+                }
                 let needs_hint =
                     bi < self.edge_block_needs_hint.len() && self.edge_block_needs_hint[bi];
                 let t_seq = if self.edge_block_stats_enabled {
@@ -62107,18 +62154,12 @@ impl Simulator {
             }
         }
         self.in_edge_cont = __prev_edge_cont;
-        if !waiters_first && active_region && self.finished {
-            // A `$finish` from a continuation resumed AFTER this edge's
-            // blocks stops the run once the slot completes: its SVA ticks
-            // (tick_sva_sites runs after this pass returns) and postponed
-            // monitors still fire — reference behavior, mirroring the
-            // waiters-first pre-block deferral above.
-            self.finish_deferred = true;
-            self.finished = false;
-        }
     }
 
     fn settle_combinatorial(&mut self) {
+        if self.finished {
+            return;
+        }
         if self.event_measure {
             self.event_phase += 1; // comb SETTLE phase (distinct from sample)
         }
@@ -66271,6 +66312,12 @@ impl Simulator {
     }
 
     fn assign_value(&mut self, lhs: &Expression, val: &Value) -> bool {
+        // §20.2: a function can terminate simulation while its caller is
+        // evaluating an assignment's RHS. Do not commit that caller's write.
+        // Final procedures run with `finished` cleared (§9.2.3).
+        if self.finished {
+            return false;
+        }
         if matches!(&lhs.kind, ExprKind::MemberAccess { expr, .. }
                 if !matches!(&expr.kind, ExprKind::Ident(h) if h.path.len() == 1))
             || matches!(&lhs.kind, ExprKind::Ident(h) if h.path.len() >= 3)
@@ -97072,6 +97119,9 @@ impl Simulator {
     }
 
     fn tick_sva_sites(&mut self) {
+        if self.finished {
+            return;
+        }
         if self.sva_sites.is_empty() {
             return;
         }
@@ -97101,6 +97151,9 @@ impl Simulator {
         // Use indices so we can call &mut self methods inside the loop
         // without holding a borrow on self.sva_sites.
         for i in 0..self.sva_sites.len() {
+            if self.finished {
+                break;
+            }
             let clk_name = &self.sva_sites[i].clock_signal;
             if clk_name.is_empty() {
                 continue;
@@ -102620,7 +102673,7 @@ impl Simulator {
         &mut self,
         stmt: &crate::ast::stmt::Statement,
         hint: Option<&str>,
-    ) {
+    ) -> bool {
         let saved_ts = self.timescale_scope_override.take();
         self.timescale_scope_override = hint.map(|h| h.to_string());
         // `%m` wants the instance-relative scope the interpreter's edge path
@@ -102637,6 +102690,7 @@ impl Simulator {
         self.exec_statement(stmt);
         *self.name_resolve_hint.borrow_mut() = saved_hint;
         self.timescale_scope_override = saved_ts;
+        self.finished
     }
 
     /// JIT bridge: both planes in one call (see `xezim_jit_load_signal2`).

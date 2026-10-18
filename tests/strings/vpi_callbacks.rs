@@ -1037,3 +1037,17 @@ fn vpi_cb_lifecycle_and_signal() {
     ];
     assert_eq!(got, want, "{out}");
 }
+
+/// §20.2 / §38.4: a callback's finish prevents delivery of the edge it drove.
+#[test]
+fn next_twelve_vpi_finish_stops_awakened_processes() {
+    let (text, success) = run(
+        "finish_edge_371",
+        include_str!("../issue_cases/next_issue371_2.c"),
+        include_str!("../issue_cases/next_issue371_1.sv"),
+        &[],
+    );
+    assert!(success, "{text}");
+    assert!(text.contains("PASS n=2"), "{text}");
+    assert!(!text.contains("FAIL"), "{text}");
+}
