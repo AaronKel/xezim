@@ -78041,49 +78041,51 @@ impl Simulator {
                     // `[2:0]` array starts at index 2, a 2-D array goes row
                     // by row. A queue / dynamic-array SLICE `q[a:b]` streams
                     // elements a..b.
-                    let elem_list: Option<(Vec<String>, u32)> = match &p.kind {
-                        ExprKind::Ident(h) => {
-                            let n = self.resolve_hier_name(h);
-                            // One probe for the common scalar operand;
-                            // the 2-D / N-D tables are usually empty.
-                            if self.module.arrays.contains_key(&*n)
-                                || (!self.module.arrays_2d.is_empty()
-                                    && self.module.arrays_2d.contains_key(&*n))
-                                || (!self.module.arrays_nd.is_empty()
-                                    && self.module.arrays_nd.contains_key(&*n))
-                            {
-                                self.stream_elem_order(&n)
-                            } else {
-                                None
+                    // §11.4.14: resolve the collection's backing storage,
+                    // including class members, before reading its elements.
+                    let elem_list = if let Some(name) = self.array_operand_name(p) {
+                        self.stream_elem_order(&name)
+                    } else {
+                        match &p.kind {
+                            ExprKind::Ident(h) => {
+                                let name = self.resolve_hier_name(h);
+                                self.stream_elem_order(&name)
                             }
-                        }
-                        ExprKind::RangeSelect {
-                            expr: base,
-                            left,
-                            right,
-                            ..
-                        } => match &base.kind {
-                            ExprKind::Ident(h)
-                                if self
-                                    .module
-                                    .dynamic_arrays
-                                    .contains(&*self.resolve_hier_name(h)) =>
-                            {
-                                let n = self.resolve_hier_name(h).to_string();
-                                let l = self.eval_expr(left).to_i64();
-                                let r = self.eval_expr(right).to_i64();
-                                match (l, r) {
-                                    (Some(l), Some(r)) if l <= r && r - l < 1 << 20 => {
-                                        self.stream_elem_order(&n).map(|(_, ew)| {
-                                            ((l..=r).map(|i| format!("{}[{}]", n, i)).collect(), ew)
-                                        })
+                            ExprKind::RangeSelect {
+                                expr: base,
+                                left,
+                                right,
+                                ..
+                            } => {
+                                if let Some(name) = self.array_operand_name(base)
+                                    && self.module.dynamic_arrays.contains(&name)
+                                {
+                                    let left = self.eval_expr(left).to_i64();
+                                    let right = self.eval_expr(right).to_i64();
+                                    match (left, right) {
+                                        (Some(left), Some(right))
+                                            if left <= right && right - left < 1 << 20 =>
+                                        {
+                                            self.stream_elem_order(&name).map(|(_, width)| {
+                                                (
+                                                    (left..=right)
+                                                        .map(|i| format!("{name}[{i}]"))
+                                                        .collect(),
+                                                    width,
+                                                )
+                                            })
+                                        }
+                                        _ => None,
                                     }
-                                    _ => None,
+                                } else {
+                                    None
                                 }
                             }
+                            ExprKind::Paren(inner) => self
+                                .array_operand_name(inner)
+                                .and_then(|name| self.stream_elem_order(&name)),
                             _ => None,
-                        },
-                        _ => None,
+                        }
                     };
                     let piece = if let Some((names, ew)) = elem_list {
                         let mut acc = Value::zero(0);

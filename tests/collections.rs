@@ -186,3 +186,6 @@ mod declarator_typedef_dims;
 mod package_var_collisions;
 #[path = "collections/foreach_typedef_neighbours_312.rs"]
 mod foreach_typedef_neighbours_312;
+
+#[path = "collections/member_stream_340.rs"]
+mod member_stream_340;
