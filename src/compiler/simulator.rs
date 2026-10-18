@@ -61365,6 +61365,13 @@ impl Simulator {
                     );
                 }
                 if needs_hint {
+                    // §6.21: an AST fallback belongs to this always process,
+                    // not to a suspended task that caused edge dispatch.
+                    let saved_context = if self.process_context_is_default() {
+                        None
+                    } else {
+                        Some(self.take_process_context())
+                    };
                     let saved_hint = self.name_resolve_hint.borrow().clone();
                     // Same activation-scope install as run_process_stmts:
                     // the fallback stmts execute as THIS block's activation
@@ -61391,6 +61398,9 @@ impl Simulator {
                     self.timescale_scope_override = None;
                     *self.name_resolve_hint.borrow_mut() = saved_hint;
                     *self.activation_scope.borrow_mut() = saved_activation_scope;
+                    if let Some(ctx) = saved_context {
+                        self.restore_process_context(ctx);
+                    }
                 } else {
                     self.exec_bytecode(bi);
                 }

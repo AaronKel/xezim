@@ -25,6 +25,10 @@ fn issue341_declaration_scope() {
 }
 
 
+#[test]
+fn issue345_declaration_scope() {
+    check(include_str!("../issue_cases/issue345_scope.sv"), 1);
+}
 
 #[test]
 fn issue348_declaration_scope() {
@@ -70,6 +74,13 @@ fn storage_declaration_neighbors() {
     );
 }
 
+#[test]
+fn context_declaration_neighbors() {
+    check_lines(
+        include_str!("../issue_cases/p1_context_neighbors.sv"),
+        &["T|counts=3 3 13 1 3 errors=0"],
+    );
+}
 
 
 fn check_lines(src: &str, expected: &[&str]) {
