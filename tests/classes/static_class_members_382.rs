@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-fn check(source: &str, mode: &[(&str, &str)], passes: usize) {
+fn check(source: &str, mode: &[(&str, &str)], passes: usize) -> String {
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "xezim_static_382_{}_{}",
@@ -41,6 +41,7 @@ fn check(source: &str, mode: &[(&str, &str)], passes: usize) {
         passes,
         "{text}"
     );
+    text
 }
 
 const ORIGINAL: &str = include_str!("../issue_cases/static_class_members_382.sv");
@@ -111,5 +112,25 @@ fn static_event_groups_interpreted() {
         EVENTS,
         &[("XEZIM_COMPILE_METHODS", "0"), ("XEZIM_PROC_FSM", "0")],
         8,
+    );
+}
+
+#[test]
+fn module_class_type_names_retain_their_instance_paths() {
+    let text = check(SCOPES, &[], 13);
+    let got: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with("T|type "))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "T|type top.u1 class top/u1/holder",
+            "T|type top.u2 class top/u2/holder",
+            "T|type top.u3 class top/u3/holder",
+            "T|type top.u4 class top/u4/holder",
+            "T|type top.u5 class top/u5/holder",
+            "T|type top.u6 class top/u6/holder",
+        ]
     );
 }

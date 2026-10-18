@@ -15,7 +15,7 @@ module local_a(output int id, output int count, output string label);
   endclass
   initial begin
     holder h = new;
-    id = h.id(); count = holder::next(); label = holder::label_text();
+    $display("T|type %m %s",$typename(h)); id = h.id(); count = holder::next(); label = holder::label_text();
   end
 endmodule
 module local_b(output int id, output string label);
@@ -24,27 +24,27 @@ module local_b(output int id, output string label);
     function int id(); return 22; endfunction
   endclass
   holder h = new;
-  initial begin id = h.id(); label = holder::label_text(); end
+  initial begin $display("T|type %m %s",$typename(h)); id = h.id(); label = holder::label_text(); end
 endmodule
 module local_alias(output int id);
   class holder; function int id(); return 33; endfunction endclass
   typedef holder alias_t;
   typedef alias_t chained_t;
-  initial begin chained_t h = new; id = h.id(); end
+  initial begin chained_t h = new; $display("T|type %m %s",$typename(h)); id = h.id(); end
 endmodule
 module local_inheritance(output int id);
   class base_holder; function int inherited(); return 4; endfunction endclass
   class holder extends base_holder;
     function int id(); return inherited() + 40; endfunction
   endclass
-  initial begin holder h = new; id = h.id(); end
+  initial begin holder h = new; $display("T|type %m %s",$typename(h)); id = h.id(); end
 endmodule
 module local_factory(output int id);
   class holder;
     function int id(); return 55; endfunction
     static function holder make(); holder h = new; return h; endfunction
   endclass
-  initial begin holder h; h = holder::make(); id = h.id(); end
+  initial begin holder h; h = holder::make(); $display("T|type %m %s",$typename(h)); id = h.id(); end
 endmodule
 module local_type_parameter(output string label);
   class holder; endclass

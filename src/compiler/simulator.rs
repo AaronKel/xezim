@@ -77898,6 +77898,10 @@ impl Simulator {
         // same dispatch as its parenthesized call, retaining the full scope
         // and specialization before the value-read path strips wrappers.
         if let ExprKind::MemberAccess { expr: recv, member } = &expr.kind
+            && self
+                .class_member_names()
+                .static_methods
+                .contains(&member.name)
             && !matches!(&recv.kind, ExprKind::Ident(h) if h.path.len() == 1)
             && let Some(root) = Self::class_scope_root(recv)
             && (self.module.classes.contains_key(root) || self.module.packages.contains(root))
@@ -99946,7 +99950,13 @@ impl Simulator {
                 creation
             }
         };
-        format!("{}.{}", self.hier_path(&inst), path)
+        // §23.6: instance-qualified class keys already contain this owner.
+        // `%m` adds the instance separately, so include its path only once.
+        let class_path = path
+            .strip_prefix(inst.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
+            .unwrap_or(&path);
+        format!("{}.{}", self.hier_path(&inst), class_path)
     }
 
     /// The `m_scope_stack` a subroutine starts with: its leaf name, marked as
@@ -175053,6 +175063,15 @@ impl Simulator {
     fn class_typename_head(&self, base: &str) -> String {
         match self.module.class_decl_pkg.get(base) {
             Some(pkg) => format!("class {}::{}", pkg, self.class_source_name(base)),
+            None if base.contains('.')
+                && self
+                    .module
+                    .classes
+                    .get(base)
+                    .is_some_and(|cd| cd.declaring_module.is_some()) =>
+            {
+                format!("class {}", self.hier_path(base).replace('.', "/"))
+            }
             None => format!("class {}", base),
         }
     }
