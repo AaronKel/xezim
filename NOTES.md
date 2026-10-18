@@ -125,6 +125,24 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   (§6.19, §6.21, §7.4.1, §11.5.1).
   (#369, contributed by akashlevy)
 
+* Initializers accepted with `--relax-implicit-static` run once before initial
+  processes and retain their values across calls and activations. Design caches
+  distinguish this lifetime mode from the default policy (§6.21).
+  (#351, reported by akashlevy)
+* Static class calls retain lexical scope and specialization through module
+  type parameters, typedef chains, nested classes and instance handles.
+  Suspended static tasks retain their bindings, and class event OR waits wake
+  once on the selected event (§8.23, §8.25, §9.4.2, §13.4.1, §15.5).
+  Recompile saved designs to refresh scoped class metadata.
+  (#382, reported by Ganesh-TNL)
+* Randomization callbacks reject tasks, non-void returns and argument lists
+  before execution, preserving legal inherited and overridden callbacks
+  (§18.11). (#383, reported by rpjayaraman)
+* Unsigned expression context reaches a shift's left operand before extension
+  and evaluation in compiled and interpreted execution. Self-determined
+  boundaries and function side effects are preserved (§11.8.2, §11.4.10).
+  (#384, reported by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
