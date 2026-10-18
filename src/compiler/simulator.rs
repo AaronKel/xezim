@@ -19749,6 +19749,41 @@ impl Simulator {
                 .insert(pid, (span, "static initializer"));
             self.event_queue.schedule(0, pid, stmts.into());
         }
+        // §16.5/§16.14: declarative concurrent assertions exist before
+        // Active processes run, including an initial clock's time-zero edge.
+        // Register only the synthetic assertion blocks here; procedural sites
+        // must still capture their variables when their procedure executes.
+        let declarative = |st: &Statement| matches!(&st.kind, StatementKind::Assertion(a) if a.is_property && !a.procedural);
+        let (sites, initial_blocks): (Vec<_>, Vec<_>) = initial_blocks
+            .into_iter()
+            .partition(|ib| declarative(&ib.stmt));
+        let (pending_sites, pending_initial): (Vec<_>, Vec<_>) = pending_initial
+            .into_iter()
+            .partition(|p| declarative(&p.source));
+        let (early_sites, early): (Vec<_>, Vec<_>) =
+            early.into_iter().partition(|ib| declarative(&ib.stmt));
+        let saved_pid = self.current_pid;
+        let saved_scope = self.current_scope.clone();
+        let saved_hint = self.name_resolve_hint.borrow_mut().take();
+        let saved_activation = self.activation_scope.borrow_mut().take();
+        for ib in sites
+            .into_iter()
+            .chain(early_sites)
+            .chain(pending_sites.into_iter().map(&mut rename_pending))
+        {
+            self.current_pid = self.next_pid;
+            self.next_pid += 1;
+            self.current_scope.clone_from(&ib.scope);
+            self.process_scope_hint
+                .insert(self.current_pid, ib.scope.clone());
+            *self.name_resolve_hint.borrow_mut() = Some(ib.scope.clone());
+            *self.activation_scope.borrow_mut() = Some(ib.scope);
+            self.exec_statement(&ib.stmt);
+        }
+        self.current_pid = saved_pid;
+        self.current_scope = saved_scope;
+        *self.name_resolve_hint.borrow_mut() = saved_hint;
+        *self.activation_scope.borrow_mut() = saved_activation;
         for ib in early
             .into_iter()
             .chain(pending_initial.into_iter().map(&mut rename_pending))
@@ -19783,6 +19818,19 @@ impl Simulator {
                 self.clock_gen_src
                     .push((self.clock_generators.len(), scope.clone(), span.start));
                 self.clock_generators.push(cg);
+                if !self.sva_sites.is_empty() {
+                    // §16.5.1: keep the seed in Active so the slot-entry
+                    // Preponed snapshot precedes it, just like an ordinary
+                    // blocking assignment. The periodic toggles stay fast.
+                    let pid = self.next_pid;
+                    self.next_pid += 1;
+                    if !scope.is_empty() {
+                        self.process_scope_hint.insert(pid, scope);
+                    }
+                    self.process_origin.insert(pid, (span, "initial block"));
+                    self.event_queue
+                        .schedule(0, pid, vec![stmts[0].clone()].into());
+                }
                 continue;
             }
             // Roadmap 12 (opt-in XEZIM_PROC_FSM=1): a compilable initial body
@@ -21122,7 +21170,7 @@ impl Simulator {
         // Apply seed: sets signal_table[sid] + marks dirty so settle sees it.
         let width = self.signal_widths[sid];
         let seed = seed_val.resize(width);
-        if self.signal_table[sid] != seed {
+        if self.sva_sites.is_empty() && self.signal_table[sid] != seed {
             write_sig!(self, sid, seed);
             self.mark_dirty_id(sid);
             self.table_modified = true;
@@ -97799,6 +97847,17 @@ impl Simulator {
         }
     }
 
+    /// §9.4.2: a vector clock uses its least significant bit, even when
+    /// other bits are unknown. Keep X and Z distinct for edge transitions.
+    fn sva_clock_bit(&self, name: &str) -> u8 {
+        match self.get_signal_value_by_name(name).map(|v| v.get_bit(0)) {
+            Some(LogicBit::Zero) => 0,
+            Some(LogicBit::One) => 1,
+            Some(LogicBit::Z) => 3,
+            _ => 2,
+        }
+    }
+
     /// LRM §16.5: register the clocked site of a concurrent assertion
     /// statement on its first execution: expand named sequences and
     /// properties, bind its local variables (§16.10) and, for a procedural
@@ -97887,12 +97946,8 @@ impl Simulator {
         // A procedural assertion registers while its procedure runs, which
         // for an edge-triggered procedure is at the tick that starts its
         // first attempt: take that edge as seen (§16.14.6).
+        let cur = self.sva_clock_bit(&clock_signal);
         let prev_clock = if procedural {
-            let cur = self
-                .get_signal_value_by_name(&clock_signal)
-                .and_then(|v| v.to_u64())
-                .map(|u| (u & 1) as u8)
-                .unwrap_or(2);
             match (edge, cur) {
                 (0, 1) => 0,
                 (1, 0) => 1,
@@ -97900,7 +97955,7 @@ impl Simulator {
                 _ => cur,
             }
         } else {
-            2 // sentinel
+            cur
         };
         self.sva_sites.push(SvaClockedSite {
             span_key,
@@ -98316,19 +98371,17 @@ impl Simulator {
             if clk_name.is_empty() {
                 continue;
             }
-            let cur_clk_bit = self
-                .get_signal_value_by_name(clk_name)
-                .and_then(|v| v.to_u64())
-                .map(|u| (u & 1) as u8)
-                .unwrap_or(2);
+            let cur_clk_bit = self.sva_clock_bit(clk_name);
             let prev = self.sva_sites[i].prev_clock;
             // Update prev_clock for next iteration *before* edge logic
             // so a posedge fires exactly once per 0→1 transition.
             self.sva_sites[i].prev_clock = cur_clk_bit;
             let fired = match self.sva_sites[i].edge {
-                1 => prev == 1 && cur_clk_bit == 0,
-                2 => prev != cur_clk_bit && prev != 2 && cur_clk_bit != 2,
-                _ => prev == 0 && cur_clk_bit == 1,
+                // §9.4.2, Table 9-2: X/Z -> 1 and 0 -> X/Z are
+                // positive edges; the converse transitions are negative.
+                1 => (prev == 1 && cur_clk_bit != 1) || (prev >= 2 && cur_clk_bit == 0),
+                2 => prev != cur_clk_bit && (prev < 2 || cur_clk_bit < 2),
+                _ => (prev == 0 && cur_clk_bit != 0) || (prev >= 2 && cur_clk_bit == 1),
             };
             if !fired {
                 continue;
