@@ -109702,8 +109702,63 @@ impl Simulator {
     }
 
     fn resolve_typedef_spec(&self, name: &str) -> Option<(String, String)> {
-        let dt = self.lookup_typedef_target(name)?;
-        self.spec_from_typedef_dt(&dt)
+        let first = self.lookup_typedef_target(name)?;
+        if let Some(spec) = self.spec_from_typedef_dt(&first) {
+            return Some(spec);
+        }
+        let DataType::TypeReference {
+            name: target,
+            type_args,
+            ..
+        } = first
+        else {
+            return None;
+        };
+        if !type_args.is_empty() {
+            return None;
+        }
+        let mut current = if target.scopes.is_empty() {
+            target.name.name
+        } else {
+            target
+                .scopes
+                .iter()
+                .map(|s| s.name.name.as_str())
+                .chain(std::iter::once(target.name.name.as_str()))
+                .collect::<Vec<_>>()
+                .join("::")
+        };
+        if self.module.classes.contains_key(&current) {
+            return None;
+        }
+        let mut visited = HashSet::default();
+        visited.insert(name.to_string());
+        for _ in 0..64 {
+            if !visited.insert(current.clone()) {
+                return None;
+            }
+            let dt = self.lookup_typedef_target(&current)?;
+            if let Some(spec) = self.spec_from_typedef_dt(&dt) {
+                return Some(spec);
+            }
+            let DataType::TypeReference {
+                name, type_args, ..
+            } = dt
+            else {
+                return None;
+            };
+            if !type_args.is_empty() {
+                return None;
+            }
+            current = name
+                .scopes
+                .iter()
+                .map(|s| s.name.name.as_str())
+                .chain(std::iter::once(name.name.name.as_str()))
+                .collect::<Vec<_>>()
+                .join("::");
+        }
+        None
     }
 
     /// Class-scoped analogue of `resolve_typedef_spec`: resolve a TYPEDEF
@@ -141688,6 +141743,43 @@ impl Simulator {
     /// value; a static property reads the specialization's cell. Everything
     /// runs with the prefix's specialization active, exactly as the
     /// parenthesised call does. None when `member` is none of these.
+    fn class_scope_root(mut expr: &Expression) -> Option<&str> {
+        loop {
+            match &expr.kind {
+                ExprKind::MemberAccess { expr: inner, .. }
+                | ExprKind::Paren(inner)
+                | ExprKind::Specialization { base: inner, .. } => expr = inner,
+                ExprKind::Ident(h) => return h.path.first().map(|s| s.name.name.as_str()),
+                _ => return None,
+            }
+        }
+    }
+
+    fn class_scope_chain(expr: &Expression) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Ident(h)
+                if !h.path.is_empty() && h.path.iter().all(|s| s.selects.is_empty()) =>
+            {
+                Some(
+                    h.path
+                        .iter()
+                        .map(|s| s.name.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                )
+            }
+            ExprKind::MemberAccess { expr, member } => Some(format!(
+                "{}::{}",
+                Self::class_scope_chain(expr)?,
+                member.name
+            )),
+            ExprKind::Specialization { base, .. } | ExprKind::Paren(base) => {
+                Self::class_scope_chain(base)
+            }
+            _ => None,
+        }
+    }
+
     fn class_scope_member_value(&mut self, name: &str, member: &str) -> Option<Value> {
         let (base, sig) = self.resolve_class_scope_prefix(name)?;
         let is_fn = self.is_static_method(&base, member)
@@ -156317,7 +156409,9 @@ impl Simulator {
         // when the object is live. Dispatch here (the common funnel) so every
         // instance-path route resolves static methods correctly.
         if self.is_static_method(&class_name, method_name) {
-            if let Some(res) = self.exec_static_method(&class_name, method_name, args) {
+            if let Some(res) =
+                self.exec_static_method_via_object(&class_name, method_name, args, handle)
+            {
                 return res;
             }
         }
