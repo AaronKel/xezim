@@ -32077,7 +32077,7 @@ impl Simulator {
                 Insn::Negate(d, s) => {
                     let w = vm_regs[*s as usize].width;
                     let mut r = Value::zero(w).sub(&vm_regs[*s as usize]).resize(w);
-                    r.is_signed = true;
+                    r.is_signed = vm_regs[*s as usize].is_signed;
                     vm_regs[*d as usize] = r;
                 }
                 Insn::ReduceAnd(d, s) => {
@@ -32892,7 +32892,7 @@ impl Simulator {
                 Insn::Negate(d, s) => {
                     let w = vm_regs[*s as usize].width;
                     let mut r = Value::zero(w).sub(&vm_regs[*s as usize]).resize(w);
-                    r.is_signed = true;
+                    r.is_signed = vm_regs[*s as usize].is_signed;
                     vm_regs[*d as usize] = r;
                 }
                 Insn::ReduceAnd(d, s) => {
@@ -35428,7 +35428,7 @@ impl Simulator {
                 Insn::Negate(d, s) => {
                     let w = self.vm_regs[*s as usize].width;
                     let mut r = Value::zero(w).sub(&self.vm_regs[*s as usize]).resize(w);
-                    r.is_signed = true;
+                    r.is_signed = self.vm_regs[*s as usize].is_signed;
                     self.vm_regs[*d as usize] = r;
                 }
                 Insn::ReduceAnd(d, s) => {
@@ -78655,8 +78655,7 @@ impl Simulator {
                         | BinaryOp::Geq
                         | BinaryOp::Eq
                         | BinaryOp::Neq
-                ) && (left_is_str.unwrap_or_else(|| self.operand_is_string(left))
-                    || right_is_str.unwrap_or_else(|| self.operand_is_string(right)))
+                ) && (self.operand_has_string_type(left) || self.operand_has_string_type(right))
                 {
                     // §6.16: string comparison is by TEXT. Equality also goes
                     // through here because an out-of-bounds string-collection
@@ -85463,10 +85462,10 @@ impl Simulator {
                                 break 'rows;
                             }
                             if let Some(n) = &iv {
-                                self.set_loop_var(n, Value::from_u64(i, 32));
+                                self.set_loop_var(n, Self::signed_loop_val(i as i64));
                             }
                             if let Some(n) = &jv {
-                                self.set_loop_var(n, Value::from_u64(j, 32));
+                                self.set_loop_var(n, Self::signed_loop_val(j as i64));
                             }
                             self.continue_flag = false;
                             *iterations = iterations.saturating_add(1);
@@ -85563,7 +85562,7 @@ impl Simulator {
                                     self.set_loop_var(n, kv);
                                 }
                                 if let Some(n) = &iv {
-                                    self.set_loop_var(n, Value::from_u64(j, 32));
+                                    self.set_loop_var(n, Self::signed_loop_val(j as i64));
                                 }
                                 self.continue_flag = false;
                                 *iterations = iterations.saturating_add(1);
@@ -86117,7 +86116,7 @@ impl Simulator {
                                     self.set_loop_var_aliased(
                                         var_scope.as_deref(),
                                         n,
-                                        Value::from_u64(j, 32),
+                                        Self::signed_loop_val(j as i64),
                                     );
                                 }
                                 self.continue_flag = false;
@@ -86181,7 +86180,7 @@ impl Simulator {
                         self.set_loop_var_aliased(
                             var_scope.as_deref(),
                             &var.name,
-                            Value::from_u64(i, 32),
+                            Self::signed_loop_val(i as i64),
                         );
                         self.continue_flag = false;
                         *iterations = iterations.saturating_add(1);
@@ -86272,7 +86271,7 @@ impl Simulator {
                         self.set_loop_var_aliased(
                             var_scope.as_deref(),
                             &var.name,
-                            Value::from_u64(i, 32),
+                            Self::signed_loop_val(i as i64),
                         );
                         self.continue_flag = false;
                         *iterations = iterations.saturating_add(1);
@@ -86325,7 +86324,7 @@ impl Simulator {
                         self.set_loop_var_aliased(
                             var_scope.as_deref(),
                             &var.name,
-                            Value::from_u64(i, 32),
+                            Self::signed_loop_val(i as i64),
                         );
                         self.continue_flag = false;
                         *iterations = iterations.saturating_add(1);
@@ -86377,7 +86376,7 @@ impl Simulator {
                         self.set_loop_var_aliased(
                             var_scope.as_deref(),
                             &var.name,
-                            Value::from_u64(i, 32),
+                            Self::signed_loop_val(i as i64),
                         );
                         self.continue_flag = false;
                         *iterations = iterations.saturating_add(1);
