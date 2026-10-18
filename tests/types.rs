@@ -486,3 +486,6 @@ mod nested_packed_p2;
 
 #[path = "types/static_lifetime_p2.rs"]
 mod static_lifetime_p2;
+
+#[path = "types/typedef_casts_377.rs"]
+mod next_rest_typedef_casts_377;

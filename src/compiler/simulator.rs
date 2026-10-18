@@ -12881,7 +12881,13 @@ impl Simulator {
                     Some(&module.typedefs),
                 )
                 .max(1);
-                m.insert(name.clone(), (w, super::elaborate::is_type_signed(dt)));
+                m.insert(
+                    name.clone(),
+                    (
+                        w,
+                        super::elaborate::is_type_signed_resolved(dt, &module.typedef_types),
+                    ),
+                );
             }
             for (name, &w) in module.typedefs.iter() {
                 m.entry(name.clone()).or_insert((w.max(1), false));
@@ -73949,7 +73955,10 @@ impl Simulator {
                             } else {
                                 inner_v
                             };
-                            out.is_signed = super::elaborate::is_type_signed(&dt);
+                            out.is_signed = super::elaborate::is_type_signed_resolved(
+                                &dt,
+                                &self.module.typedef_types,
+                            );
                             return out;
                         }
                         let w = super::elaborate::resolve_type_width(
@@ -73970,7 +73979,10 @@ impl Simulator {
                         ) {
                             out = out.to_two_state();
                         }
-                        out.is_signed = super::elaborate::is_type_signed(&dt);
+                        out.is_signed = super::elaborate::is_type_signed_resolved(
+                            &dt,
+                            &self.module.typedef_types,
+                        );
                         return out;
                     }
                     // (b) A typedef/enum known only by width (e.g. an enum
