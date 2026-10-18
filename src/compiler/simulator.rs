@@ -70204,8 +70204,12 @@ impl Simulator {
                             }
                         }
                     }
-                    // (b) packed struct field.
-                    if let ExprKind::Ident(bh) = &base.kind {
+                    // (b) packed struct field. A struct of the running frame
+                    // takes (c): it hides a module variable of the same name
+                    // (§23.9), which this would write.
+                    if let ExprKind::Ident(bh) = &base.kind
+                        && self.frame_bound_bare_name(bh).is_none()
+                    {
                         let base_name = self.resolve_hier_name(bh);
                         if let Some(fields) =
                             self.module.packed_struct_fields.get(&*base_name).cloned()
@@ -89282,6 +89286,7 @@ impl Simulator {
                 }
                 // SV-2023: NBA to a ref formal redirects to the caller's
                 // actual lvalue (IEEE 1800-2023 §13.5.2).
+                let written = lvalue;
                 let lvalue_owned;
                 let lvalue: &Expression = if let ExprKind::Ident(hier) = &lvalue.kind {
                     if hier.path.len() == 1 && hier.path[0].selects.is_empty() {
@@ -89303,6 +89308,9 @@ impl Simulator {
                 } else {
                     lvalue
                 };
+                // The caller's actual of a `ref` formal names the caller's
+                // variables, not this frame's.
+                let rebound = !std::ptr::eq(lvalue, written);
                 let w = self.infer_lhs_width(lvalue);
                 let d = match intra_d {
                     Some(d) => d,
@@ -89331,6 +89339,36 @@ impl Simulator {
                         });
                         return;
                     }
+                    // NBA to a task-FRAME local, whole or a select of it
+                    // (`a <= v`, `a[3:0] <= v`): the deferred queue commits
+                    // in `apply_nba`, OUTSIDE the (possibly suspended)
+                    // process's local frame, so the local would never
+                    // update. Apply immediately — delta-vs-blocking timing
+                    // is unobservable for a process-local. (Body-declared
+                    // locals in the signal map are left deferred: routines
+                    // doing `nba <= next_nba; @(nba)` need the NBA region to
+                    // fire the edge.) Checked before `resolve_nba_target`:
+                    // the local hides a module variable of the same name
+                    // (§23.9), which a queued select would reach once the
+                    // frame is gone. A `ref` formal, or the caller's actual
+                    // it was rewritten to above, keeps the path below.
+                    if Self::lvalue_bare_root(lvalue)
+                        .filter(|_| !rebound)
+                        .is_some_and(|n| {
+                            self.local_stack.last().is_some_and(|m| m.contains_key(n))
+                                && !self
+                                    .ref_alias_stack
+                                    .last()
+                                    .is_some_and(|m| m.contains_key(n))
+                                && !self
+                                    .ref_binding_stack
+                                    .last()
+                                    .is_some_and(|m| m.contains_key(n))
+                        })
+                    {
+                        self.assign_value(lvalue, &val.resize_for_assign(w));
+                        return;
+                    }
                     let id_opt = self.resolve_nba_target(lvalue);
                     if let Some(id) = id_opt {
                         // Track via index map so subsequent partial-NBAs
@@ -89352,14 +89390,8 @@ impl Simulator {
                         if h.path.len() == 1
                             && self.local_stack.last().is_some_and(|m| m.contains_key(&h.path[0].name.name)))
                     {
-                        // NBA to a bare task-FRAME local: the deferred queue
-                        // commits in `apply_nba`, OUTSIDE the (possibly
-                        // suspended) process's local frame, so the local would
-                        // never update. Apply immediately — delta-vs-blocking
-                        // timing is unobservable for a process-local. (Body-
-                        // declared locals in the signal map are left deferred:
-                        // routines doing `nba <= next_nba; @(nba)`
-                        // need the NBA region to fire the edge.)
+                        // A bare name of the frame left to here (a `ref`
+                        // formal's), applied now for the reason above.
                         self.assign_value(lvalue, &val.resize_for_assign(w));
                     } else {
                         let frozen = self.freeze_lvalue_indices(lvalue);
@@ -110731,6 +110763,21 @@ impl Simulator {
             .last()
             .is_some_and(|l| l.contains_key(n))
             .then_some(n)
+    }
+
+    /// The bare variable a whole or select lvalue writes: `a` in `a`,
+    /// `a[3:0]`, `a[i +: 4]` or `a[i][j]`. None for anything else, a member
+    /// write included.
+    fn lvalue_bare_root(e: &Expression) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Index { expr, .. }
+            | ExprKind::RangeSelect { expr, .. }
+            | ExprKind::Paren(expr) => Self::lvalue_bare_root(expr),
+            ExprKind::Ident(h) if h.path.len() == 1 && h.root.is_none() => {
+                Some(h.path[0].name.name.as_str())
+            }
+            _ => None,
+        }
     }
 
     fn get_local_or_signal(&self, name: &str) -> Option<Value> {
