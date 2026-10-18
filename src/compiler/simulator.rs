@@ -22179,6 +22179,20 @@ impl Simulator {
             *self.name_resolve_hint.borrow_mut() = Some(ab.scope.clone());
         }
         let extracted = self.extract_sensitivity(&ab.stmt);
+        // §14.13: a clocking event is delivered after sampling/NBA, rather
+        // than as the raw clock edge returned by extract_sensitivity.
+        fn leading_event(stmt: &Statement) -> Option<&EventControl> {
+            match &stmt.kind {
+                StatementKind::TimingControl {
+                    control: TimingControl::Event(event),
+                    ..
+                } => Some(event),
+                StatementKind::SeqBlock { stmts, .. } => stmts.first().and_then(leading_event),
+                _ => None,
+            }
+        }
+        let clocking_head =
+            leading_event(&ab.stmt).is_some_and(|event| self.is_clocking_event(event));
         *self.name_resolve_hint.borrow_mut() = saved_hint;
         if let Some((sens, body)) = extracted {
             if !sens.is_empty() {
@@ -22244,6 +22258,7 @@ impl Simulator {
                 // edge the comb path could wake on; such a block runs as a
                 // process below.
                 if all_level
+                    && !clocking_head
                     && !has_named_event
                     && !self_ref
                     && !self.stmt_is_blocking(&body)
@@ -22367,7 +22382,7 @@ impl Simulator {
                         scope: ab.scope,
                     });
                 }
-                if self.event_needs_value_waiter(&sens, &ab.scope) {
+                if clocking_head || self.event_needs_value_waiter(&sens, &ab.scope) {
                     if self.try_register_proc_fsm(&ab.stmt, &ab.scope, true, "always block") {
                         return None;
                     }
