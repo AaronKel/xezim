@@ -1,0 +1,115 @@
+//! §8.23 / §8.25 / §13.4.1 / §15: static class references retain
+//! specialization, lexical scope, and suspended synchronization state.
+
+use std::process::Command;
+
+fn check(source: &str, mode: &[(&str, &str)], passes: usize) {
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "xezim_static_382_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("top.sv");
+    std::fs::write(&path, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xezim"))
+        .args([
+            "--no-cache",
+            "-s",
+            if passes == 88 { "tb_top" } else { "top" },
+        ])
+        .arg(&path)
+        .env_remove("XEZIM_METHOD_TIER")
+        .env_remove("XEZIM_COMPILE_METHODS")
+        .env_remove("XEZIM_PROC_FSM")
+        .envs(mode.iter().copied())
+        .output()
+        .expect("run static class regressions");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert!(!text.contains("FAIL"), "{text}");
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.trim_start_matches(['|', ' ']).starts_with("PASS"))
+            .count(),
+        passes,
+        "{text}"
+    );
+}
+
+const ORIGINAL: &str = include_str!("../issue_cases/static_class_members_382.sv");
+const SCOPES: &str = include_str!("../issue_cases/module_class_scopes_382.sv");
+
+#[test]
+fn static_class_members() {
+    check(ORIGINAL, &[], 88);
+}
+#[test]
+fn static_class_members_eager() {
+    check(ORIGINAL, &[("XEZIM_METHOD_TIER", "0")], 88);
+}
+#[test]
+fn static_class_members_interpreted() {
+    check(
+        ORIGINAL,
+        &[("XEZIM_COMPILE_METHODS", "0"), ("XEZIM_PROC_FSM", "0")],
+        88,
+    );
+}
+#[test]
+fn module_class_scopes() {
+    check(SCOPES, &[], 13);
+}
+#[test]
+fn module_class_scopes_eager() {
+    check(SCOPES, &[("XEZIM_METHOD_TIER", "0")], 13);
+}
+#[test]
+fn module_class_scopes_interpreted() {
+    check(
+        SCOPES,
+        &[("XEZIM_COMPILE_METHODS", "0"), ("XEZIM_PROC_FSM", "0")],
+        13,
+    );
+}
+
+const TYPE_RECEIVERS: &str = include_str!("../issue_cases/module_type_receivers_382.sv");
+const EVENTS: &str = include_str!("../issue_cases/static_event_groups_382.sv");
+#[test]
+fn module_type_receivers() {
+    check(TYPE_RECEIVERS, &[], 5);
+}
+#[test]
+fn module_type_receivers_eager() {
+    check(TYPE_RECEIVERS, &[("XEZIM_METHOD_TIER", "0")], 5);
+}
+#[test]
+fn module_type_receivers_interpreted() {
+    check(
+        TYPE_RECEIVERS,
+        &[("XEZIM_COMPILE_METHODS", "0"), ("XEZIM_PROC_FSM", "0")],
+        5,
+    );
+}
+#[test]
+fn static_event_groups() {
+    check(EVENTS, &[], 8);
+}
+#[test]
+fn static_event_groups_eager() {
+    check(EVENTS, &[("XEZIM_METHOD_TIER", "0")], 8);
+}
+#[test]
+fn static_event_groups_interpreted() {
+    check(
+        EVENTS,
+        &[("XEZIM_COMPILE_METHODS", "0"), ("XEZIM_PROC_FSM", "0")],
+        8,
+    );
+}
