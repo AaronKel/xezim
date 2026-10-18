@@ -58181,6 +58181,25 @@ impl Simulator {
                 None
             }
             ExprKind::Index { expr, index } => {
+                // §7.6 / §10.4.2: a fixed multidimensional leaf is a
+                // stable signal too, including for intra-assignment delays.
+                if matches!(expr.kind, ExprKind::Index { .. })
+                    && Self::cond_expr_is_effect_free(lhs, false)
+                {
+                    let mut root = expr.as_ref();
+                    while let ExprKind::Index { expr, .. } = &root.kind {
+                        root = expr;
+                    }
+                    if let ExprKind::Ident(h) = &root.kind {
+                        let name = self.resolve_hier_name(h);
+                        if self.module.arrays_2d.contains_key(name.as_ref())
+                            || self.module.arrays_nd.contains_key(name.as_ref())
+                        {
+                            let leaf = self.flat_member_name(lhs)?;
+                            return self.signal_name_to_id.get(leaf.as_str()).copied();
+                        }
+                    }
+                }
                 if let ExprKind::Ident(hier) = &expr.kind {
                     let name = self.resolve_hier_name(hier);
                     // A DYNAMIC array / QUEUE element carries a signal TWIN in
@@ -58217,10 +58236,11 @@ impl Simulator {
                         if let Some(b) = db {
                             self.dollar_bound.push(b);
                         }
-                        let idx = self.eval_expr(index).to_u64().unwrap_or(0);
+                        let idx = self.eval_expr(index).to_i64();
                         if db.is_some() {
                             self.dollar_bound.pop();
                         }
+                        let idx = idx?;
                         // Use a small buffer to avoid allocation for common array names
                         let elem = format!("{}[{}]", name, idx);
                         return self.signal_name_to_id.get(elem.as_str()).copied();
@@ -88661,7 +88681,10 @@ impl Simulator {
                 // §10.4.2: a whole UNPACKED struct has no storage of its own —
                 // its member leaves are the storage — so it is updated as one
                 // nonblocking assignment per leaf, every source leaf read now.
-                if let Some(leaf_nbas) = self.unpacked_struct_nba_leaves(lvalue, rvalue) {
+                if let Some(leaf_nbas) = self
+                    .unpacked_array_nba_leaves(lvalue, rvalue)
+                    .or_else(|| self.unpacked_struct_nba_leaves(lvalue, rvalue))
+                {
                     let d = match intra_d {
                         Some(d) => d,
                         None => delay
@@ -123801,6 +123824,37 @@ impl Simulator {
     /// its own, so the single update the generic path queues against the
     /// struct's name landed nowhere and every member — scalar ones included —
     /// read back garbage. `None` when the target is anything else.
+    /// §7.6 / §10.4.2: whole fixed arrays assign by declared position.
+    /// Snapshot every source before posting any leaf update, including aliases.
+    fn unpacked_array_nba_leaves(
+        &mut self,
+        lvalue: &Expression,
+        rvalue: &Expression,
+    ) -> Option<Vec<(Expression, Value)>> {
+        let dst = self.foreach_check_operand_name(lvalue)?;
+        let src = self.foreach_check_operand_name(rvalue)?;
+        if self.module.dynamic_arrays.contains(&dst)
+            || self.module.dynamic_arrays.contains(&src)
+            || self.is_associative_array(&dst)
+            || self.is_associative_array(&src)
+        {
+            return None;
+        }
+        let (targets, _) = self.stream_elem_order(&dst)?;
+        let (sources, _) = self.stream_elem_order(&src)?;
+        if targets.len() != sources.len() {
+            return None;
+        }
+        let mut leaves = Vec::with_capacity(targets.len());
+        for (target, source) in targets.into_iter().zip(sources) {
+            let lhs = Self::append_leaf_path(lvalue, &target[dst.len()..]);
+            let rhs = Self::append_leaf_path(rvalue, &source[src.len()..]);
+            let value = self.eval_expr(&rhs);
+            leaves.push((lhs, value));
+        }
+        Some(leaves)
+    }
+
     fn unpacked_struct_nba_leaves(
         &mut self,
         lvalue: &Expression,
@@ -145958,10 +146012,18 @@ impl Simulator {
                 expr: Box::new(base.clone()),
                 index: Box::new(Expression::new(
                     ExprKind::Number(NumberLiteral::Integer {
-                        size: None,
+                        size: (i < 0).then_some(64),
                         signed: true,
-                        base: NumberBase::Decimal,
-                        value: i.to_string(),
+                        base: if i < 0 {
+                            NumberBase::Hex
+                        } else {
+                            NumberBase::Decimal
+                        },
+                        value: if i < 0 {
+                            format!("{:016x}", i as u64)
+                        } else {
+                            i.to_string()
+                        },
                         cached_val: std::cell::Cell::new(None),
                     }),
                     base.span,

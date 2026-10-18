@@ -189,3 +189,6 @@ mod foreach_typedef_neighbours_312;
 
 #[path = "collections/member_stream_340.rs"]
 mod member_stream_340;
+
+#[path = "collections/whole_array_nba_381.rs"]
+mod next_rest_whole_array_nba_381;
