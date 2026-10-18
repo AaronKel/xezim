@@ -108,10 +108,10 @@ module top;
     end
   endtask
 
-  // Nonblocking selects of an automatic task's local (§10.4.2).
+  // An automatic task may schedule NBAs to explicitly static storage (§10.4.2).
   logic [7:0] o_anba, o_abit;
   task automatic auto_nba;
-    logic [7:0] a;
+    static logic [7:0] a;
     a = 8'h00;
     a[3:0] <= 4'h5;
     #1 o_anba = a;
@@ -302,8 +302,8 @@ module top;
     check("block nonblocking select", o_bnba, 8'h0A);
     check("block nonblocking write", o_wnba, 8'h3C);
     auto_nba;
-    check("automatic nonblocking part-select", o_anba, 8'h05);
-    check("automatic nonblocking bit-select", o_abit, 8'h85);
+    check("explicit static nonblocking part-select", o_anba, 8'h05);
+    check("explicit static nonblocking bit-select", o_abit, 8'h85);
     arrays;
     check("array element", o_e1, 8'h12);
     check("array element part-select", o_e2, 8'h07);
@@ -380,7 +380,7 @@ module top;
 endmodule
 "##;
 
-fn run(env: &[(&str, &str)]) -> String {
+fn run_source(source: &str, env: &[(&str, &str)]) -> String {
     // Unique per call: tests run as parallel threads of one process.
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -391,7 +391,7 @@ fn run(env: &[(&str, &str)]) -> String {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("top.sv");
-    std::fs::write(&path, SRC).unwrap();
+    std::fs::write(&path, source).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_xezim"))
         .args([
             "--simulate",
@@ -403,6 +403,11 @@ fn run(env: &[(&str, &str)]) -> String {
         .envs(env.iter().copied())
         .output()
         .expect("run xezim");
+    assert!(
+        out.status.success(),
+        "simulator failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
@@ -410,7 +415,7 @@ fn run(env: &[(&str, &str)]) -> String {
 }
 
 fn check(env: &[(&str, &str)]) {
-    let text = run(env);
+    let text = run_source(SRC, env);
     assert!(
         text.contains("ALL PASS") && !text.contains("FAIL"),
         "writes through a local that hides a module variable ({:?}):\n{}",
@@ -432,4 +437,25 @@ fn local_shadow_select_writes_compiled_first_call() {
 #[test]
 fn local_shadow_select_writes_interpreted() {
     check(&[("XEZIM_COMPILE_METHODS", "0")]);
+}
+
+// IEEE 1800-2023 §6.21, §7.4.1, §10.4.2: live storage and region ordering.
+fn local_select_nba_neighbors_check(env: &[(&str, &str)]) {
+    let text = run_source(include_str!("../issue_cases/pr368_nba_neighbors.sv"), env);
+    assert!(
+        text.contains("ALL PASS") && !text.contains("FAIL"),
+        "{text}"
+    );
+}
+#[test]
+fn local_select_nba_neighbors() {
+    local_select_nba_neighbors_check(&[]);
+}
+#[test]
+fn local_select_nba_neighbors_eager() {
+    local_select_nba_neighbors_check(&[("XEZIM_METHOD_TIER", "0")]);
+}
+#[test]
+fn local_select_nba_neighbors_interpreted() {
+    local_select_nba_neighbors_check(&[("XEZIM_COMPILE_METHODS", "0")]);
 }

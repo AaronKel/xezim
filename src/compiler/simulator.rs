@@ -293,7 +293,7 @@ fn method_boost_enabled() -> bool {
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
 // Typed local bindings change the compiled instruction stream.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3041;
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3042;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1553,7 +1553,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB015";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB016";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -1610,6 +1610,9 @@ struct NbaEntry {
     /// all while the other advanced at double rate, so its `forever` divider
     /// never reached its threshold and the clock it drove never toggled.
     static_key: Option<String>,
+    /// §10.4.2: frozen destination/source bit offsets and length for a
+    /// selected persistent local. Merge at commit to preserve source order.
+    static_slice: Option<(u32, u32, u32)>,
     /// §8.3 + §4.9.4: the `this` handle in scope when the NBA was SCHEDULED.
     ///
     /// The slow path commits through `assign_value` in the NBA region, AFTER
@@ -6549,6 +6552,8 @@ pub struct Simulator {
     /// maturity): these commit in the target slot's NBA region, after that
     /// slot's Active reads.
     delayed_nba: Vec<(u64, usize, Value)>,
+    /// Future NBA writes whose targets require captured declaration context.
+    delayed_nba_queue: Vec<(u64, NbaEntry)>,
     /// NBA writes into PACKED-ARENA cells (issue #147). A packed cell has no
     /// `signal_table` slot, so it cannot ride `nba_fast` (apply indexes the
     /// per-signal tables) — and committing immediately gave NBAs into big
@@ -13124,6 +13129,7 @@ impl Simulator {
             sdf_delays: Vec::new(),
             delayed_updates: Vec::new(),
             delayed_nba: Vec::new(),
+            delayed_nba_queue: Vec::new(),
             packed_nba: Vec::new(),
             udp_runtime: Vec::new(),
             has_udp: false,
@@ -48434,6 +48440,7 @@ impl Simulator {
                 && !has_clocks
                 && self.delayed_updates.is_empty()
                 && self.delayed_nba.is_empty()
+                && self.delayed_nba_queue.is_empty()
                 && !has_reactive
                 // A pending VPI timer (cbAfterDelay, a future cbReadWriteSynch,
                 // ...) is real future work even when the HDL side is idle — a
@@ -48457,6 +48464,7 @@ impl Simulator {
                 && !has_clocks
                 && self.delayed_updates.is_empty()
                 && self.delayed_nba.is_empty()
+                && self.delayed_nba_queue.is_empty()
                 && !self.vpi_timed_future()
             {
                 if self.vpi_cb_mask != 0 && self.vpi_slot_end() {
@@ -55899,7 +55907,65 @@ impl Simulator {
     /// `static`, which gives it the subroutine's persistent store; the
     /// others behave the same either way and stay as they are, so their
     /// subroutine still compiles and inlines.
+    fn collect_nba_roots(stmt: &Statement, names: &mut HashSet<String>) {
+        fn root(e: &Expression, names: &mut HashSet<String>) {
+            match &e.kind {
+                ExprKind::Index { expr, .. }
+                | ExprKind::RangeSelect { expr, .. }
+                | ExprKind::MemberAccess { expr, .. }
+                | ExprKind::Paren(expr) => root(expr, names),
+                ExprKind::Ident(h) if h.root.is_none() && !h.path.is_empty() => {
+                    names.insert(h.path[0].name.name.clone());
+                }
+                ExprKind::Concatenation(parts) => {
+                    for e in parts {
+                        root(e, names);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match &stmt.kind {
+            StatementKind::NonblockingAssign { lvalue, .. } => root(lvalue, names),
+            StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
+                for s in stmts {
+                    Self::collect_nba_roots(s, names);
+                }
+            }
+            StatementKind::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                Self::collect_nba_roots(then_stmt, names);
+                if let Some(s) = else_stmt {
+                    Self::collect_nba_roots(s, names);
+                }
+            }
+            StatementKind::Case { items, .. } => {
+                for i in items {
+                    Self::collect_nba_roots(&i.stmt, names);
+                }
+            }
+            StatementKind::For { body, .. }
+            | StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Repeat { body, .. }
+            | StatementKind::Forever { body }
+            | StatementKind::Foreach { body, .. }
+            | StatementKind::TimingControl { stmt: body, .. }
+            | StatementKind::Wait { stmt: body, .. } => {
+                Self::collect_nba_roots(body, names);
+            }
+            _ => {}
+        }
+    }
+
     fn mark_static_locals(items: &mut [Statement]) {
+        let mut nba_names = HashSet::default();
+        for stmt in items.iter() {
+            Self::collect_nba_roots(stmt, &mut nba_names);
+        }
         for i in 0..items.len() {
             let (head, rest) = items.split_at_mut(i + 1);
             let s = &mut head[i];
@@ -55916,6 +55982,7 @@ impl Simulator {
                         && declarators.iter().any(|d| {
                             d.init.is_none()
                                 && (!d.dimensions.is_empty()
+                                    || nba_names.contains(&d.name.name)
                                     || (matches!(
                                         data_type,
                                         DataType::IntegerAtom { .. }
@@ -55970,24 +56037,29 @@ impl Simulator {
     fn hoist_subroutine_statics(
         module: &mut ElaboratedModule,
     ) -> (HashSet<String>, HashSet<String>) {
-        fn selected(s: &Statement) -> bool {
+        fn selected(s: &Statement, nba_names: &HashSet<String>) -> bool {
             match &s.kind {
                 StatementKind::VarDecl {
                     lifetime: Some(crate::ast::types::Lifetime::Static),
                     declarators,
                     ..
-                } => declarators
-                    .iter()
-                    .any(|d| d.init.is_some() || !d.dimensions.is_empty()),
+                } => declarators.iter().any(|d| {
+                    d.init.is_some() || !d.dimensions.is_empty() || nba_names.contains(&d.name.name)
+                }),
                 StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
-                    stmts.iter().any(selected)
+                    stmts.iter().any(|s| selected(s, nba_names))
                 }
                 StatementKind::If {
                     then_stmt,
                     else_stmt,
                     ..
-                } => selected(then_stmt) || else_stmt.as_deref().is_some_and(selected),
-                StatementKind::Case { items, .. } => items.iter().any(|i| selected(&i.stmt)),
+                } => {
+                    selected(then_stmt, nba_names)
+                        || else_stmt.as_deref().is_some_and(|s| selected(s, nba_names))
+                }
+                StatementKind::Case { items, .. } => {
+                    items.iter().any(|i| selected(&i.stmt, nba_names))
+                }
                 StatementKind::For { body, .. }
                 | StatementKind::While { body, .. }
                 | StatementKind::DoWhile { body, .. }
@@ -55995,7 +56067,7 @@ impl Simulator {
                 | StatementKind::Forever { body }
                 | StatementKind::Foreach { body, .. }
                 | StatementKind::TimingControl { stmt: body, .. }
-                | StatementKind::Wait { stmt: body, .. } => selected(body),
+                | StatementKind::Wait { stmt: body, .. } => selected(body, nba_names),
                 _ => false,
             }
         }
@@ -56006,6 +56078,7 @@ impl Simulator {
             allocate: &mut Vec<Statement>,
             initialize: &mut Vec<Statement>,
             names: &mut HashSet<String>,
+            nba_names: &HashSet<String>,
         ) {
             match &s.kind {
                 StatementKind::VarDecl {
@@ -56014,7 +56087,10 @@ impl Simulator {
                     declarators,
                 } => {
                     for d in declarators {
-                        if d.init.is_none() && d.dimensions.is_empty() {
+                        if d.init.is_none()
+                            && d.dimensions.is_empty()
+                            && !nba_names.contains(&d.name.name)
+                        {
                             continue;
                         }
                         names.insert(d.name.name.clone());
@@ -56062,7 +56138,7 @@ impl Simulator {
                 }
                 StatementKind::SeqBlock { stmts, .. } | StatementKind::ParBlock { stmts, .. } => {
                     for st in stmts {
-                        collect(st, module, formals, allocate, initialize, names);
+                        collect(st, module, formals, allocate, initialize, names, nba_names);
                     }
                 }
                 StatementKind::If {
@@ -56070,14 +56146,18 @@ impl Simulator {
                     else_stmt,
                     ..
                 } => {
-                    collect(then_stmt, module, formals, allocate, initialize, names);
+                    collect(
+                        then_stmt, module, formals, allocate, initialize, names, nba_names,
+                    );
                     if let Some(st) = else_stmt {
-                        collect(st, module, formals, allocate, initialize, names);
+                        collect(st, module, formals, allocate, initialize, names, nba_names);
                     }
                 }
                 StatementKind::Case { items, .. } => {
                     for i in items {
-                        collect(&i.stmt, module, formals, allocate, initialize, names);
+                        collect(
+                            &i.stmt, module, formals, allocate, initialize, names, nba_names,
+                        );
                     }
                 }
                 StatementKind::For { body, .. }
@@ -56087,9 +56167,9 @@ impl Simulator {
                 | StatementKind::Forever { body }
                 | StatementKind::Foreach { body, .. }
                 | StatementKind::TimingControl { stmt: body, .. }
-                | StatementKind::Wait { stmt: body, .. } => {
-                    collect(body, module, formals, allocate, initialize, names)
-                }
+                | StatementKind::Wait { stmt: body, .. } => collect(
+                    body, module, formals, allocate, initialize, names, nba_names,
+                ),
                 _ => {}
             }
         }
@@ -56103,7 +56183,11 @@ impl Simulator {
             initialize: &mut Vec<Statement>,
             names: &mut HashSet<String>,
         ) -> bool {
-            if !items.iter().any(selected) {
+            let mut nba_names = HashSet::default();
+            for stmt in items.iter() {
+                Simulator::collect_nba_roots(stmt, &mut nba_names);
+            }
+            if !items.iter().any(|s| selected(s, &nba_names)) {
                 return false;
             }
             let span = items
@@ -56178,7 +56262,11 @@ impl Simulator {
                 };
                 formals.insert(port.name.name.clone(), expression);
             }
-            collect(&body, module, &formals, allocate, initialize, names);
+            nba_names.clear();
+            Simulator::collect_nba_roots(&body, &mut nba_names);
+            collect(
+                &body, module, &formals, allocate, initialize, names, &nba_names,
+            );
             if let StatementKind::SeqBlock { stmts, .. } = body.kind {
                 *items = stmts;
             }
@@ -58345,6 +58433,68 @@ impl Simulator {
     /// lvalue for the commit phase. The selected index is sampled now, while
     /// the process locals are live, and subsequent writes to the same signal
     /// merge into the existing pending value in source order.
+    fn enqueue_context_nba(&mut self, entry: NbaEntry, delay: u64) {
+        if delay == 0 {
+            self.nba_queue.push(entry);
+        } else {
+            self.delayed_nba_queue
+                .push((self.time.saturating_add(delay), entry));
+        }
+    }
+
+    fn try_schedule_static_packed_nba(
+        &mut self,
+        lhs: &Expression,
+        val: &Value,
+        delay: u64,
+    ) -> bool {
+        let Some(name) = Self::lvalue_bare_root(lhs) else {
+            return false;
+        };
+        if self
+            .ref_alias_stack
+            .last()
+            .is_some_and(|m| m.contains_key(name))
+            || self
+                .ref_binding_stack
+                .last()
+                .is_some_and(|m| m.contains_key(name))
+        {
+            return false;
+        }
+        let key = self.packed_local_static_key(name);
+        if key.is_none() && !self.hoisted_sub_static_names.contains(name) {
+            return false;
+        }
+        let Some((root, _, steps, hops, two)) = self.frame_packed_target(lhs) else {
+            return false;
+        };
+        let (width, slice) = self.packed_hops_eval(&hops, &steps);
+        let Some((dst, src, len)) = slice else {
+            return true;
+        };
+        let mut value = if val.is_real {
+            Self::real_to_int(val.to_f64(), width)
+        } else {
+            val.resize_for_assign(width)
+        };
+        if two {
+            value = value.to_two_state();
+        }
+        self.enqueue_context_nba(
+            NbaEntry {
+                lhs: key.is_none().then(|| root.into_owned()),
+                value,
+                resolved_id: None,
+                static_key: key,
+                static_slice: Some((dst as u32, src as u32, len as u32)),
+                this_handle: None,
+            },
+            delay,
+        );
+        true
+    }
+
     fn try_schedule_packed_index_nba(&mut self, lhs: &Expression, val: &Value) -> bool {
         let ExprKind::Index { expr: base, index } = &lhs.kind else {
             return false;
@@ -58505,13 +58655,36 @@ impl Simulator {
         // pattern existed because we needed to release the borrow on
         // `self.nba_queue` before calling `self.assign_value(&self, &mut self)`;
         // mem::take achieves the same release without the clones.
+        if !self.delayed_nba_queue.is_empty() {
+            let immediate = std::mem::take(&mut self.nba_queue);
+            let pending = std::mem::take(&mut self.delayed_nba_queue);
+            for (time, entry) in pending {
+                if time <= self.time {
+                    self.nba_queue.push(entry);
+                } else {
+                    self.delayed_nba_queue.push((time, entry));
+                }
+            }
+            self.nba_queue.extend(immediate);
+        }
         let queue = std::mem::take(&mut self.nba_queue);
         for entry in queue {
             // A `static` subroutine local commits to the key captured when the
             // NBA was SCHEDULED; re-resolving here would consult whichever call
             // frame is current in the NBA region (see NbaEntry::static_key).
             if let Some(key) = entry.static_key {
-                self.static_local_vars.insert(key, entry.value);
+                if let Some((dst, src, len)) = entry.static_slice {
+                    if let Some(stored) = self.static_local_vars.get_mut(&key) {
+                        stored.copy_bits_from(
+                            dst as usize,
+                            &entry.value,
+                            src as usize,
+                            len as usize,
+                        );
+                    }
+                } else {
+                    self.static_local_vars.insert(key, entry.value);
+                }
                 continue;
             }
             if let Some(lhs) = entry.lhs {
@@ -58519,10 +58692,17 @@ impl Simulator {
                 // target resolves (see NbaEntry::this_handle).
                 if let Some(h) = entry.this_handle {
                     self.this_stack.push(Some(h));
-                    self.assign_value(&lhs, &entry.value);
-                    self.this_stack.pop();
+                }
+                let value = if let Some((dst, src, len)) = entry.static_slice {
+                    let mut stored = self.eval_expr(&lhs);
+                    stored.copy_bits_from(dst as usize, &entry.value, src as usize, len as usize);
+                    stored
                 } else {
-                    self.assign_value(&lhs, &entry.value);
+                    entry.value
+                };
+                self.assign_value(&lhs, &value);
+                if entry.this_handle.is_some() {
+                    self.this_stack.pop();
                 }
             }
         }
@@ -58713,7 +58893,12 @@ impl Simulator {
     /// Get the next time a delayed update is due (for time advancement).
     fn next_delayed_time(&self) -> Option<u64> {
         let a = self.delayed_updates.iter().map(|(t, _, _)| *t).min();
-        let b = self.delayed_nba.iter().map(|(t, _, _)| *t).min();
+        let b = self
+            .delayed_nba
+            .iter()
+            .map(|(t, _, _)| *t)
+            .chain(self.delayed_nba_queue.iter().map(|(t, _)| *t))
+            .min();
         match (a, b) {
             (Some(x), Some(y)) => Some(x.min(y)),
             (x, None) => x,
@@ -58745,6 +58930,7 @@ impl Simulator {
     /// Any future-time NBA matured at (or before) the current time?
     fn delayed_nba_due(&self) -> bool {
         self.delayed_nba.iter().any(|(t, _, _)| *t <= self.time)
+            || self.delayed_nba_queue.iter().any(|(t, _)| *t <= self.time)
     }
 
     /// Schedule a delayed signal update (inertial delay model).
@@ -71618,11 +71804,16 @@ impl Simulator {
     /// task or function local, formal or return value): `p[1][3:0]`,
     /// `p[0][7]`, `p[i][j][k +: 2]`, `a[i].f[3]`, `s.m[1][7:4]`. Returns the
     /// variable's identifier and name and the selects, root first. `None`
-    /// for any other shape, including a single select.
+    /// for a non-frame root. A single select is also accepted when capturing
+    /// a persistent local's NBA; ordinary reads/writes use `select_of_select`.
     fn frame_packed_chain<'e>(
         &self,
         e: &'e Expression,
-    ) -> Option<(&'e Expression, &'e str, Vec<PendingSel<'e>>)> {
+    ) -> Option<(
+        std::borrow::Cow<'e, Expression>,
+        &'e str,
+        Vec<PendingSel<'e>>,
+    )> {
         let mut steps = Vec::new();
         let mut cur = e;
         loop {
@@ -71656,11 +71847,7 @@ impl Simulator {
         let ExprKind::Ident(h) = &cur.kind else {
             return None;
         };
-        if steps.is_empty()
-            || h.root.is_some()
-            || h.path.len() != 1
-            || !h.path[0].selects.is_empty()
-        {
+        if h.root.is_some() || h.path.is_empty() {
             return None;
         }
         let name = h.path[0].name.name.as_str();
@@ -71668,11 +71855,37 @@ impl Simulator {
             .local_stack
             .last()
             .is_some_and(|f| f.contains_key(name))
+            && !self.hoisted_sub_static_names.contains(name)
         {
             return None;
         }
         steps.reverse();
-        Some((cur, name, steps))
+        let root = if h.path.len() == 1 && h.path[0].selects.is_empty() {
+            std::borrow::Cow::Borrowed(cur)
+        } else {
+            // Elaboration flattens module-task members into an identifier
+            // path; class methods retain MemberAccess nodes. Both denote
+            // the same declared packed geometry (§7.4.1 / §23.9).
+            let mut prefix = Vec::new();
+            for (i, segment) in h.path.iter().enumerate() {
+                if i != 0 {
+                    prefix.push(PendingSel::Member(segment.name.name.as_str()));
+                }
+                prefix.extend(segment.selects.iter().map(PendingSel::Index));
+            }
+            prefix.extend(steps);
+            steps = prefix;
+            let mut identifier = h.clone();
+            identifier.path.truncate(1);
+            identifier.path[0].selects.clear();
+            identifier.cached_signal_id = Cell::new(None);
+            identifier.cached_resolved_name = std::cell::OnceCell::new();
+            std::borrow::Cow::Owned(Expression::new(ExprKind::Ident(identifier), cur.span))
+        };
+        if steps.is_empty() {
+            return None;
+        }
+        Some((root, name, steps))
     }
 
     /// `frame_packed_chain` placed on the variable's declared type: the
@@ -71685,7 +71898,7 @@ impl Simulator {
         &self,
         e: &'e Expression,
     ) -> Option<(
-        &'e Expression,
+        std::borrow::Cow<'e, Expression>,
         &'e str,
         Vec<PendingSel<'e>>,
         Vec<PackedHop>,
@@ -71701,8 +71914,15 @@ impl Simulator {
         }
         let dt = self.module.var_decl_types.get(name)?;
         let (hops, total, two) = self.packed_hops(dt, &steps)?;
-        let cur = self.local_stack.last()?.get(name)?;
-        if cur.is_real || cur.width != total {
+        let valid = if let Some(cur) = self.local_stack.last().and_then(|f| f.get(name)) {
+            !cur.is_real && cur.width == total
+        } else if self.hoisted_sub_static_names.contains(name) {
+            self.get_signal_value_by_name(name)
+                .is_some_and(|cur| !cur.is_real && cur.width == total)
+        } else {
+            false
+        };
+        if !valid {
             return None;
         }
         Some((root, name, steps, hops, two))
@@ -72006,10 +72226,10 @@ impl Simulator {
         }
         // §6.21: selected stores use the same live cell as whole stores.
         // A frame snapshot can be stale after a recursive static-local write.
-        let mut stored = self.eval_expr(root);
+        let mut stored = self.eval_expr(root.as_ref());
         let changed = stored.copy_bits_from(lsb as usize, &v, src as usize, len as usize);
         if changed {
-            self.assign_value(root, &stored);
+            self.assign_value(root.as_ref(), &stored);
         }
         Some(changed)
     }
@@ -72022,7 +72242,7 @@ impl Simulator {
     /// variable (§11.5.1).
     fn frame_packed_select_read(&mut self, e: &Expression) -> Option<Value> {
         let (root, _, steps, hops, two) = self.frame_packed_target(e)?;
-        let base = self.eval_expr(root);
+        let base = self.eval_expr(root.as_ref());
         let (w, sel) = self.packed_hops_eval(&hops, &steps);
         let w = w.max(1);
         let mut out = if two { Value::zero(w) } else { Value::new(w) };
@@ -89075,6 +89295,9 @@ impl Simulator {
                 // below expects — the chain shape skipped the check and the
                 // drive landed on a phantom name instead of the clocking
                 // output net.
+                // Keep the member tree for declaration-based packed geometry;
+                // the flat spelling below is only needed by clocking drives.
+                let packed_lvalue = lvalue;
                 let lvalue_norm;
                 let lvalue: &Expression = match Self::member_chain_as_flat_ident(lvalue) {
                     Some(flat) => {
@@ -89347,56 +89570,26 @@ impl Simulator {
                         .map(|de| self.eval_expr(de).to_u64().unwrap_or(0))
                         .unwrap_or(0),
                 };
-                if d == 0 {
-                    // A `static` subroutine local is checked BEFORE the signal
-                    // resolution below: it is backed by a persistent store keyed
-                    // per declaring subroutine, but `resolve_nba_target` finds a
-                    // bare same-named SIGNAL, which every instance of an
-                    // interface shares. Two instances each running
-                    // `task Gen; static int count; … count <= count + 1;` then
-                    // wrote one cell — one instance's counter never advanced and
-                    // the divider it fed never reached its threshold.
-                    if let Some(key) = self.nba_static_key_for_lvalue(lvalue) {
-                        self.nba_queue.push(NbaEntry {
+                // §10.4.2 / §6.21: capture persistent storage before the
+                // call frame is restored. Every write still commits in NBA.
+                if let Some(key) = self.nba_static_key_for_lvalue(lvalue) {
+                    self.enqueue_context_nba(
+                        NbaEntry {
                             lhs: None,
                             value: val.resize_for_assign(w),
                             resolved_id: None,
                             static_key: Some(key),
-                            // No `lhs` to re-resolve, so no context needed.
+                            static_slice: None,
                             this_handle: None,
-                        });
-                        return;
-                    }
-                    // NBA to a task-FRAME local, whole or a select of it
-                    // (`a <= v`, `a[3:0] <= v`): the deferred queue commits
-                    // in `apply_nba`, OUTSIDE the (possibly suspended)
-                    // process's local frame, so the local would never
-                    // update. Apply immediately — delta-vs-blocking timing
-                    // is unobservable for a process-local. (Body-declared
-                    // locals in the signal map are left deferred: routines
-                    // doing `nba <= next_nba; @(nba)` need the NBA region to
-                    // fire the edge.) Checked before `resolve_nba_target`:
-                    // the local hides a module variable of the same name
-                    // (§23.9), which a queued select would reach once the
-                    // frame is gone. A `ref` formal, or the caller's actual
-                    // it was rewritten to above, keeps the path below.
-                    if Self::lvalue_bare_root(lvalue)
-                        .filter(|_| !rebound)
-                        .is_some_and(|n| {
-                            self.local_stack.last().is_some_and(|m| m.contains_key(n))
-                                && !self
-                                    .ref_alias_stack
-                                    .last()
-                                    .is_some_and(|m| m.contains_key(n))
-                                && !self
-                                    .ref_binding_stack
-                                    .last()
-                                    .is_some_and(|m| m.contains_key(n))
-                        })
-                    {
-                        self.assign_value(lvalue, &val.resize_for_assign(w));
-                        return;
-                    }
+                        },
+                        d,
+                    );
+                    return;
+                }
+                if !rebound && self.try_schedule_static_packed_nba(packed_lvalue, &val, d) {
+                    return;
+                }
+                if d == 0 {
                     let id_opt = self.resolve_nba_target(lvalue);
                     if let Some(id) = id_opt {
                         // Track via index map so subsequent partial-NBAs
@@ -89418,8 +89611,8 @@ impl Simulator {
                         if h.path.len() == 1
                             && self.local_stack.last().is_some_and(|m| m.contains_key(&h.path[0].name.name)))
                     {
-                        // A bare name of the frame left to here (a `ref`
-                        // formal's), applied now for the reason above.
+                        // Preserve the existing whole-frame fallback.
+                        // Persistent local declarations were captured above.
                         self.assign_value(lvalue, &val.resize_for_assign(w));
                     } else {
                         let frozen = self.freeze_lvalue_indices(lvalue);
@@ -89435,6 +89628,7 @@ impl Simulator {
                             value: qval,
                             resolved_id: None,
                             static_key,
+                            static_slice: None,
                             this_handle,
                         });
                     }
@@ -89471,13 +89665,17 @@ impl Simulator {
                     };
                     let static_key = self.nba_static_key_for_lvalue(lvalue);
                     let this_handle = self.this_stack.last().copied().flatten();
-                    self.nba_queue.push(NbaEntry {
-                        lhs: Some(frozen),
-                        value: qval,
-                        resolved_id: None,
-                        static_key,
-                        this_handle,
-                    });
+                    self.enqueue_context_nba(
+                        NbaEntry {
+                            lhs: Some(frozen),
+                            value: qval,
+                            resolved_id: None,
+                            static_key,
+                            static_slice: None,
+                            this_handle,
+                        },
+                        d,
+                    );
                 }
             }
             StatementKind::If {
@@ -110795,13 +110993,14 @@ impl Simulator {
 
     /// The bare variable a whole or select lvalue writes: `a` in `a`,
     /// `a[3:0]`, `a[i +: 4]` or `a[i][j]`. None for anything else, a member
-    /// write included.
+    /// hierarchy roots are excluded; member writes keep their local root.
     fn lvalue_bare_root(e: &Expression) -> Option<&str> {
         match &e.kind {
             ExprKind::Index { expr, .. }
             | ExprKind::RangeSelect { expr, .. }
+            | ExprKind::MemberAccess { expr, .. }
             | ExprKind::Paren(expr) => Self::lvalue_bare_root(expr),
-            ExprKind::Ident(h) if h.path.len() == 1 && h.root.is_none() => {
+            ExprKind::Ident(h) if !h.path.is_empty() && h.root.is_none() => {
                 Some(h.path[0].name.name.as_str())
             }
             _ => None,
