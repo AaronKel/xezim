@@ -6345,12 +6345,14 @@ pub struct Simulator {
     default_clocking_cb: Option<String>,
     /// LRM §14.4 `#1step` input skew — Preponed (slot-entry) value of every
     /// clocking-block INPUT signal, keyed by signal name. Captured at the top
-    /// of each time slot BEFORE the active/NBA regions run (same point as
-    /// `sva_preponed`), so when a clock posedge fires later in the slot the
+    /// of each time slot BEFORE callback writes and active/NBA regions run,
+    /// so when a clock posedge fires later in the slot the
     /// input snapshot is the value from *before* the edge, not the same-edge
     /// NBA update. Without this, `cb.<in>` reads the post-edge value (off by
     /// one clock relative to a reference simulator).
     clocking_preponed: HashMap<String, Value>,
+    /// Slot whose Preponed clocking-input values have already been captured.
+    clocking_preponed_slot: Option<u64>,
     /// §14.4 `input #N` history per sampled net (see `ClockingHist`). Empty
     /// unless some clocking input has an explicit positive skew.
     clocking_hist: HashMap<String, ClockingHist>,
@@ -12989,6 +12991,7 @@ impl Simulator {
             clocking_last_edge: HashMap::default(),
             default_clocking_cb: None,
             clocking_preponed: HashMap::default(),
+            clocking_preponed_slot: None,
             clocking_hist: HashMap::default(),
             clocking_hist_slot: None,
             clocking_inouts: HashMap::default(),
@@ -47524,6 +47527,9 @@ impl Simulator {
         if let Some(t) = _t {
             accum.t_snap += t.elapsed().as_nanos() as u64;
         }
+        // §14.4: #1step samples precede every callback/active-region write
+        // at this time, and remain fixed across this slot's later deltas.
+        self.refresh_clocking_preponed();
         // §38.36 cbAfterDelay (cocotb's `Timer`) fires HERE: after this slot's
         // edge snapshot and before `check_edges`, so a clock the callback
         // drives registers as a real transition. Firing it before the snapshot
@@ -47550,10 +47556,6 @@ impl Simulator {
         // clocked assertion firing later this slot (tick_sva_sites) samples
         // pre-edge values rather than same-edge NBA updates.
         self.refresh_sva_preponed();
-        // LRM §14.4 `#1step` clocking-input skew: capture the same Preponed
-        // (slot-entry) samples for clocking-block inputs, so `cb.<in>` read
-        // after a posedge later this slot sees the pre-edge value.
-        self.refresh_clocking_preponed();
 
         if self.sched_trace_on() {
             eprintln!("[sched] t={} +--- tick ---", self.time);
@@ -95845,9 +95847,10 @@ impl Simulator {
     /// `#1step` input skew samples pre-edge values. No-op with no clocking
     /// blocks.
     fn refresh_clocking_preponed(&mut self) {
-        if self.clocking_meta.is_empty() {
+        if self.clocking_meta.is_empty() || self.clocking_preponed_slot == Some(self.time) {
             return;
         }
+        self.clocking_preponed_slot = Some(self.time);
         let names: Vec<String> = self
             .clocking_meta
             .values()
