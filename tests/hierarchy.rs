@@ -250,3 +250,6 @@ mod named_block_hier_names;
 
 #[path = "hierarchy/instance_array_342.rs"]
 mod instance_array_342;
+
+#[path = "hierarchy/positional_ports_358.rs"]
+mod next_twelve_positional_ports_358;
