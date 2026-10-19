@@ -1767,18 +1767,28 @@ impl Simulator {
                 // A slice of an unpacked array (an array port's connection,
                 // `a[1:2]`) reads the cells in it; no single name follows.
                 let (l, r) = (self.eval_expr(left), self.eval_expr(right));
+                if l.has_xz() || r.has_xz() {
+                    return None;
+                }
                 let (Some(l), Some(r)) = (l.to_i64(), r.to_i64()) else {
                     return None;
                 };
+                // §11.5.1 permits out-of-range selects. Form the bounds in
+                // wider arithmetic before clipping so even an unused
+                // assertion with an extreme index cannot overflow here.
+                let (l, r) = (i128::from(l), i128::from(r));
                 let (lo, hi) = match kind {
                     RangeKind::Constant => (l.min(r), l.max(r)),
-                    RangeKind::IndexedUp => (l, l + r - 1),
-                    RangeKind::IndexedDown => (l - r + 1, l),
+                    RangeKind::IndexedUp if r > 0 => (l, l + r - 1),
+                    RangeKind::IndexedDown if r > 0 => (l - r + 1, l),
+                    _ => return None,
                 };
                 // Only the indices the array has.
                 let (alo, ahi) = self.sva_slice_bounds(&base)?;
-                for i in lo.max(alo)..=hi.min(ahi) {
-                    if let Some(id) = self.resolve_signal_id(&Self::name_with_index(&base, i)) {
+                for i in lo.max(i128::from(alo))..=hi.min(i128::from(ahi)) {
+                    if let Some(id) =
+                        self.resolve_signal_id(&Self::name_with_index(&base, i as i64))
+                    {
                         out.push(id);
                     }
                 }

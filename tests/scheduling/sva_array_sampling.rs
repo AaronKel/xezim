@@ -17,6 +17,27 @@
 
 use xezim::simulate;
 
+/// §11.5.1 allows out-of-range selects. Registration must clip their
+/// sampled storage safely, including at both signed index limits, before
+/// an assertion has ever observed a clock edge.
+#[test]
+fn extreme_array_slice_bounds_do_not_overflow_without_a_clock() {
+    let src = r#"
+module top;
+  logic clk = 0;
+  logic [7:0] a[0:3];
+  c0: cover property (@(posedge clk) a[64'sh7fff_ffff_ffff_ffff +: 2] === a[0 +: 2]);
+  c1: cover property (@(posedge clk) a[64'sh8000_0000_0000_0000 -: 2] === a[0 +: 2]);
+  c2: cover property (@(posedge clk) a[64'sh7fff_ffff_ffff_fffe +: 4] === a[0 +: 4]);
+  c3: cover property (@(posedge clk) a[64'sh8000_0000_0000_0001 -: 4] === a[0 +: 4]);
+  c4: cover property (@(posedge clk) a[64'sh7fff_ffff_ffff_ffff +: 1] === a[0 +: 1]);
+  c5: cover property (@(posedge clk) a[64'sh8000_0000_0000_0000 -: 1] === a[0 +: 1]);
+  initial begin #1; $display("RESULT slice bounds survived"); $finish; end
+endmodule
+"#;
+    assert_eq!(result(src), "RESULT slice bounds survived");
+}
+
 fn result(src: &str) -> String {
     let sim = simulate(src, 1000).expect("simulate failed");
     sim.output
