@@ -178,6 +178,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   cover hits or end-of-simulation failures (§16.12.9, §16.14.8).
   (#395, reported by akashlevy)
 
+* Tiered string casts convert bytes without padding concatenations, including
+  casts through typedefs. NUL removal and byte values agree with interpreted
+  calls, and persistent methods recompile for the new conversion
+  (§6.16, §6.18, §6.24.3, §11.4.12).
+  (#391, reported by urbanij; #396, contributed by Ganesh-TNL)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
