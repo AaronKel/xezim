@@ -370,3 +370,32 @@ fn issue_390_queue_struct_call_elems() {
     assert!(!msgs.iter().any(|m| m.starts_with("FAIL")), "{:#?}", msgs);
     assert!(msgs.iter().any(|m| m == "TEST_PASS"), "{:#?}", msgs);
 }
+
+/// A call is evaluated once even when a deeply nested struct has no leaf
+/// layout available (§13.5.1, §7.10.2.2). Expected counts and queue sizes
+/// were checked with the reference simulator.
+#[test]
+fn queue_struct_value_arguments_run_once() {
+    let msgs = outputs(
+        include_str!("../issue_cases/queue_struct_value_once.sv"),
+        100_000,
+    );
+    let mut rows: Vec<_> = msgs
+        .iter()
+        .filter(|m| m.starts_with("T|"))
+        .cloned()
+        .collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            "T|back|1 1",
+            "T|conditional|2 2",
+            "T|front|1 1",
+            "T|insert|1 1",
+            "T|method|1 2",
+            "T|parenthesized|2 2",
+        ],
+        "{msgs:#?}",
+    );
+}

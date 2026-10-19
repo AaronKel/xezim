@@ -126584,12 +126584,12 @@ impl Simulator {
                 // members intact. Storing only the packed scalar left every
                 // leaf-based consumer reading "".
                 let v = self.queue_eval_arg(obj_name, arg);
-                if self.spread_into_unpacked_struct(elem, &su, &v) {
-                    // Keep the packed view too: whole-element value reads
-                    // (the caller's `q[0].c` fallback) slice it.
-                    self.set_signal_value_by_name(elem, v);
-                    return;
-                }
+                self.spread_into_unpacked_struct(elem, &su, &v);
+                // Keep the packed view even when no leaves can be laid out.
+                // The argument has already run; falling through would repeat
+                // its side effects (§13.5.1).
+                self.set_signal_value_by_name(elem, v);
+                return;
             }
         }
         let mut val = self.queue_eval_arg(obj_name, arg);
