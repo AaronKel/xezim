@@ -398,6 +398,23 @@ impl Simulator {
             if ident_copy_ids.is_some_and(|(dst_id, src_id)| dst_id == src_id) {
                 continue;
             }
+            // So is an element connect of an unpacked-array port collapsed
+            // onto its actual (see `collapse_array_port_nets`).
+            if ca.rhs_parent_scoped
+                && explicit_delay == 0
+                && cov_counter.is_none()
+                && matches!(ca.lhs.kind, ExprKind::Index { .. })
+            {
+                let cell = |e: &Expression| {
+                    let (base, idx) = Self::const_elem_ref(e, &self.module)?;
+                    self.elem_cell(&base, &idx)
+                };
+                if let (Some(dst), Some(src)) = (cell(&ca.lhs), cell(&ca.rhs)) {
+                    if dst == src {
+                        continue;
+                    }
+                }
+            }
             reads.clear();
             writes.clear();
             Self::collect_expr_reads(&ca.rhs, &self.module, &mut reads);
