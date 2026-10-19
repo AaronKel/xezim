@@ -3534,6 +3534,13 @@ struct SvaClockedSite {
     /// and swapped in while this site's predicate is evaluated, so the
     /// property samples pre-edge values through the sampled-value overlay.
     sampled_ids: Vec<usize>,
+    /// §16.5.1: the selects of unpacked arrays in `body` whose indices read
+    /// signals (`a[k]`), each with its array's (first cell id, low index,
+    /// high index) when it selects an element of a 1-D array. The cells they
+    /// name are renamed in each Preponed region and kept in `sampled_ids`
+    /// after its first `fixed` entries.
+    sels: Vec<(Expression, Option<(usize, i64, i64)>)>,
+    fixed: usize,
     /// §16.10: the initial values of the attempt's local variable slots
     /// (empty when the property has none).
     lv_init: SvaEnv,
@@ -5206,6 +5213,16 @@ impl PackedMem {
             self.data[xat..xat + 8].copy_from_slice(&((ox & !seg.pmask) | nx).to_le_bytes());
         }
         true
+    }
+
+    /// Land `(v, x)` in the cell even if it is forced, leaving the force as
+    /// it is: for a swap undone before anything else reads the cell (a
+    /// concurrent assertion's sampled values, §16.5.1).
+    fn put_raw(&mut self, id: usize, v: u64, x: u64) {
+        if let Some((seg, at)) = self.locate(id) {
+            let seg = *seg;
+            self.store_at(&seg, at, v, x);
+        }
     }
 
     /// §10.6.2 `force`: land `(v, x)` in the cell even if it is already

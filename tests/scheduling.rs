@@ -349,3 +349,6 @@ mod action_scopes_386;
 mod pending_negation_393;
 #[path = "scheduling/followed_vacuity_395.rs"]
 mod followed_vacuity_395;
+
+#[path = "scheduling/sva_array_sampling.rs"]
+mod sva_array_sampling;
