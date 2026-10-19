@@ -97275,47 +97275,82 @@ impl Simulator {
         }
     }
 
-    /// Does an attempt still carry a strong obligation (§16.12.2) — a
-    /// `strong(seq)` or `s_eventually` that has not been met?
-    fn sva_strong_pending(node: &SvaNode, st: &SvaState) -> bool {
+    /// Whether a pending property fails at the end of simulation (§16.12.2–3).
+    /// A weak sequence holds when the clock stops; property `not` inverts
+    /// that result just as it inverts a completed operand's result.
+    fn sva_fails_at_end(node: &SvaNode, st: &SvaState) -> bool {
         match (node, st) {
             (SvaNode::Seq(_, strong), SvaState::Seq(_)) => *strong,
+            (SvaNode::Not(inner), SvaState::Not(ist)) => !Self::sva_fails_at_end(inner, ist),
             (SvaNode::Eventually(_), SvaState::Leaf(_)) => true,
             (SvaNode::Impl { cons: cn, .. }, SvaState::Impl { cons, .. })
             | (SvaNode::Followed { cons: cn, .. }, SvaState::Followed { cons, .. }) => {
-                cons.iter().any(|(_, cs)| Self::sva_strong_pending(cn, cs))
+                // A nonoverlapped consequent still waiting for its first
+                // clock tick has not started an evaluation yet.
+                cons.iter()
+                    .any(|(delay, cs)| *delay == 0 && Self::sva_fails_at_end(cn, cs))
             }
             (SvaNode::And(na, nb), SvaState::And { a, b, ra, rb })
             | (SvaNode::Or(na, nb), SvaState::Or { a, b, ra, rb }) => {
-                (ra.is_none() && Self::sva_strong_pending(na, a))
-                    || (rb.is_none() && Self::sva_strong_pending(nb, b))
+                (ra.is_none() && Self::sva_fails_at_end(na, a))
+                    || (rb.is_none() && Self::sva_fails_at_end(nb, b))
             }
             _ => false,
         }
     }
 
-    /// End of simulation (§16.12.2): every attempt still waiting on a strong
-    /// obligation fails now.
+    /// End of simulation (§16.12.2–3): settle pending failures before final
+    /// procedures inspect the assertion actions' results.
     fn sva_end_of_sim(&mut self) {
         for i in 0..self.sva_sites.len() {
+            // Guards and fail actions may call functions after `$finish`:
+            // lift the flag as final procedures do.
+            let was_finished = self.finished;
+            self.finished = false;
+            let disabled = self.sva_site_disabled(i);
             let node = self.sva_sites[i].node.clone();
             let span_key = self.sva_sites[i].stat_key;
             let attempts = std::mem::take(&mut self.sva_sites[i].attempts);
+            if disabled {
+                self.finished = was_finished;
+                continue;
+            }
             let n_fail = attempts
                 .iter()
-                .filter(|st| Self::sva_strong_pending(&node, st))
+                .filter(|st| Self::sva_fails_at_end(&node, st))
                 .count();
             let prev_active = self.active_sva_site.replace(i);
-            // The fail action runs after `$finish`: lift the flag for it,
-            // as `final` blocks do.
-            let was_finished = self.finished;
-            self.finished = false;
             for _ in 0..n_fail {
                 self.sva_tally(i, span_key, false);
             }
             self.finished = was_finished;
             self.active_sva_site = prev_active;
         }
+    }
+
+    /// §16.12: `disable iff` uses the current value in the assertion's
+    /// scope, independently of its sampling clock.
+    fn sva_site_disabled(&mut self, i: usize) -> bool {
+        let Some(guard) = self.sva_sites[i].disable.take() else {
+            return false;
+        };
+        let prev_active = self.active_sva_site.replace(i);
+        let prev_scope = self.activation_scope.borrow().clone();
+        *self.activation_scope.borrow_mut() = Some(self.sva_sites[i].scope.clone());
+        let disabled = self.eval_expr(&guard).is_true();
+        self.sva_sites[i].disable = Some(guard);
+        self.active_sva_site = prev_active;
+        *self.activation_scope.borrow_mut() = prev_scope;
+        disabled
+    }
+
+    fn sva_cancel_disabled(&mut self, i: usize) -> bool {
+        let disabled = self.sva_site_disabled(i);
+        if disabled {
+            self.sva_sites[i].attempts.clear();
+            self.sva_sites[i].matured.clear();
+        }
+        disabled
     }
 
     /// Does the expression contain a property-only operator (implication,
@@ -98415,11 +98450,14 @@ impl Simulator {
                 _ => (prev == 0 && cur_clk_bit != 0) || (prev >= 2 && cur_clk_bit == 1),
             };
             if !fired {
+                // §16.12: cancellation does not need a sampling edge.
+                self.sva_cancel_disabled(i);
                 continue;
             }
             // `@(posedge clk iff g)`: no tick while the guard is false.
             if let Some(g) = self.sva_sites[i].iff.clone() {
                 if !self.eval_expr(&g).is_true() {
+                    self.sva_cancel_disabled(i);
                     continue;
                 }
             }
@@ -98427,9 +98465,6 @@ impl Simulator {
             let site_loc = self.sva_sites[i].stat_loc;
             let site_kind = self.sva_sites[i].kind;
             let node = self.sva_sites[i].node.clone();
-            // The guard and the sampled ids are moved out for the fire (the
-            // evaluator needs `&mut self`) and put back below, not cloned.
-            let disable = self.sva_sites[i].disable.take();
             // LRM §16.5.1: the referenced-signal ids whose Preponed samples
             // this fire's predicates must read through the sampled-value overlay.
             let sampled_ids = std::mem::take(&mut self.sva_sites[i].sampled_ids);
@@ -98440,15 +98475,9 @@ impl Simulator {
             // evaluates, so `$past(<sig>)` in a consequent that comes due
             // this tick reads the previous cycle's sample too.
             self.refresh_sva_past_snapshots(i, &sampled_ids);
-            // §16.12 `disable iff`: an asserted guard cancels every attempt
-            // in flight, including the one that would start now.
-            let disabled = disable
-                .as_ref()
-                .is_some_and(|g| self.eval_expr(g).is_true());
-            self.sva_sites[i].disable = disable;
-            if disabled {
-                self.sva_sites[i].attempts.clear();
-                self.sva_sites[i].matured.clear();
+            // On a sampling edge, refresh sampled-value history before
+            // evaluating a disable condition that refers to that history.
+            if self.sva_cancel_disabled(i) {
                 self.sva_sites[i].sampled_ids = sampled_ids;
                 self.active_sva_site = prev_active;
                 *self.activation_scope.borrow_mut() = prev_activation_scope;

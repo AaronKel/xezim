@@ -340,3 +340,6 @@ mod clock_edges_385;
 
 #[path = "scheduling/action_scopes_386.rs"]
 mod action_scopes_386;
+
+#[path = "scheduling/pending_negation_393.rs"]
+mod pending_negation_393;
