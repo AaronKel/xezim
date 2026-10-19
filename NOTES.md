@@ -169,6 +169,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   a native shift in debug execution, including nested and wide-block
   forms (§11.4.12).
 
+* Negated weak sequences fail when the clock stops with an attempt still
+  pending. Nested negation preserves sequence strength, and `disable iff`
+  cancels attempts even without another clock edge (§16.12.2–3).
+  (#393, reported by akashlevy)
+* Followed-by properties settle at the first successful consequent tick,
+  including vacuous successes, so later matches cannot add pass actions,
+  cover hits or end-of-simulation failures (§16.12.9, §16.14.8).
+  (#395, reported by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
