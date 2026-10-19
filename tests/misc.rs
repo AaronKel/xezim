@@ -513,3 +513,6 @@ mod cli_transcript_347;
 
 #[path = "misc/relaxed_static_initializers_351.rs"]
 mod relaxed_static_initializers_351;
+
+#[path = "misc/string_casts_391.rs"]
+mod string_casts_391;
