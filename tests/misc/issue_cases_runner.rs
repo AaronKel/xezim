@@ -399,3 +399,25 @@ fn queue_struct_value_arguments_run_once() {
         "{msgs:#?}",
     );
 }
+
+/// A full-word first concatenation part is copied without a shift by 64
+/// (§11.4.12). Adjacent widths, nesting and multi-part forms preserve both
+/// value and X/Z planes. Expected rows match the reference simulator.
+#[test]
+fn full_word_concatenation_preserves_value_and_xz_planes() {
+    let out = outputs(
+        include_str!("../issue_cases/narrow_concat_boundaries.sv"),
+        1000,
+    );
+    let mut rows: Vec<_> = out.into_iter().filter(|m| m.starts_with("T|")).collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            "T|boundaries|x123456789abcdef 10123456789abcdez x123456789abcdezx123456789abcdez",
+            "T|known_boundaries|7123456789abcdef 10123456789abcdef fedcba9876543210fedcba9876543210",
+            "T|known|fedcba9876543210 fedcba9876543210 fedcba9876543210 fedcba9876543210 fedcba9876543210",
+            "T|unknown|x123456789abcdez x123456789abcdez x123456789abcdez x123456789abcdez x123456789abcdez",
+        ]
+    );
+}

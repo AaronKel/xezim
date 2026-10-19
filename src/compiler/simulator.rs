@@ -27588,8 +27588,10 @@ impl Simulator {
                     regs[*d as usize] = (regs[*a as usize] != 0 || regs[*b as usize] != 0) as u64;
                 }
                 TsInsn::Concat { d, parts } => {
-                    let mut acc = 0u64;
-                    for &(r, w) in parts.iter() {
+                    // §11.4.12: a single 64-bit part is already the
+                    // result; do not shift an initial zero by a full word.
+                    let mut acc = parts.first().map_or(0, |&(r, _)| regs[r as usize]);
+                    for &(r, w) in parts.iter().skip(1) {
                         acc = (acc << w) | regs[r as usize];
                     }
                     regs[*d as usize] = acc;
@@ -28535,8 +28537,8 @@ impl Simulator {
                         r!(*d) = (r!(*a) != 0 || r!(*b) != 0) as u64;
                     }
                     TsInsn::Concat { d, parts } => {
-                        let mut acc = 0u64;
-                        for &(r, w) in parts.iter() {
+                        let mut acc = parts.first().map_or(0, |&(r, _)| r!(r));
+                        for &(r, w) in parts.iter().skip(1) {
                             acc = (acc << w) | r!(r);
                         }
                         r!(*d) = acc;
@@ -29991,8 +29993,8 @@ impl Simulator {
                             ((*rp.add(*a as usize)) != 0 || (*rp.add(*b as usize)) != 0) as u64;
                     }
                     TsInsn::Concat { d, parts } => {
-                        let mut acc = 0u64;
-                        for &(r, w) in parts.iter() {
+                        let mut acc = parts.first().map_or(0, |&(r, _)| *rp.add(r as usize));
+                        for &(r, w) in parts.iter().skip(1) {
                             acc = (acc << w) | (*rp.add(r as usize));
                         }
                         (*rp.add(*d as usize)) = acc;
