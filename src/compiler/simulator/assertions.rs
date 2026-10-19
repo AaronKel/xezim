@@ -648,7 +648,12 @@ impl Simulator {
         for it in items {
             match it.slot {
                 Some((k, w, signed)) => {
-                    let v = self.sva_eval_env(&it.expr, &mut env);
+                    // §11.6.1: the right-hand side of an assignment is sized
+                    // with its target, so `x = a + b` keeps the carry when
+                    // `x` is wider than `a` and `b`.
+                    std::mem::swap(&mut self.sva_lv, &mut env);
+                    let v = self.eval_expr_ctx(&it.expr, w);
+                    std::mem::swap(&mut self.sva_lv, &mut env);
                     let mut v = v.resize_for_assign(w);
                     v.is_signed = signed;
                     if let Some(slot) = env.get_mut(k) {
@@ -1848,7 +1853,12 @@ impl Simulator {
                 ) {
                     return;
                 }
-                for a in args {
+                // The width or type of a cast (`W'(x)`) is read by name.
+                let skip = usize::from(matches!(
+                    name.as_str(),
+                    "$__xz_size_cast" | "$__xz_named_cast" | "$__xz_type_cast"
+                ));
+                for a in args.iter_mut().skip(skip) {
                     self.sva_resolve_signals(a);
                 }
             }
@@ -1901,6 +1911,21 @@ impl Simulator {
             v.is_real = true;
         }
         v
+    }
+
+    /// The width of an `SVA_SIG_MARKER` read: its signal's declared width, or
+    /// for a local variable (§16.10) its slot's.
+    pub(super) fn sva_sig_width(&self, args: &[Expression]) -> Option<u32> {
+        let k = match &args.first()?.kind {
+            ExprKind::Number(NumberLiteral::Integer { value, .. }) => {
+                value.parse::<usize>().ok()?
+            }
+            _ => return None,
+        };
+        if args.len() == 2 {
+            return self.sva_lv.get(k).map(|v| v.width);
+        }
+        self.signal_widths.get(k).copied()
     }
 
     /// §16.10: a local variable read (a two-argument `SVA_SIG_MARKER`: the

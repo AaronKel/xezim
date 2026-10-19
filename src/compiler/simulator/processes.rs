@@ -2428,6 +2428,7 @@ impl Simulator {
                         | "$clog2"
                         | "$__xz_named_cast"
                         | "$__xz_size_cast"
+                        | SVA_SIG_MARKER
                 ) && args.iter().all(pure)
             }
             ExprKind::Call { func, args } => {
