@@ -1726,6 +1726,7 @@ impl Simulator {
         Self::classify_typedef_collection_properties(&mut module);
         let contested_pkg_vars = Self::split_contested_package_vars(&mut module);
         Self::register_struct_member_packed_dims(&mut module);
+        Self::fold_named_sva_members(&mut module);
         // §9.2.2.2: give every dynamic array / queue a REAL `<q>.size` signal.
         // It doubles as the queue's change proxy in the comb dependency graph:
         // sensitivity registration resolves it to an id, and every mutation

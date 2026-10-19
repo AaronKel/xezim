@@ -352,3 +352,6 @@ mod followed_vacuity_395;
 
 #[path = "scheduling/sva_array_sampling.rs"]
 mod sva_array_sampling;
+
+#[path = "scheduling/sva_named_property_hier_sampling.rs"]
+mod sva_named_property_hier_sampling;
