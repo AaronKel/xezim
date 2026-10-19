@@ -154,6 +154,17 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   including descending fixed ranges (§13.4.1, §7.6).
   (#387, reported by Dragon-Git)
 
+
+* Queue elements created from struct-returning expressions retain their
+  string and other members when passed to functions or copied. Arguments
+  run once even when a struct's leaf layout is unavailable
+  (§7.10.2.2, §13.4.1, §13.5.1).
+  (#390, #392, contributed by Ganesh-TNL)
+* Variables declared in `for` headers retain their declared signedness
+  across synchronous and suspended loops, including typedefs and unsigned
+  initializers (§6.11.1, §11.8.1, §12.7.1).
+  (#394, contributed by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
