@@ -1262,6 +1262,19 @@ impl Simulator {
             "build edge and dependency indexes",
             &mut compile_phase_start,
         );
+        // §16.5.1: a sampled-value function's default sampled values are the
+        // values before time 0 — declaration initializers, else type
+        // defaults — so take them before the time-0 settle drives any net or
+        // continuously assigned variable. The procedural watches read theirs
+        // when they register.
+        self.capture_sampled_defaults();
+        // §16.9.3: pre-register sampled-value watches BEFORE the initial
+        // blocks are consumed into scheduled processes, so clock-edge
+        // history accumulates from the first edge.
+        self.register_sampled_watches();
+        if !self.sampled_defaults.is_empty() || !self.sampled_watches.is_empty() {
+            self.mark_deferred_inits();
+        }
         // IEEE 1800: at time 0, always_comb blocks execute unconditionally.
         // always @* blocks do NOT execute at time 0 unless inputs change.
         // Only seed dirty IDs that have combinational dependents. Large
@@ -1351,10 +1364,6 @@ impl Simulator {
         // #7 lazy-prefix path: also drain `pending_initial` one-at-a-time.
         // A pending block is materialized just before scheduling and dropped
         // after, so peak memory is at most one materialized InitialBlock.
-        // §16.9.3: pre-register sampled-value watches BEFORE the initial
-        // blocks are consumed into scheduled processes, so clock-edge
-        // history accumulates from the first edge.
-        self.register_sampled_watches();
         // §6.18: reject assigning a non-class value (an enum member or integer
         // literal) to a class-handle variable. The reference elaborator flags
         // this at compile time; surface a compile error so simulation never

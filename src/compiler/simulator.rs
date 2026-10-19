@@ -491,6 +491,9 @@ const INTRA_SAVED_MARKER: &str = "$__xz_intra_saved";
 /// control (`@prop` on a non-event class property) was armed. Never
 /// user-visible.
 const VC_CHANGED_MARKER: &str = "$__xz_vc_changed";
+/// Ends a deferred declaration initializer: `(<target>, ...)` records the
+/// values it gave as their default sampled values (see `sampled_defaults`).
+const SAMPLED_DEFAULT_MARKER: &str = "$__xz_sampled_default";
 /// A signal of a concurrent assertion resolved at registration: `(<id>)`
 /// reads `signal_table[id]` (see `sva_resolve_signals`).
 const SVA_SIG_MARKER: &str = "$__xz_sva_sig";
@@ -9228,6 +9231,11 @@ pub struct Simulator {
     /// the operand sampled (preponed) at each matching clock edge. hist[0]
     /// is the sample at the most recent edge, hist[1] one edge earlier, …
     sampled_watches: Vec<SampledWatch>,
+    /// §16.5.1 default sampled values by signal id: what each signal a
+    /// concurrent assertion can name held before time 0 (its declaration
+    /// initializer, else its type's default). §16.9.3 reads it for a clock
+    /// tick before the first one. Filled by `capture_sampled_defaults`.
+    sampled_defaults: HashMap<usize, Value>,
     /// §9.2.2.2 timing: `-> ev` fired from a comb block during the PRE-process
     /// time-0 settle (compile) happens before any `always @(ev)` process has
     /// registered its waiter — the trigger would be lost. Queue them and

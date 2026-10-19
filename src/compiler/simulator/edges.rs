@@ -814,6 +814,214 @@ impl Simulator {
         (cur, past)
     }
 
+    /// Fill `sampled_defaults` before the time-0 settle, while every variable
+    /// still holds its declaration value or its type's default (§16.5.1). A
+    /// concurrent assertion registers after the settle, and one in a
+    /// procedure only when the procedure reaches it, so its operands are
+    /// found here by name: every signal whose last name segment a concurrent
+    /// assertion (its action blocks included) or a named property or
+    /// sequence spells. That needs no scope resolution, and an extra match
+    /// only costs its entry.
+    pub(super) fn capture_sampled_defaults(&mut self) {
+        let mut names: HashSet<String> = HashSet::default();
+        for b in &self.module.initial_blocks {
+            Self::sva_stmt_names(&b.stmt, false, &mut names);
+        }
+        for p in &self.module.pending_initial {
+            Self::sva_stmt_names(&p.source, false, &mut names);
+        }
+        for b in self.edge_blocks.iter() {
+            Self::sva_stmt_names(&b.stmt, false, &mut names);
+        }
+        for (st, ..) in &self.proc_sampled_blocks {
+            Self::sva_stmt_names(st, false, &mut names);
+        }
+        for body in self.module.property_decls.values() {
+            Self::sva_expr_names(body, &mut names);
+        }
+        if names.is_empty() {
+            return;
+        }
+        for (name, &id) in self.signal_name_to_id.iter() {
+            if !names.contains(name.rsplit(['.', ':']).next().unwrap_or_default()) {
+                continue;
+            }
+            if let Some(v) = self.signal_table.get(id) {
+                self.sampled_defaults.insert(id, v.clone());
+            }
+        }
+    }
+
+    /// The name segments the concurrent assertions in `st` spell, in every
+    /// statement that can hold one. With `all` (inside a concurrent
+    /// assertion's action block, whose sampled-value calls the assertion
+    /// clocks) the names of the statements' expressions count too.
+    pub(super) fn sva_stmt_names(st: &Statement, all: bool, out: &mut HashSet<String>) {
+        use crate::ast::stmt::StatementKind as SK;
+        match &st.kind {
+            SK::Assertion(a) => {
+                let sva = a.is_property || a.is_sequence;
+                if sva || all {
+                    Self::sva_expr_names(&a.expr, out);
+                }
+                for s in [&a.action, &a.else_action].into_iter().flatten() {
+                    Self::sva_stmt_names(s, all || sva, out);
+                }
+            }
+            SK::Expr(e) if all => Self::sva_expr_names(e, out),
+            SK::BlockingAssign { rvalue, .. } | SK::NonblockingAssign { rvalue, .. } if all => {
+                Self::sva_expr_names(rvalue, out)
+            }
+            SK::SeqBlock { stmts, .. } | SK::ParBlock { stmts, .. } => {
+                stmts.iter().for_each(|s| Self::sva_stmt_names(s, all, out))
+            }
+            SK::If {
+                condition,
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                if all {
+                    Self::sva_expr_names(condition, out);
+                }
+                Self::sva_stmt_names(then_stmt, all, out);
+                if let Some(e) = else_stmt {
+                    Self::sva_stmt_names(e, all, out);
+                }
+            }
+            SK::Case { expr, items, .. } => {
+                if all {
+                    Self::sva_expr_names(expr, out);
+                }
+                items
+                    .iter()
+                    .for_each(|it| Self::sva_stmt_names(&it.stmt, all, out))
+            }
+            SK::RandCase { items } => items
+                .iter()
+                .for_each(|(_, s)| Self::sva_stmt_names(s, all, out)),
+            SK::TimingControl { stmt, .. } | SK::Wait { stmt, .. } => {
+                Self::sva_stmt_names(stmt, all, out)
+            }
+            SK::WaitOrder { pass, fail, .. } => {
+                for s in [pass, fail].into_iter().flatten() {
+                    Self::sva_stmt_names(s, all, out);
+                }
+            }
+            SK::For { body, .. }
+            | SK::While { body, .. }
+            | SK::DoWhile { body, .. }
+            | SK::Repeat { body, .. }
+            | SK::Forever { body }
+            | SK::ForeverTail { body }
+            | SK::Foreach { body, .. }
+            | SK::ForeachTail { body, .. }
+            | SK::RsAction { body } => Self::sva_stmt_names(body, all, out),
+            _ => {}
+        }
+    }
+
+    /// Every name segment `e` spells, clocked bodies included.
+    pub(super) fn sva_expr_names(e: &Expression, out: &mut HashSet<String>) {
+        Self::walk_operands(e, &mut |x| match &x.kind {
+            ExprKind::Ident(h) => out.extend(h.path.iter().map(|s| s.name.name.clone())),
+            ExprKind::SvaClocked { body, iff, .. } => {
+                Self::sva_expr_names(body, out);
+                if let Some(g) = iff {
+                    Self::sva_expr_names(g, out);
+                }
+            }
+            _ => {}
+        });
+    }
+
+    /// §16.5.1: a declaration initializer the elaborator could not fold runs
+    /// as a time-0 process: a static initializer, or at the top level a
+    /// synthesized initial block (dummy spans, as `cov_synthesized_initial`
+    /// tells them apart). What it assigns is still the default sampled
+    /// value, so end each such process with `SAMPLED_DEFAULT_MARKER`.
+    pub(super) fn mark_deferred_inits(&mut self) {
+        let dummy = |sp: crate::ast::Span| sp.start == 0 && sp.end == 0;
+        let blocks = self.module.static_init_blocks.iter_mut().map(|b| (b, true));
+        let synthesized = self.module.initial_blocks.iter_mut().filter_map(|b| {
+            let s = &b.stmt;
+            let ok = dummy(s.span)
+                || matches!(&s.kind, StatementKind::BlockingAssign { lvalue, .. } if dummy(lvalue.span));
+            ok.then_some((b, false))
+        });
+        for (b, any) in blocks.chain(synthesized) {
+            let mut targets = Vec::new();
+            if !Self::init_targets(&b.stmt, any, &mut targets) || targets.is_empty() {
+                continue;
+            }
+            let span = crate::ast::Span::dummy();
+            let marker = Statement::new(
+                StatementKind::Expr(Expression::new(
+                    ExprKind::SystemCall {
+                        name: SAMPLED_DEFAULT_MARKER.to_string(),
+                        args: targets,
+                    },
+                    span,
+                )),
+                span,
+            );
+            if let StatementKind::SeqBlock { stmts, .. } = &mut b.stmt.kind {
+                stmts.push(marker);
+                continue;
+            }
+            let st = std::mem::replace(&mut b.stmt, Statement::new(StatementKind::Null, span));
+            b.stmt = Statement::new(
+                StatementKind::SeqBlock {
+                    name: None,
+                    stmts: vec![st, marker],
+                },
+                span,
+            );
+        }
+    }
+
+    /// The targets of the blocking assignments in a deferred declaration
+    /// initializer. With `any` false (a synthesized initial block), false
+    /// unless the block holds nothing else.
+    pub(super) fn init_targets(st: &Statement, any: bool, out: &mut Vec<Expression>) -> bool {
+        match &st.kind {
+            StatementKind::BlockingAssign { lvalue, .. } => {
+                out.push(lvalue.clone());
+                true
+            }
+            StatementKind::SeqBlock { stmts, .. } => {
+                // Every statement is visited: `all` would stop at the first
+                // miss and leave the later targets out.
+                stmts
+                    .iter()
+                    .fold(true, |ok, s| Self::init_targets(s, any, out) && ok)
+            }
+            _ => any,
+        }
+    }
+
+    /// `SAMPLED_DEFAULT_MARKER`: a deferred declaration initializer has run,
+    /// so its targets now hold their default sampled values (§16.5.1).
+    /// Update the ones a concurrent assertion or a procedural watch keeps.
+    pub(super) fn record_sampled_defaults(&mut self, targets: &[Expression]) {
+        for t in targets {
+            let Some(id) = self.get_lhs_signal_id(t) else {
+                continue;
+            };
+            let Some(v) = self.signal_table.get(id).cloned() else {
+                continue;
+            };
+            for w in &mut self.sampled_watches {
+                if w.sig_id == Some(id) && w.default.is_some() {
+                    w.default = Some(v.clone());
+                }
+            }
+            if let Some(d) = self.sampled_defaults.get_mut(&id) {
+                *d = v;
+            }
+        }
+    }
+
     /// Pre-register sampled-value watches for every `$rose/$fell/$stable/
     /// $changed/$past` call in procedural code, so their clock-edge history
     /// accumulates from time 0 (lazy registration at first eval would miss
@@ -1175,7 +1383,16 @@ impl Simulator {
             None
         } else {
             match sig_id {
-                Some(sid) => self.signal_table.get(sid).cloned(),
+                // §16.5.1: the value from before time 0, which
+                // `capture_sampled_defaults` kept. A concurrent assertion
+                // registers its watches after the time-0 settle (a net reads
+                // its driver's value by then), and one in a procedure after
+                // the procedure's earlier writes.
+                Some(sid) => self
+                    .sampled_defaults
+                    .get(&sid)
+                    .or(self.signal_table.get(sid))
+                    .cloned(),
                 None => Some(self.eval_expr(operand)),
             }
         };
