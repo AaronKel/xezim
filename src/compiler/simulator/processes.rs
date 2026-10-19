@@ -3699,7 +3699,7 @@ impl Simulator {
                     if name == crate::intra_delay::INTRA_EVENT_MARKER && args.len() == 4 {
                         let n_val = self.eval_expr(&args[0]).to_u64().unwrap_or(0) as i64;
                         let edge_code = self.eval_expr(&args[1]).to_u64().unwrap_or(0);
-                        let val = self.eval_expr(&args[3]);
+                        let val = self.eval_target_rhs(lvalue, &args[3]);
                         let saved = self.make_intra_saved_expr(val, rvalue.span);
                         let assign = Statement::new(
                             StatementKind::BlockingAssign {

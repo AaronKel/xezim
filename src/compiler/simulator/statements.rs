@@ -3507,6 +3507,25 @@ impl Simulator {
                     }
                     None => lvalue,
                 };
+                // §11.4.1: an lvalue index with a side effect
+                // (`v[i++ +: 18] <= ...`) is evaluated once. Fold it to the
+                // literal it evaluates to now, as the blocking path does, so
+                // the target's width and the captured target below read the
+                // same index. Before, `i` advanced more than once per
+                // assignment and the value landed in the wrong slice. The
+                // statement carries on with the folded target, so its
+                // statement callbacks fire once.
+                let lvalue_folded;
+                let lvalue: &Expression = match Self::lvalue_has_incdec_index(lvalue)
+                    .then(|| self.rewrite_lvalue_index_side_effects(lvalue))
+                    .flatten()
+                {
+                    Some(f) => {
+                        lvalue_folded = f;
+                        &lvalue_folded
+                    }
+                    None => lvalue,
+                };
                 // §14.4: normalize a plain dotted-chain lvalue (`vif.cb.data`
                 // inside a method) to the flat Ident the clocking-drive check
                 // below expects — the chain shape skipped the check and the
@@ -3558,7 +3577,7 @@ impl Simulator {
                     if name == crate::intra_delay::INTRA_EVENT_MARKER && args.len() == 4 {
                         let n_val = self.eval_expr(&args[0]).to_u64().unwrap_or(1) as i64;
                         let edge_code = self.eval_expr(&args[1]).to_u64().unwrap_or(0);
-                        let val = self.eval_expr(&args[3]);
+                        let val = self.eval_target_rhs(packed_lvalue, &args[3]);
                         let saved = self.make_intra_saved_expr(val, rvalue.span);
                         let edge = match edge_code {
                             1 => Some(Edge::Posedge),
@@ -3676,7 +3695,7 @@ impl Simulator {
                         .packed_pattern_for_lhs(lvalue, items)
                         .or_else(|| self.eval_packed_struct_pattern(lvalue, items))
                         .unwrap_or_else(|| self.eval_expr(rvalue)),
-                    _ => self.eval_expr(rvalue),
+                    _ => self.eval_target_rhs(packed_lvalue, rvalue),
                 };
                 // LRM §14.4: clocking-block output drive
                 // `cb.<out_sig> <= val`. Defer to the cb's next clock
