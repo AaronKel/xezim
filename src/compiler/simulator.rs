@@ -74886,13 +74886,7 @@ impl Simulator {
                         ..
                     }
                 ) {
-                    let text: String = v
-                        .sv_string_bytes()
-                        .into_iter()
-                        .filter(|&b| b != 0)
-                        .map(|b| b as char)
-                        .collect();
-                    return Value::from_string(&text);
+                    return Self::sv_string_cast(&v);
                 }
                 if super::elaborate::is_type_real(&dt) {
                     return Value::from_f64(v.to_f64());
@@ -74950,22 +74944,29 @@ impl Simulator {
                 // size) is the operand's context width — see the type-cast
                 // arm above.
                 let target = args.first().and_then(|a| self.named_cast_key(a));
-                let ctx_w = match target.as_deref() {
-                    Some(nm) => {
-                        if let Some(dt) = self.module.typedef_types.get(nm) {
-                            self.cast_context_width(dt)
-                        } else if let Some(&w) = self.module.typedefs.get(nm) {
-                            w.max(1)
-                        } else if self.module.parameters.contains_key(nm)
-                            || self.get_signal_value_by_name(nm).is_some()
-                            || self.class_value_param_in_scope(nm)
-                        {
-                            self.eval_expr(&args[0]).to_u64().unwrap_or(32).max(1) as u32
-                        } else {
-                            0
+                let string_target = target
+                    .as_deref()
+                    .is_some_and(|name| self.named_cast_is_string(name));
+                let ctx_w = if string_target {
+                    0
+                } else {
+                    match target.as_deref() {
+                        Some(nm) => {
+                            if let Some(dt) = self.module.typedef_types.get(nm) {
+                                self.cast_context_width(dt)
+                            } else if let Some(&w) = self.module.typedefs.get(nm) {
+                                w.max(1)
+                            } else if self.module.parameters.contains_key(nm)
+                                || self.get_signal_value_by_name(nm).is_some()
+                                || self.class_value_param_in_scope(nm)
+                            {
+                                self.eval_expr(&args[0]).to_u64().unwrap_or(32).max(1) as u32
+                            } else {
+                                0
+                            }
                         }
+                        None => 0,
                     }
-                    None => 0,
                 };
                 let mut inner_v = match args.get(1) {
                     Some(a) if ctx_w > 0 && !inner_is_call => self.eval_expr_ctx(a, ctx_w),
@@ -74998,6 +74999,9 @@ impl Simulator {
                             inner_v = p;
                         }
                     }
+                }
+                if string_target {
+                    return Self::sv_string_cast(&inner_v);
                 }
                 if let Some(nm) = target {
                     // (a) Full typedef (carries signedness / real-ness).
@@ -116780,18 +116784,7 @@ impl Simulator {
             K::HexToA => Value::from_string(&format!("{:x}", v(0).to_u64().unwrap_or(0))),
             K::OctToA => Value::from_string(&format!("{:o}", v(0).to_u64().unwrap_or(0))),
             K::BinToA => Value::from_string(&format!("{:b}", v(0).to_u64().unwrap_or(0))),
-            K::ToStr => {
-                // §6.16: converting to `string` removes every "\0" character
-                // — not just leading zero bytes. Byte-for-byte the AST cast
-                // arm's rule (`string'(24'hab0063)` is 2 characters).
-                let text: String = v(0)
-                    .sv_string_bytes()
-                    .into_iter()
-                    .filter(|&b| b != 0)
-                    .map(|b| b as char)
-                    .collect();
-                Value::from_string(&text)
-            }
+            K::ToStr => Self::sv_string_cast(v(0)),
         }
     }
 
@@ -126072,6 +126065,17 @@ impl Simulator {
     fn sv_string_from_bytes(b: &[u8]) -> Value {
         let s: String = b.iter().map(|&c| char::from(c)).collect();
         Value::from_string(&s)
+    }
+
+    /// §6.16: integral-to-string conversion removes all NUL characters.
+    fn sv_string_cast(value: &Value) -> Value {
+        let text: String = value
+            .sv_string_bytes()
+            .into_iter()
+            .filter(|&byte| byte != 0)
+            .map(char::from)
+            .collect();
+        Value::from_string(&text)
     }
 
     /// §6.16 `toupper`/`tolower`: ASCII letters only; every other byte,
@@ -138445,11 +138449,15 @@ impl Simulator {
     /// Resolve this formal's string kind without discarding an explicit
     /// typedef scope or a declaring alias's lexical scope.
     fn frame_formal_is_string(&self, dt: &DataType) -> bool {
-        if self.plain_class_ref(dt).is_some() {
+        self.frame_formal_is_string_in(dt, "")
+    }
+
+    fn frame_formal_is_string_in(&self, dt: &DataType, scope: &str) -> bool {
+        if scope.is_empty() && self.plain_class_ref(dt).is_some() {
             return false;
         }
         let mut current = dt;
-        let mut prefix = String::new();
+        let mut prefix = scope.to_string();
         let mut seen = Vec::<String>::new();
         for _ in 0..16 {
             if Self::is_string_data_type(current) {
@@ -146297,6 +146305,40 @@ impl Simulator {
             }
         }
         links.last().cloned()
+    }
+
+    /// §6.18 / §6.24.3: a named scalar string target may be an inherited
+    /// class alias, a bound type parameter, or a scoped package alias.
+    fn named_cast_is_string(&self, name: &str) -> bool {
+        let classify = |dt: &DataType, scope: &str| {
+            Self::is_string_data_type(dt)
+                || (matches!(dt, DataType::TypeReference { .. })
+                    && self.frame_formal_is_string_in(dt, scope))
+        };
+        let mut string = false;
+        if !name.contains("::") {
+            if let Some(bound) = self.resolve_type_param_binding(name) {
+                string = bound == "string"
+                    || self.module.typedef_types.get(&bound).is_some_and(|dt| {
+                        classify(dt, bound.rsplit_once("::").map_or("", |(p, _)| p))
+                    });
+                return string && !self.type_is_unpacked_collection_name(name);
+            }
+            let mut class = self.class_context_stack.last().and_then(|c| c.as_deref());
+            for _ in 0..64 {
+                let Some(cd) = class.and_then(|c| self.module.classes.get(c)) else {
+                    break;
+                };
+                if let Some(dt) = cd.typedef_targets.get(name) {
+                    return classify(dt, &cd.name) && !self.type_is_unpacked_collection_name(name);
+                }
+                class = cd.extends.as_deref();
+            }
+        }
+        if let Some(dt) = self.module.typedef_types.get(name) {
+            string = classify(dt, name.rsplit_once("::").map_or("", |(p, _)| p));
+        }
+        string && !self.type_is_unpacked_collection_name(name)
     }
 
     /// The `1` that `++`/`--` add to or subtract from `v`, carrying `v`'s

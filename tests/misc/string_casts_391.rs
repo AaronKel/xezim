@@ -70,3 +70,37 @@ fn string_cast_method_cache_preserves_results_when_warm() {
     assert_eq!(run(source, &dir, true, Some(&cache)), ["T|cache|1 5"]);
     assert_eq!(cached_methods(&cache), cold);
 }
+
+const EXPECTED: [&str; 5] = [
+    "T|class|1 2",
+    "T|concat|1 1 1",
+    "T|high|2 233",
+    "T|nul|1 2 0 1",
+    "T|once|1 1 2",
+];
+
+#[test]
+fn compiled_string_casts_preserve_bytes_and_aliases() {
+    assert_eq!(
+        run(
+            include_str!("../issue_cases/issue391_string_cast_neighbors.sv"),
+            &directory("compiled"),
+            true,
+            None
+        ),
+        EXPECTED
+    );
+}
+
+#[test]
+fn interpreted_string_casts_preserve_bytes_and_aliases() {
+    assert_eq!(
+        run(
+            include_str!("../issue_cases/issue391_string_cast_neighbors.sv"),
+            &directory("interpreted"),
+            false,
+            None
+        ),
+        EXPECTED
+    );
+}

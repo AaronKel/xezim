@@ -2833,7 +2833,7 @@ impl<'a> BytecodeCompiler<'a> {
                 "$sformatf" | "$psprintf" => true,
                 // §6.24.3: `string'(x)` compiles to a string value (ToStr),
                 // so it is a string operand of an §11.4.12 concat.
-                "$__xz_type_cast" => self.cast_arg_targets_string(args),
+                "$__xz_type_cast" | "$__xz_named_cast" => self.cast_arg_targets_string(args),
                 _ => false,
             },
             ExprKind::Ident(h) => {
@@ -6965,12 +6965,61 @@ impl<'a> BytecodeCompiler<'a> {
         )
     }
 
-    /// §6.24.3: is this `$__xz_type_cast` argument list a cast to `string`?
+    /// §6.24.3: keyword and named casts to a scalar string use the same
+    /// conversion, including aliases in the callee's lexical scope.
     fn cast_arg_targets_string(&self, args: &[Expression]) -> bool {
-        matches!(
-            args.first().map(|a| &a.kind),
-            Some(ExprKind::TypeLiteral(dt)) if self.decl_is_string(dt, None)
-        )
+        use crate::ast::types::{TypeName, TypeScope};
+        let Some(arg) = args.first() else {
+            return false;
+        };
+        if let ExprKind::TypeLiteral(dt) = &arg.kind {
+            return self.decl_is_string(dt, None);
+        }
+        fn names(e: &Expression, out: &mut Vec<crate::ast::Identifier>) -> bool {
+            match &e.kind {
+                ExprKind::Ident(h)
+                    if h.root.is_none() && h.path.iter().all(|p| p.selects.is_empty()) =>
+                {
+                    out.extend(h.path.iter().map(|p| p.name.clone()));
+                    true
+                }
+                ExprKind::MemberAccess { expr, member } => {
+                    if !names(expr, out) {
+                        return false;
+                    }
+                    out.push(member.clone());
+                    true
+                }
+                ExprKind::Paren(inner) => names(inner, out),
+                _ => false,
+            }
+        }
+        let mut parts = Vec::new();
+        if !names(arg, &mut parts) {
+            return false;
+        }
+        let Some(name) = parts.pop() else {
+            return false;
+        };
+        let name = TypeName {
+            scopes: parts
+                .into_iter()
+                .map(|name| TypeScope {
+                    name,
+                    type_args: Vec::new(),
+                })
+                .collect(),
+            name,
+            span: arg.span,
+        };
+        if self
+            .typedef_entry(&self.typedef_coll_dims, &name, None)
+            .is_some_and(|(_, dims)| !dims.is_empty())
+        {
+            return false;
+        }
+        self.typedef_type_entry(&name, None)
+            .is_some_and(|(key, dt)| self.decl_is_string(dt, Some(key)))
     }
 
     /// §13.4.1 / §6.8: the initial value of a variable of `dt` — x for a
@@ -7164,7 +7213,7 @@ impl<'a> BytecodeCompiler<'a> {
             ExprKind::SystemCall { name, args } => match name.as_str() {
                 "$sformatf" | "$psprintf" => true,
                 // §6.24.3: `string'(x)` compiles to a string value (ToStr).
-                "$__xz_type_cast" => self.cast_arg_targets_string(args),
+                "$__xz_type_cast" | "$__xz_named_cast" => self.cast_arg_targets_string(args),
                 _ => false,
             },
             ExprKind::Ident(h) => {
@@ -14852,6 +14901,12 @@ impl<'a> BytecodeCompiler<'a> {
                     Some(r)
                 }
                 "$__xz_named_cast" => {
+                    if self.cast_arg_targets_string(args) {
+                        let src = self.compile_expr(args.get(1)?, 0)?;
+                        let result = self.alloc_reg();
+                        self.emit(Insn::StrOp(result, StrOpKind::ToStr, Box::new(vec![src])));
+                        return Some(result);
+                    }
                     // `pkg::T'(x)` prefers the qualified `pkg::T` entry.
                     let target = args.first().and_then(|a| match &a.kind {
                         // §8.23: a scoped `cls::N` identifier path prefers
