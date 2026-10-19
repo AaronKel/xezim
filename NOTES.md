@@ -165,6 +165,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   initializers (§6.11.1, §11.8.1, §12.7.1).
   (#394, contributed by akashlevy)
 
+* Full-word concatenations preserve value and X/Z bits without overflowing
+  a native shift in debug execution, including nested and wide-block
+  forms (§11.4.12).
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
