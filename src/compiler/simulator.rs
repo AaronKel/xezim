@@ -3666,7 +3666,6 @@ enum SvaState {
         ante: SvaRun,
         ante_alive: bool,
         cons: Vec<(u32, SvaState)>,
-        vacuous: bool,
     },
     And {
         a: Box<SvaState>,
@@ -97413,7 +97412,6 @@ impl Simulator {
                 ante: SvaRun::with_env(env.clone()),
                 ante_alive: true,
                 cons: Vec::new(),
-                vacuous: false,
             },
             SvaNode::And(a, b) => SvaState::And {
                 a: Box::new(Self::sva_new_state(a, env)),
@@ -97798,7 +97796,6 @@ impl Simulator {
                     ante: arun,
                     ante_alive,
                     cons,
-                    vacuous,
                 },
             ) => {
                 // Unlike implication, one successful match suffices. Failure of
@@ -97811,6 +97808,10 @@ impl Simulator {
                         fresh.push(Self::sva_new_state(cons_node, &env));
                     }
                 }
+                // §16.12.9 / §16.14.8: a vacuous success decides the
+                // attempt at this tick too. Check every evaluation at this
+                // tick so a simultaneous nonvacuous success takes priority.
+                let mut vacuous = false;
                 let mut keep = Vec::new();
                 for (mut delay, mut cst) in cons.drain(..) {
                     delay = delay.saturating_sub(1);
@@ -97820,7 +97821,7 @@ impl Simulator {
                     }
                     match self.sva_advance(cons_node, &mut cst) {
                         Some(SvaOutcome::Pass) => return Some(SvaOutcome::Pass),
-                        Some(SvaOutcome::Vacuous) => *vacuous = true,
+                        Some(SvaOutcome::Vacuous) => vacuous = true,
                         Some(SvaOutcome::Fail) => {}
                         None => keep.push((0, cst)),
                     }
@@ -97829,7 +97830,7 @@ impl Simulator {
                     if *overlap {
                         match self.sva_advance(cons_node, &mut cst) {
                             Some(SvaOutcome::Pass) => return Some(SvaOutcome::Pass),
-                            Some(SvaOutcome::Vacuous) => *vacuous = true,
+                            Some(SvaOutcome::Vacuous) => vacuous = true,
                             Some(SvaOutcome::Fail) => {}
                             None => keep.push((0, cst)),
                         }
@@ -97838,12 +97839,10 @@ impl Simulator {
                     }
                 }
                 *cons = keep;
-                if !*ante_alive && cons.is_empty() {
-                    Some(if *vacuous {
-                        SvaOutcome::Vacuous
-                    } else {
-                        SvaOutcome::Fail
-                    })
+                if vacuous {
+                    Some(SvaOutcome::Vacuous)
+                } else if !*ante_alive && cons.is_empty() {
+                    Some(SvaOutcome::Fail)
                 } else {
                     None
                 }

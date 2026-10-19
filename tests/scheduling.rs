@@ -343,3 +343,5 @@ mod action_scopes_386;
 
 #[path = "scheduling/pending_negation_393.rs"]
 mod pending_negation_393;
+#[path = "scheduling/followed_vacuity_395.rs"]
+mod followed_vacuity_395;
