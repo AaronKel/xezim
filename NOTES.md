@@ -184,6 +184,35 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   (§6.16, §6.18, §6.24.3, §11.4.12).
   (#391, reported by urbanij; #396, contributed by Ganesh-TNL)
 
+* Interpreted nonblocking and event-controlled assignments evaluate their
+  right-hand sides at the target width, preserving carries and unary results
+  (§11.6.1). (#399, reported by akashlevy; #407, contributed by akashlevy)
+* Concurrent assertion operands and local match assignments retain their
+  expression context width (§11.6.1, §16.10).
+  (#402, reported by akashlevy; #408, contributed by akashlevy)
+* VPI-driven clocks evaluate assertions in the edge's time slot, with fixed
+  slot-entry samples and Post-NBA callbacks before assertion evaluation
+  (§16.5.1, §4.4.2). (#404, reported by akashlevy; #409, contributed by akashlevy)
+* The cocotb runner honors build arguments, timescales and parameter overrides,
+  including later tests and positional arguments.
+  (#406, reported by akashlevy; #410, contributed by akashlevy)
+* VPI writes through unpacked-array net ports reach every alias. Variable
+  connections retain their propagation timing (§23.3.3.3, §23.3.3.7).
+  (#405, reported by akashlevy; #411, contributed by akashlevy)
+* Sampled-value functions use declaration defaults from before time zero,
+  including deferred initializers and procedural assertions (§16.5.1, §16.9.3).
+  (#403, reported by akashlevy; #412, contributed by akashlevy)
+* Select writes to static subroutine locals update their shared storage and
+  preserve packed member writes (§6.21, §11.5.1).
+  (#413, reported by akashlevy; #414, contributed by akashlevy)
+* Concurrent assertions sample unpacked-array elements, including large
+  memories, variable indices and forced values. Out-of-range slice sampling
+  clips safely at extreme indices (§16.5.1, §11.5.1).
+  (#415, reported by akashlevy; #416, contributed by akashlevy)
+* Named and inline assertions sample generate-block, instance-array and
+  top-rooted references and recognize hierarchical clocks (§16.5.1).
+  (#417, reported by akashlevy; #418, contributed by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
