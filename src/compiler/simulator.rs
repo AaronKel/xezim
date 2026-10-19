@@ -1566,7 +1566,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB019";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB020";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -6503,6 +6503,10 @@ pub struct Simulator {
     /// Buffer-collapse exclusions (override-target leaves, procedural write
     /// names), collected once while the process bodies are still present.
     buf_collapse_write_sets: Option<(HashSet<String>, HashSet<String>)>,
+    /// Last source value of constant packed-memory element connections.
+    /// Unresolved dependency polling must not overwrite a VPI deposit when
+    /// the connection's source has not changed (§23.3.3.3, §38.34).
+    packed_array_copy_values: HashMap<(usize, usize), Value>,
     /// LRM §14.3: each clocking block's clock EDGE (`@(posedge/negedge clk)`).
     /// `tick_clocking_blocks` and `@(cb)` resolution consult this so a
     /// `@(negedge clk)` block samples/advances on the negedge, not the posedge.

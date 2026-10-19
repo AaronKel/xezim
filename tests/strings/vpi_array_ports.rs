@@ -45,13 +45,28 @@ fn setup(stem: &str) -> (PathBuf, PathBuf) {
 
 /// Run `tests/dpi/<stem>.sv` with the library loaded, `env` set.
 fn run(dir: &Path, so: &Path, stem: &str, env: &[(&str, &str)]) -> String {
+    run_cached(dir, so, stem, env, None)
+}
+
+fn run_cached(
+    dir: &Path,
+    so: &Path,
+    stem: &str,
+    env: &[(&str, &str)],
+    cache: Option<&Path>,
+) -> String {
     let sv = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/dpi/{stem}.sv"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_xezim"));
     cmd.arg("--vpi-lib")
         .arg(so)
-        .args(["--no-cache", "-s", "top"])
+        .args(["-s", "top"])
         .arg(sv)
         .current_dir(dir);
+    if let Some(cache) = cache {
+        cmd.arg("--verbose").arg("--cache-dir").arg(cache);
+    } else {
+        cmd.arg("--no-cache");
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -99,6 +114,10 @@ const EXPECTED: &[&str] = &[
     "CHK|top.um8.a[5]",
     "CHK|top.um64.a[3]",
     "CHK|top.um1.a[5]",
+    "UPD|source changes",
+    "UPD|force holds",
+    "UPD|release",
+    "UPD|same callback release",
 ];
 
 fn expect(text: &str) {
@@ -135,12 +154,30 @@ fn vpi_writes_reach_unpacked_array_ports() {
             ("XEZIM_MEM_CENSUS", "1"),
         ],
     );
-    let _ = std::fs::remove_dir_all(&dir);
     expect(&packed);
     assert!(
         packed.contains("[PACKED-MEM] arrays=3 cells=24"),
         "the variables are not in the packed arena:\n{packed}"
     );
+    // Cached lowering must retain the same deposit and force/release
+    // behavior on both the first run and a later prepared-cache hit.
+    let cache = dir.join("cache");
+    for warm in [false, true] {
+        let text = run_cached(
+            &dir,
+            &so,
+            stem,
+            &[
+                ("XEZIM_LARGE_ARRAY_NAME_THRESHOLD", "4"),
+                ("XEZIM_PACKED_MEM", "1"),
+                ("AP_BY_NAME", "1"),
+            ],
+            Some(&cache),
+        );
+        expect(&text);
+        assert_eq!(text.contains("CACHE] hit"), warm, "cache state:\n{text}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A port with a driver of its own beside its connection is not collapsed:
