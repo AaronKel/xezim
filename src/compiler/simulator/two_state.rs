@@ -4625,6 +4625,12 @@ impl Simulator {
             .filter_map(|ca| {
                 let (port, pi) = Self::const_elem_ref(&ca.lhs, &self.module)?;
                 let (actual, ai) = Self::const_elem_ref(&ca.rhs, &self.module)?;
+                // §23.3.3.7 merges nets. A variable formal or actual keeps
+                // its implicit continuous assignment (§23.3.3.3): aliasing
+                // it would expose a blocking write before propagation.
+                if !self.module.nets.contains(&port) || !self.module.nets.contains(&actual) {
+                    return None;
+                }
                 Some((port, pi, actual, ai))
             })
             .collect();

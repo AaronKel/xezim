@@ -355,3 +355,6 @@ mod sva_array_sampling;
 
 #[path = "scheduling/sva_named_property_hier_sampling.rs"]
 mod sva_named_property_hier_sampling;
+
+#[path = "scheduling/array_port_connection_timing.rs"]
+mod array_port_connection_timing;
