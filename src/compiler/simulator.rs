@@ -3501,6 +3501,9 @@ struct SvaClockedSite {
     /// LSB of the most recent clock value: 0, 1, X (2), or Z (3).
     /// Declarative sites start with the value before Active processes run.
     prev_clock: u8,
+    /// The clock event happened and the attempts it starts have not been
+    /// evaluated yet (`sva_note_edges`).
+    fired: bool,
     /// Attempts still in flight, oldest first.
     attempts: Vec<SvaState>,
     /// LRM §16.9.3 `$past(<signal>, N)` per-signal value history.
@@ -6442,6 +6445,14 @@ pub struct Simulator {
     /// being one clock cycle early. Only populated when `sva_sites` is
     /// non-empty; the referenced ids are those collected per site.
     sva_preponed: HashMap<usize, Value>,
+    /// The time slot `sva_preponed` was captured for. The Preponed region
+    /// runs once per slot (§4.4.2.1), so the later deltas of a slot (a VPI
+    /// write from cbReadWriteSynch reopening the Active region) keep it.
+    sva_preponed_slot: Option<u64>,
+    /// A site's clock event is recorded (`fired`) and not evaluated yet.
+    sva_owed: bool,
+    /// `sva_post_nba` is running the slot's due cbReadWriteSynch batches.
+    sva_post_nba_busy: bool,
     /// LRM §14.3 clocking-block per-cycle input snapshots. Each entry
     /// is `cb_name → (signal_name → pre-edge value)`. Updated in
     /// `tick_clocking_blocks` just before the clock signal's posedge

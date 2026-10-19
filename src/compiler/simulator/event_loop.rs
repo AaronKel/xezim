@@ -1312,6 +1312,10 @@ impl Simulator {
         }
     }
 
+    // Kept out of line: inlined into the event loop, it pushed the loop's
+    // other callees out of line, which cost instructions on designs without
+    // assertions.
+    #[inline(never)]
     pub(super) fn run_one_tick(
         &mut self,
         accum: &mut PerTickAccum,
@@ -1336,6 +1340,14 @@ impl Simulator {
         // §14.4: #1step samples precede every callback/active-region write
         // at this time, and remain fixed across this slot's later deltas.
         self.refresh_clocking_preponed();
+        // LRM §16.5.1: the same holds for the Preponed samples of every
+        // SVA-referenced signal: taken before the slot's Pre-Active VPI
+        // callbacks (cbAtStartOfSimTime, cbAfterDelay; §4.4.3.2) and its
+        // active/NBA regions, and kept by the slot's later deltas, so a
+        // clocked assertion firing later in the slot (a clock written from
+        // cbReadWriteSynch, or one a later delta raises) samples pre-edge
+        // values rather than values written earlier in the slot.
+        self.refresh_sva_preponed();
         // §38.36 cbAfterDelay (cocotb's `Timer`) fires HERE: after this slot's
         // edge snapshot and before `check_edges`, so a clock the callback
         // drives registers as a real transition. Firing it before the snapshot
@@ -1357,11 +1369,6 @@ impl Simulator {
             self.dirty_any = true;
         }
         self.fire_timing_timers();
-        // LRM §16.5.1: capture Preponed (slot-entry) samples of every
-        // SVA-referenced signal BEFORE the active/NBA regions run, so a
-        // clocked assertion firing later this slot (tick_sva_sites) samples
-        // pre-edge values rather than same-edge NBA updates.
-        self.refresh_sva_preponed();
 
         if self.sched_trace_on() {
             eprintln!("[sched] t={} +--- tick ---", self.time);
@@ -1596,7 +1603,9 @@ impl Simulator {
         }
         // LRM §16.5 SVA clocked property evaluation. Detects edges on
         // each registered clock signal and ticks pending consequents.
-        self.tick_sva_sites();
+        // A cbNBASynch or cbReadWriteSynch due at a clock edge runs first
+        // (`sva_post_nba`).
+        self.sva_observed();
         if self.finished {
             return;
         }
