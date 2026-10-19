@@ -4502,6 +4502,10 @@ struct BlockScopeSave {
     /// `(depth, len)` of `static_local_syncs` at entry when the block
     /// declares a `static` variable.
     static_mark: Option<(usize, usize)>,
+    /// The subroutine's `static` locals that a non-static block variable of
+    /// the same name hides, as `static_local_syncs` depth and the
+    /// `(name, key)` entries taken out of that frame until the block ends.
+    static_hidden: Option<(usize, Vec<(String, String)>)>,
     /// `next_pid` at entry: a block that forked keeps its collection storage
     /// (a child may still use it).
     pid_mark: usize,
@@ -5765,8 +5769,9 @@ enum PackedHop {
     /// A packed dimension declared `[l:r]` of elements `ew` bits wide.
     /// §7.4.1: the left bound labels the most significant element.
     Dim { l: i64, r: i64, ew: u32 },
-    /// A member of a packed struct or union, `off` bits above its LSB.
-    Field(u32),
+    /// A member of a packed struct or union, `off` bits above its LSB and
+    /// `w` bits wide.
+    Field { off: u32, w: u32 },
 }
 
 /// The §7.8 collection kind of an unpacked-struct member whose declarator

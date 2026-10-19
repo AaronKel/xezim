@@ -690,7 +690,7 @@ impl Simulator {
                     if width(&md, mb)? != mw {
                         return None;
                     }
-                    hops.push(PackedHop::Field(off));
+                    hops.push(PackedHop::Field { off, w: mw });
                     two = super::elaborate::is_type_two_state_resolved(
                         mdt,
                         &self.module.typedef_types,
@@ -722,7 +722,12 @@ impl Simulator {
         let mut ok = true;
         for (k, (hop, step)) in hops.iter().zip(steps).enumerate() {
             let (l, r, ew) = match *hop {
-                PackedHop::Field(off) => {
+                // A chain that ends at a member (`s.f <= v`) names all of it.
+                PackedHop::Field { off, w } if k + 1 == hops.len() => {
+                    let lsb = lsb + off as u64;
+                    return (w, (ok && w > 0).then_some((lsb, 0, w as u64)));
+                }
+                PackedHop::Field { off, .. } => {
                     lsb += off as u64;
                     continue;
                 }
