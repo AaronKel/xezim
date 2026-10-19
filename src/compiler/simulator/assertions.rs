@@ -1954,6 +1954,9 @@ impl Simulator {
         }
     }
 
+    // Inlined, so a time slot of a design without assertions pays only the
+    // two tests below.
+    #[inline(always)]
     pub(super) fn tick_sva_sites(&mut self) {
         if self.finished {
             return;

@@ -1315,6 +1315,10 @@ impl Simulator {
     // Kept out of line: inlined into the event loop, it pushed the loop's
     // other callees out of line, which cost instructions on designs without
     // assertions.
+    // Out of line. Once the sampled array cells made the assertion code it
+    // used to inline longer, it was inlined into `event_loop_singlethread`
+    // instead, which cost a design without assertions 1.1% more
+    // instructions.
     #[inline(never)]
     pub(super) fn run_one_tick(
         &mut self,
