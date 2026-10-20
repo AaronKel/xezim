@@ -319,6 +319,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   (§16.5, §9.4.2). Recompile saved designs.
   (#453, reported by lwflwf1)
 
+* The cocotb runner reloads parameters when another runner rebuilds the same
+  directory. Test overrides persist while the recorded build is unchanged,
+  including empty overrides. (#426, reported by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
