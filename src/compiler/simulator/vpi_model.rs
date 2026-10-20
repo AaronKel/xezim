@@ -1245,6 +1245,18 @@ impl<'a> Builder<'a> {
                         nested(&m.items, file, defs, binds);
                     }
                     ModuleItem::Bind(b) => binds.push((b, file)),
+                    ModuleItem::GenerateRegion(g) => nested(&g.items, file, defs, binds),
+                    ModuleItem::GenerateFor(g) => nested(&g.items, file, defs, binds),
+                    ModuleItem::GenerateIf(g) => {
+                        for (_, items) in &g.branches {
+                            nested(items, file, defs, binds);
+                        }
+                    }
+                    ModuleItem::GenerateCase(g) => {
+                        for arm in &g.arms {
+                            nested(&arm.items, file, defs, binds);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1659,42 +1671,29 @@ impl<'a> Builder<'a> {
         self.walk_items(items, &ctx, &mut ord, &mut port_decls);
         // §23.11: instances `bind` adds to this one, connected in its scope.
         let binds: Vec<(&'a BindDirective, u32)> = self
-            .binds
-            .iter()
-            .copied()
-            .filter(|(b, _)| {
-                let paths = std::iter::once(&b.target_path).chain(b.extra_paths.iter());
-                if b.target_path.is_empty() && b.extra_paths.is_empty() {
-                    b.target_module.name == def_name
-                } else {
-                    paths.filter(|p| !p.is_empty()).any(|p| {
-                        // §23.11: absolute target indices use the root
-                        // module's constants, not a same-named child parameter.
-                        let root = &p[0].name.name;
-                        let prefix = if *root == self.sim.module.name {
-                            String::new()
-                        } else {
-                            format!("{root}.")
-                        };
-                        let bind_params = self.params_for(&prefix);
-                        let mut joined = Vec::with_capacity(p.len());
-                        for segment in p {
-                            let mut name = segment.name.name.clone();
-                            for index in &segment.selects {
-                                let Some(value) = xezim_core::elaborate::const_eval_i64_with_params(
-                                    index,
-                                    Some(&bind_params),
-                                ) else {
-                                    return false;
-                                };
-                                use std::fmt::Write as _;
-                                let _ = write!(name, "[{value}]");
-                            }
-                            joined.push(name);
-                        }
-                        joined.join(".") == full
+            .sim
+            .module
+            .resolved_binds
+            .get(flat.trim_end_matches('.'))
+            .into_iter()
+            .flatten()
+            .map(|b| {
+                let file = self
+                    .binds
+                    .iter()
+                    .find(|(original, _)| {
+                        original.span == b.span
+                            && original.instantiation.module_name.name
+                                == b.instantiation.module_name.name
+                            && original
+                                .instantiation
+                                .instances
+                                .iter()
+                                .map(|i| &i.name.name)
+                                .eq(b.instantiation.instances.iter().map(|i| &i.name.name))
                     })
-                }
+                    .map_or(fi, |(_, file)| *file);
+                (b, file)
             })
             .collect();
         for (b, bf) in binds {
