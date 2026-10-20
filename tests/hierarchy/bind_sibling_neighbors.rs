@@ -358,7 +358,7 @@ fn interface_array() {
     check(
         r####"module mem #(parameter V=7);logic[3:0] data=V;endmodule
 module mon(input logic[3:0] s);initial #1 $display("T|%m=%0d",s);endmodule
-interface node;logic[3:0]data=7;endinterface interface watch(input logic[3:0]s);initial #1 $display("T|%m=%0d",s);endinterface 
+interface node;logic[3:0]data=7;endinterface interface watch(input logic[3:0]s);initial #1 $display("T|%m=%0d",s);endinterface
 module top;node n[1:0]();bind top.n[0] watch b(.s(data)); initial #3 $finish;endmodule
 "####,
         &["T|top.n[0].b=7"],
@@ -382,7 +382,7 @@ fn interface_repeat() {
     check(
         r####"module mem #(parameter V=7);logic[3:0] data=V;endmodule
 module mon(input logic[3:0] s);initial #1 $display("T|%m=%0d",s);endmodule
-interface node;logic[3:0]data=7;endinterface interface watch(input logic[3:0]s);initial #1 $display("T|%m=%0d",s);endinterface 
+interface node;logic[3:0]data=7;endinterface interface watch(input logic[3:0]s);initial #1 $display("T|%m=%0d",s);endinterface
 module top;node n();bind top.n watch a(.s(data));bind top.n watch b(.s(data)); initial #3 $finish;endmodule
 "####,
         &["T|top.n.b=7", "T|top.n.a=7"],
@@ -454,7 +454,7 @@ fn repeat_three() {
     check(
         r####"module mem #(parameter V=7);logic[3:0] data=V;endmodule
 module mon(input logic[3:0] s);initial #1 $display("T|%m=%0d",s);endmodule
-module up;initial #1 $display("T|%m=%0d",mem.data);endmodule 
+module up;initial #1 $display("T|%m=%0d",mem.data);endmodule
 module top;mem m();bind top.m up a();bind top.m up b();bind top.m up c(); initial #3 $finish;endmodule
 "####,
         &["T|top.m.c=7", "T|top.m.b=7", "T|top.m.a=7"],
@@ -466,7 +466,7 @@ fn repeat_type_and_instance() {
     check(
         r####"module mem #(parameter V=7);logic[3:0] data=V;endmodule
 module mon(input logic[3:0] s);initial #1 $display("T|%m=%0d",s);endmodule
-module up;initial #1 $display("T|%m=%0d",mem.data);endmodule 
+module up;initial #1 $display("T|%m=%0d",mem.data);endmodule
 module top;mem m(),decoy();bind mem up a();bind top.m up b(); initial #3 $finish;endmodule
 "####,
         &["T|top.m.a=7", "T|top.m.b=7", "T|top.decoy.a=7"],
@@ -478,7 +478,7 @@ fn repeat_generated() {
     check(
         r####"module mem #(parameter V=7);logic[3:0] data=V;endmodule
 module mon(input logic[3:0] s);initial #1 $display("T|%m=%0d",s);endmodule
-module up;initial #1 $display("T|%m=%0d",mem.data);endmodule 
+module up;initial #1 $display("T|%m=%0d",mem.data);endmodule
 module top;for(genvar g=0;g<2;g++)begin:bank mem m();end bind top.bank[1].m up a();bind top.bank[1].m up b(); initial #3 $finish;endmodule
 "####,
         &["T|top.bank[1].m.b=7", "T|top.bank[1].m.a=7"],
