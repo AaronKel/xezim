@@ -292,3 +292,6 @@ mod bind_sibling_neighbors;
 
 #[path = "hierarchy/interface_static_initializers.rs"]
 mod interface_static_initializers;
+
+#[path = "hierarchy/bare_bind_targets.rs"]
+mod bare_bind_targets;
