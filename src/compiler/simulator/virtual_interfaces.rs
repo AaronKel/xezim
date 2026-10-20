@@ -15,6 +15,11 @@ impl Simulator {
     /// `Some(None)` — a declared vif variable with no binding (null).
     /// Only declared vif storage engages — never `iface.signal` selects.
     pub(super) fn vif_operand(&self, e: &Expression) -> Option<Option<String>> {
+        if !self.module.packages.is_empty()
+            && let Some(stripped) = self.strip_package_lvalue(e)
+        {
+            return self.vif_operand(&stripped);
+        }
         match &e.kind {
             ExprKind::Ident(h) if h.path.len() == 1 => {
                 let raw = &h.path[0].name.name;
@@ -721,7 +726,8 @@ impl Simulator {
         // dispatch to the bound instance. `vif = null` clears it.
         if let ExprKind::Ident(h) = &lvalue.kind {
             if h.path.len() == 1 && h.path[0].selects.is_empty() {
-                let name = h.path[0].name.name.as_str();
+                let storage = self.vif_variable_name(&h.path[0].name.name);
+                let name = storage.as_ref();
                 let is_viface_var = self
                     .module
                     .var_decl_types
@@ -1097,6 +1103,11 @@ impl Simulator {
     /// is neither (so the caller falls back to a normal value assignment).
 
     pub(super) fn resolve_vif_rhs_name(&self, rvalue: &Expression) -> Option<String> {
+        if !self.module.packages.is_empty()
+            && let Some(stripped) = self.strip_package_lvalue(rvalue)
+        {
+            return self.resolve_vif_rhs_name(&stripped);
+        }
         if let Some(b) = self.static_vif_binding(rvalue) {
             return Some(b);
         }
@@ -2034,6 +2045,11 @@ impl Simulator {
     /// needs a CALL to reach its owner never resolves here, so no consumer
     /// evaluates a receiver twice. `None` when `recv` is no bound vif.
     pub(super) fn vif_recv_target(&self, recv: &Expression) -> Option<(String, Option<String>)> {
+        if !self.module.packages.is_empty()
+            && let Some(stripped) = self.strip_package_lvalue(recv)
+        {
+            return self.vif_recv_target(&stripped);
+        }
         match &recv.kind {
             ExprKind::Paren(inner) => self.vif_recv_target(inner),
             ExprKind::Ident(h) if h.root.is_none() => self.vif_recv_path(&h.path),
@@ -2365,6 +2381,11 @@ impl Simulator {
     /// strict resolver returns None and callers filtering on
     /// `is_interface_instance` find nothing; the resolver only reads state.
     pub(super) fn vif_rhs_possible(&self, e: &Expression) -> bool {
+        if !self.module.packages.is_empty()
+            && let Some(stripped) = self.strip_package_lvalue(e)
+        {
+            return self.vif_rhs_possible(&stripped);
+        }
         if !self.static_vif_names.is_empty() {
             let leaf = match &e.kind {
                 ExprKind::Ident(h) => h.path.last().map(|s| s.name.name.as_str()),
@@ -2396,22 +2417,32 @@ impl Simulator {
                         .contains(member.name.as_str())
                     || self.iface_path_parts().0.contains(member.name.as_str())
             }
-            ExprKind::Index { expr: base, .. } => match &base.kind {
-                ExprKind::Ident(h) if h.path.len() == 1 => {
-                    let n = h.path[0].name.name.as_str();
-                    self.iface_path_parts().1.contains(n)
+            ExprKind::Index { expr: base, .. } => {
+                if self.vif_tokens_stored && self.static_vif_key(base).is_some() {
+                    return true;
+                }
+                match &base.kind {
+                    ExprKind::Ident(h) if h.path.len() == 1 => {
+                        let n = h.path[0].name.name.as_str();
+                        self.iface_path_parts().1.contains(n)
                         // §25.10: an element of a vif array / collection
                         // (`vq[i]`, `pa[i]`).
                         || self.vif_prop_name_possible(n)
                         || self.vif_local_names.contains(n)
+                        || self.module.var_decl_types.get(n)
+                            .is_some_and(|dt| self.is_virtual_iface_type(dt))
+                        || (self.vif_tokens_stored && self.vif_collection(n))
+                    }
+                    ExprKind::Ident(h) => h
+                        .path
+                        .last()
+                        .is_some_and(|s| self.vif_prop_name_possible(&s.name.name)),
+                    ExprKind::MemberAccess { member, .. } => {
+                        self.vif_prop_name_possible(&member.name)
+                    }
+                    _ => false,
                 }
-                ExprKind::Ident(h) => h
-                    .path
-                    .last()
-                    .is_some_and(|s| self.vif_prop_name_possible(&s.name.name)),
-                ExprKind::MemberAccess { member, .. } => self.vif_prop_name_possible(&member.name),
-                _ => false,
-            },
+            }
             _ => false,
         }
     }
@@ -2446,6 +2477,33 @@ impl Simulator {
         })
     }
 
+    /// §26.3: binding keys follow the same package ownership as signal
+    /// storage. A frame local still hides an imported package variable.
+    pub(super) fn vif_variable_name<'a>(&self, name: &'a str) -> std::borrow::Cow<'a, str> {
+        let (base, suffix) = name
+            .split_once('[')
+            .map_or((name, ""), |(base, _)| (base, &name[base.len()..]));
+        if !self.contested_pkg_vars.contains(base)
+            || self
+                .local_stack
+                .last()
+                .is_some_and(|f| f.contains_key(base))
+        {
+            return std::borrow::Cow::Borrowed(name);
+        }
+        let qualified = match self.pkg_scope_stack.last().and_then(|p| p.as_deref()) {
+            Some(pkg) => self.pkg_var_storage(pkg, base),
+            None => self.contested_pkg_var_in_scope(base),
+        };
+        match qualified {
+            Some(mut qualified) => {
+                qualified.push_str(suffix);
+                std::borrow::Cow::Owned(qualified)
+            }
+            None => std::borrow::Cow::Borrowed(name),
+        }
+    }
+
     pub(super) fn iface_alias_for(&self, name: &str) -> Option<String> {
         if let Some(b) = self
             .local_iface_aliases
@@ -2458,7 +2516,9 @@ impl Simulator {
         if self.viface_var_aliases.is_empty() {
             return None; // fast path: no vif variables bound anywhere
         }
-        self.viface_var_aliases.get(name).cloned()
+        self.viface_var_aliases
+            .get(self.vif_variable_name(name).as_ref())
+            .cloned()
     }
 
     /// §26.3: the task a `pkg::t` callee names — the package-qualified key
@@ -2753,7 +2813,9 @@ impl Simulator {
     /// `vif_formal_alias` (LRM §25.9).
     pub(super) fn is_virtual_iface_type(&self, dt: &crate::ast::types::DataType) -> bool {
         use crate::ast::types::DataType;
-        match dt {
+        // §6.18 / §25.9: package variables retain their declared typedef;
+        // its resolved interface type carries the binding semantics too.
+        match super::elaborate::resolve_typedef_chain(dt, &self.module.typedef_types) {
             DataType::Interface { .. } => true,
             DataType::TypeReference { name, .. } => {
                 let n = &name.name.name;
