@@ -284,6 +284,27 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   retain their once-only side effects (§6.21, §25.3).
   (#435, reported by AaronKel; #436, contributed by AaronKel)
 
+* Compilation-unit nets retain pull values, drive strengths, resolution and
+  continuous declaration assignments, including when a module shadows a unit
+  name. Explicit unit writes remain distinct from later module declarations.
+  Parser source locations, interface-property parameters, directive recovery
+  and constraint braces and implications are also corrected.
+  (core #55–#63, contributed by AaronKel, Thomasb81 and lwflwf1)
+* User constant functions select generate branches and initialize packed
+  struct fields with their full argument and result widths.
+  (#460 and core #64, contributed by chenbhil)
+* Static virtual-interface comparisons and method receivers share storage
+  through class typedef aliases. Collection identity coverage is retained.
+  (#450 and #456, contributed by Ganesh-TNL)
+* Assertion action scopes, pending property disjunctions and sampled operands
+  follow their declaring instance, end-of-simulation outcome and Preponed
+  values. (#457; #419, #420 and #421, contributed by Thomasb81)
+* Hierarchy diagnostics and time-zero assertion and toggle coverage fixes
+  include scope and foreign-write regression coverage.
+  (#439, #440, #443 and #444, contributed by akashlevy)
+* Continuous assignment sensitivity includes unnamed generate-block reads.
+  (#434, contributed by Thomasb81)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
@@ -321,6 +342,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   (#332 and #333, contributed by Thomasb81)
 * Rust warning cleanup preserves optional native execution and successful
   two-state dynamic operations. (#334, contributed by Thomasb81)
+
+* Shortened simulation windows and optimized dependency test builds reduce
+  regression runtime. Coverage analysis stops on failed or unprofiled tests.
+  (#458, contributed by Thomasb81)
 
 ### 0.11.2 — class, collection and DPI parity fixes, `-uvm`, crash-safe FST dumps (October 2026)
 
