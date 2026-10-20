@@ -982,3 +982,47 @@ fn design_walk_multi_top_program_and_port_kinds() {
         ],
     );
 }
+
+/// §23.11 / §37: indexed binds retain port metadata in the selected scope,
+/// even when a child shadows the root constant used in the target path.
+#[test]
+fn design_walk_indexed_bind_root_parameter() {
+    let sv = r###"module probe(input logic [3:0] s); initial #2 $display("T|bound=%0d",s); endmodule
+module mem;
+    localparam int SEL=0;
+    logic [3:0] data=7;
+endmodule
+module top;
+    localparam int SEL=1;
+    for(genvar g=0;g<2;g++) begin: bank mem m(); end
+    bind top.bank[SEL].m probe bound(.s(data));
+    initial begin #1 $walk; $finish; end
+endmodule
+"###;
+    let c = r###"#include "common.h"
+static PLI_INT32 walk(PLI_BYTE8 *u) {
+    (void)u;
+    vpiHandle b = H("top.bank[1].m.bound");
+    char name[256], def[256], host[256];
+    snprintf(name, sizeof name, "%s", fname(b));
+    snprintf(def, sizeof def, "%s", S(vpi_get_str(vpiDefName, b)));
+    snprintf(host, sizeof host, "%s", S(vpi_get_str(vpiDefName, H("top.bank[1].m"))));
+    vpi_printf("OM|selected %s def=%s decoy=%s line=%d\n", name, def,
+               fname(H("top.bank[0].m.bound")), vpi_get(vpiLineNo, b));
+    vpiHandle it = vpi_iterate(vpiPort, b);
+    vpiHandle port = it ? vpi_scan(it) : NULL;
+    vpi_printf("OM|host def=%s port=%s\n", host, S(vpi_get_str(vpiName, port)));
+    return 0;
+}
+static void reg(void) { reg_task("$walk", walk); }
+void (*vlog_startup_routines[])(void) = {reg, 0};
+"###;
+    let got = walk("vpi_om_selected_bind", c, sv, Some("top"));
+    assert_eq!(
+        got,
+        [
+            "OM|selected top.bank[1].m.bound def=probe decoy=NULL line=9",
+            "OM|host def=mem port=s",
+        ]
+    );
+}

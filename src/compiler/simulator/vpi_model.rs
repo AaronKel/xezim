@@ -1563,11 +1563,20 @@ impl<'a> Builder<'a> {
         conns: Option<(&'a [PortConnection], u32)>,
     ) -> u32 {
         let sim = self.sim;
-        let def_name = if inst_idx < 0 {
+        let mut def_name = if inst_idx < 0 {
             sim.module.name.clone()
         } else {
             sim.module.instances[inst_idx as usize].def_name.clone()
         };
+        // §23.11 / §37: bind specializations retain the host's source
+        // definition, so its declarations and bound port connections exist.
+        while !self.defs.contains_key(def_name.as_str()) {
+            let base = xezim_core::bind_spec_base(&def_name);
+            if base == def_name {
+                break;
+            }
+            def_name = base.to_string();
+        }
         if inst_idx >= 0 {
             self.attached[inst_idx as usize] = true;
         }
