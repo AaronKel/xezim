@@ -5299,62 +5299,48 @@ impl Simulator {
                         }
                         _ => a.expr.clone(),
                     };
-                    // LRM §16.5: a `SvaClocked{clock, body}` body
+                    // LRM §16.5: a `SvaClocked{events, body}` body
                     // registers a clocked site instead of going through
                     // the per-iteration observed-probe path. Dedup by
                     // span_key so re-execution (e.g. inside an always
                     // block) doesn't grow the site list unbounded.
                     // A clockless `assert property` samples on the default
                     // clocking (§14.12).
-                    let clocked: Option<(String, u8, Option<Expression>, Expression)> =
-                        match &resolved_expr.kind {
-                            ExprKind::SvaClocked {
-                                clock,
-                                edge,
-                                iff,
-                                body,
-                            } => {
-                                let clock_signal = match &clock.kind {
-                                    ExprKind::Ident(h) => self.resolve_hier_name(h).into_owned(),
-                                    _ => String::new(),
+                    let clocked: Option<(Vec<EventExpr>, Expression)> = match &resolved_expr.kind {
+                        ExprKind::SvaClocked { events, body } => {
+                            Some((events.clone(), (**body).clone()))
+                        }
+                        _ if a.inferred_clock.is_some() => Some((
+                            vec![a.inferred_clock.clone().unwrap()],
+                            resolved_expr.clone(),
+                        )),
+                        _ => match self.clocking_meta.get("__xz_default_clocking") {
+                            Some((clk, _)) => {
+                                let edge = match self.clocking_edge.get("__xz_default_clocking") {
+                                    Some(EdgeKind::Negedge) => Edge::Negedge,
+                                    _ => Edge::Posedge,
                                 };
-                                Some((
-                                    clock_signal,
-                                    *edge,
-                                    iff.as_deref().cloned(),
-                                    (**body).clone(),
-                                ))
+                                let event = EventExpr {
+                                    expr: Self::hier_ident_expr(
+                                        vec![HierPathSegment {
+                                            name: crate::ast::Identifier {
+                                                name: clk.clone(),
+                                                span: a.span,
+                                            },
+                                            selects: Vec::new(),
+                                        }],
+                                        a.span,
+                                    ),
+                                    edge: Some(edge),
+                                    iff: None,
+                                    span: a.span,
+                                };
+                                Some((vec![event], resolved_expr.clone()))
                             }
-                            // §16.14.6: a procedural assertion without a clock
-                            // of its own takes the one inferred from its
-                            // `always` procedure, ahead of the default clocking.
-                            _ if a.inferred_clock.is_some() => {
-                                let ev = a.inferred_clock.as_ref().unwrap();
-                                let clock_signal = match &ev.expr.kind {
-                                    ExprKind::Ident(h) => self.resolve_hier_name(h).into_owned(),
-                                    _ => String::new(),
-                                };
-                                let edge = match ev.edge {
-                                    Some(crate::ast::stmt::Edge::Negedge) => 1u8,
-                                    Some(crate::ast::stmt::Edge::Edge) => 2u8,
-                                    _ => 0u8,
-                                };
-                                Some((clock_signal, edge, ev.iff.clone(), resolved_expr.clone()))
-                            }
-                            _ => match self.clocking_meta.get("__xz_default_clocking") {
-                                Some((clk, _)) => {
-                                    let clk = clk.clone();
-                                    let edge = match self.clocking_edge.get("__xz_default_clocking")
-                                    {
-                                        Some(EdgeKind::Negedge) => 1u8,
-                                        _ => 0u8,
-                                    };
-                                    Some((clk, edge, None, resolved_expr.clone()))
-                                }
-                                None => None,
-                            },
-                        };
-                    if let Some((clock_signal, edge, iff, body)) = clocked {
+                            None => None,
+                        },
+                    };
+                    if let Some((events, body)) = clocked {
                         let span_key = a.span.start;
                         let existing = self.sva_sites.iter().position(|s| {
                             s.span_key == span_key && s.dedup_scope == self.current_scope
@@ -5362,7 +5348,7 @@ impl Simulator {
                         let idx = match existing {
                             Some(i) => i,
                             None => {
-                                self.register_sva_site(a, clock_signal, edge, iff, body);
+                                self.register_sva_site(a, events, body);
                                 self.sva_sites.len() - 1
                             }
                         };
