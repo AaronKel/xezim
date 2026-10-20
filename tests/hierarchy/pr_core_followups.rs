@@ -69,3 +69,25 @@ endmodule
 "#;
     assert_eq!(trace(source), ["T|0|0|1|0", "T|1|1|1|0"]);
 }
+
+/// §6.5: an ordinary module write must not bind a later declaration.
+#[test]
+fn writes_before_module_declarations_are_rejected() {
+    for body in [
+        "result = 1;",
+        "result <= 1;",
+        "result++;",
+        "{result} = 1;",
+        "for(result=0; result<1; result++) ;",
+    ] {
+        let source = format!("module top; initial begin {body} end int result=0; endmodule");
+        let error = match simulate(&source, 100) {
+            Ok(_) => panic!("accepted {body}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            error.contains("result") && error.contains("before its declaration"),
+            "{body}: {error}"
+        );
+    }
+}
