@@ -840,7 +840,15 @@ impl Simulator {
                         .get(name)
                         .is_some_and(|dt| self.is_virtual_iface_type(dt));
                     if is_viface_var {
-                        if let Some(idx) = self.eval_expr(index).to_i64() {
+                        // §7.8 / §25.10: string-keyed vif elements retain
+                        // their string key, just like the collection store.
+                        let index_value = self.eval_expr(index);
+                        let idx = if self.is_string_keyed_array(name) {
+                            Some(index_value.to_sv_string())
+                        } else {
+                            index_value.to_i64().map(|n| n.to_string())
+                        };
+                        if let Some(idx) = idx {
                             let key = format!("{}[{}]", name, idx);
                             if matches!(&rvalue.kind, ExprKind::Null) {
                                 self.viface_var_aliases.remove(&key);
@@ -883,7 +891,7 @@ impl Simulator {
                 if handle == 0 {
                     static_scope = self.class_context_stack.last().cloned().flatten();
                 }
-                let Some(k) = self.vif_elem_key(&h.path[0]) else {
+                let Some(k) = self.vif_elem_key(&h.path[0], handle) else {
                     return false;
                 };
                 (handle, k)
@@ -894,10 +902,10 @@ impl Simulator {
             // element of a vif array (§25.10).
             ExprKind::Ident(h) if h.path.len() == 2 && h.path[0].selects.is_empty() => {
                 let obj = h.path[0].name.name.as_str();
-                let Some(prop) = self.vif_elem_key(&h.path[1]) else {
+                let oh = self.vif_owner_handle(obj);
+                let Some(prop) = self.vif_elem_key(&h.path[1], oh) else {
                     return false;
                 };
-                let oh = self.vif_owner_handle(obj);
                 if oh == 0 && self.module.classes.contains_key(obj) {
                     static_scope = Some(obj.to_string());
                 }
@@ -942,7 +950,7 @@ impl Simulator {
             // Parses as Index { expr: <obj.prop>, index: <idx_expr> }.
             // Encode the index into the binding's prop key.
             ExprKind::Index { expr: base, index } => {
-                let idx = self.eval_expr(index).to_u64().unwrap_or(0);
+                let index_value = self.eval_expr(index);
                 let (obj_handle, prop_base) = match &base.kind {
                     // d.vif_arr  (MemberAccess on a class handle)
                     ExprKind::MemberAccess {
@@ -1005,6 +1013,16 @@ impl Simulator {
                 {
                     return false;
                 }
+                let storage = if obj_handle == 0 {
+                    prop_base.clone()
+                } else {
+                    format!("{}#{}", obj_handle, prop_base)
+                };
+                let idx = if self.is_string_keyed_array(&storage) {
+                    index_value.to_sv_string()
+                } else {
+                    index_value.to_i64().unwrap_or(0).to_string()
+                };
                 (obj_handle, format!("{}[{}]", prop_base, idx))
             }
             _ => return false,
@@ -1050,11 +1068,22 @@ impl Simulator {
     pub(super) fn vif_elem_key(
         &mut self,
         seg: &crate::ast::expr::HierPathSegment,
+        owner: usize,
     ) -> Option<String> {
         match seg.selects.as_slice() {
             [] => Some(seg.name.name.clone()),
             [ix] => {
-                let i = self.eval_expr(ix).to_i64()?;
+                let value = self.eval_expr(ix);
+                let storage = if owner == 0 {
+                    seg.name.name.clone()
+                } else {
+                    format!("{}#{}", owner, seg.name.name)
+                };
+                let i = if self.is_string_keyed_array(&storage) {
+                    value.to_sv_string()
+                } else {
+                    value.to_i64()?.to_string()
+                };
                 Some(format!("{}[{}]", seg.name.name, i))
             }
             _ => None,
@@ -1925,7 +1954,19 @@ impl Simulator {
         let key: std::borrow::Cow<str> = match elem {
             None => std::borrow::Cow::Borrowed(name),
             Some(ix) => {
-                std::borrow::Cow::Owned(format!("{}[{}]", name, self.eval_scalar_self(ix)?))
+                let storage = match owner {
+                    Some((cn, 0)) => self.spec_static_coll_key_in_class(name, cn),
+                    Some((_, handle)) => format!("{}#{}", handle, name),
+                    None => self
+                        .instance_assoc_member(name)
+                        .unwrap_or_else(|| name.to_string()),
+                };
+                let index = if self.is_string_keyed_array(&storage) {
+                    self.eval_index_value_self(ix)?.to_sv_string()
+                } else {
+                    self.eval_scalar_self(ix)?.to_string()
+                };
+                std::borrow::Cow::Owned(format!("{}[{}]", name, index))
             }
         };
         let hit = match owner {

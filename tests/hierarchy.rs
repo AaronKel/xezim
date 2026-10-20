@@ -256,3 +256,6 @@ mod next_twelve_positional_ports_358;
 
 #[path = "hierarchy/generate_names_380.rs"]
 mod next_rest_generate_names_380;
+
+#[path = "hierarchy/vif_associative_bindings.rs"]
+mod vif_associative_bindings;
