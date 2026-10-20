@@ -253,12 +253,17 @@ def run_one_unit(
     profraws = list(unit_dir.glob("*.profraw"))
     profdata = unit_dir / "merged.profdata"
     try:
-        if res.returncode == 0 and profraws:
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"Test unit {unit_id} failed with exit code {res.returncode}; "
+                "coverage partitioning requires every selected test to pass."
+            )
+        if not profraws:
+            raise RuntimeError(f"Test unit {unit_id} produced no coverage profile.")
+        if profraws:
             covered = extract_covered_regions(
                 llvm_profdata, llvm_cov, bin_path, profraws, profdata
             )
-        else:
-            covered = set()
     finally:
         shutil.rmtree(unit_dir, ignore_errors=True)
 
