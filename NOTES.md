@@ -237,6 +237,7 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Virtual-interface collection copies preserve element identity. Queue edits,
   associative deletion and dynamic-array allocation use the current values,
   and absent elements read as null (§7.5–§7.10, §25.10).
+  (#427, reported by Ganesh-TNL)
 * Task `ref`, `output` and `inout` virtual-interface arguments propagate
   rebinding and null values, preserve input isolation and retain their scope
   across suspension (§13.5, §25.9).
