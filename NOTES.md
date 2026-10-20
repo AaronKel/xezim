@@ -213,6 +213,27 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   top-rooted references and recognize hierarchical clocks (§16.5.1).
   (#417, reported by akashlevy; #418, contributed by akashlevy)
 
+* Package-scoped virtual interfaces accept direct declarations and typedefs,
+  preserve qualified copies and equality, and retain independent bindings
+  when names are imported or shadowed (§25.9, §26.2, §26.3).
+* Virtual interfaces in string-keyed associative arrays preserve their keys
+  through member access and handle copies, including inherited properties
+  and method-local keys (§7.8, §25.10).
+* Returned virtual interfaces support member reads, writes, task calls and
+  selected nonblocking targets. Receiver calls run once, and nonblocking
+  targets retain their assignment syntax (§10.4.2, §25.9).
+* Parameterized static collections retain virtual-interface element identity
+  through typedefs, named type arguments, reordering and static methods
+  (§8.25, §25.10).
+* Copying or returning a null virtual interface clears its previous binding.
+  Explicit virtual-interface locals default to null (§25.9, Table 6-7).
+* Instance-targeted binds resolve indexed and nested generate scopes,
+  including constant index expressions and explicit target lists, while
+  leaving sibling instances unbound (§23.11, §27). VPI retains the host's
+  source definition and bound port metadata (§37).
+* Generated module instances use signed genvars, preserving negative indices
+  and terminating descending loops correctly (§27.4).
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
