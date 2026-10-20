@@ -414,3 +414,54 @@ endmodule
     assert!(text.contains("T|PASS"), "{text}");
     assert!(!text.contains("FAIL"), "{text}");
 }
+
+/// §23.8 / §27.6: scope placeholders do not hide missing declarations.
+#[test]
+fn missing_generate_members_are_checked() {
+    for (index, declaration, target) in [
+        (0, "if (1) begin : g logic a; end", "g.missing"),
+        (
+            1,
+            "for(genvar i=0;i<2;i++) begin : g logic a; end",
+            "g[1].missing",
+        ),
+        (
+            2,
+            "if (1) begin : g if(1) begin : nested logic a; end end",
+            "g.nested.missing",
+        ),
+        (3, "case(1) 1: begin : g logic a; end endcase", "g.missing"),
+        (4, "if (1) begin : g end", "g.missing"),
+    ] {
+        let source = format!("module top; {declaration} initial {target} = 1; endmodule");
+        let (ok, text) = run(&format!("gen_missing_{index}"), &source, &["--no-cache"]);
+        assert!(
+            !ok && text.contains("missing") && text.contains("does not resolve"),
+            "{text}"
+        );
+    }
+}
+
+/// §23.8: a farther scope cannot rescue a missing member of a nearer match.
+#[test]
+fn nearest_hierarchical_head_is_not_replaced_by_an_outer_match() {
+    for (index, statement) in [
+        "initial child.valid = 1;",
+        "initial $display(child.valid);",
+        "wire x = child.valid;",
+        "always @(child.valid) ;",
+        "function int f(); return child.valid; endfunction",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let source = format!(
+            "module good; logic valid; endmodule module bad; logic other; endmodule module outer; bad child(); {statement} endmodule module top; good child(); outer u(); endmodule"
+        );
+        let (ok, text) = run(&format!("nearest_{index}"), &source, &["--no-cache"]);
+        assert!(
+            !ok && text.contains("valid") && text.contains("does not resolve"),
+            "{text}"
+        );
+    }
+}

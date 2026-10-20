@@ -219,14 +219,19 @@ impl<'a> Names<'a> {
     /// §27.6: generated scopes have placeholder signals for lookup, but
     /// those placeholders are not values whose members may bypass checking.
     fn generate_scope(&self, n: &str) -> bool {
-        self.elab.signals.get(n)
+        self.elab
+            .signals
+            .get(n)
             .is_some_and(|s| s.type_name.as_deref() == Some("$genblock"))
     }
 
     /// `n` names a scope: an instance, a generate or named block, or
     /// anything else that holds declarations of its own.
     fn scope(&self, n: &str) -> bool {
-        self.insts.contains_key(n) || self.blocks.contains(n) || self.generate_scope(n) || self.under(&format!("{n}."))
+        self.insts.contains_key(n)
+            || self.blocks.contains(n)
+            || self.generate_scope(n)
+            || self.under(&format!("{n}."))
     }
 
     /// `n` is the top, an instance or a generate block: a scope whose every
@@ -259,7 +264,11 @@ impl<'a> Names<'a> {
             return match &seg.sel {
                 Some(s) => {
                     let key = format!("{bare}{s}");
-                    if self.scope(&key) { Step::Scope(key) } else { Step::Missing }
+                    if self.scope(&key) {
+                        Step::Scope(key)
+                    } else {
+                        Step::Missing
+                    }
                 }
                 None if self.under(&format!("{bare}[")) => Step::Item,
                 None => Step::Missing,
