@@ -305,6 +305,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Continuous assignment sensitivity includes unnamed generate-block reads.
   (#434, contributed by Thomasb81)
 
+* Source locations preserve original columns after empty and multiple macro
+  expansions, and identify each invocation independently (§22.5). Added
+  virtual-interface recovery and postfix-span regressions.
+  (#397 and #398, reported by lwflwf1)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
