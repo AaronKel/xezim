@@ -299,3 +299,6 @@ mod interface_static_initializers;
 
 #[path = "hierarchy/bare_bind_targets.rs"]
 mod bare_bind_targets;
+
+#[path = "hierarchy/pr_core_followups.rs"]
+mod pr_core_followups;
