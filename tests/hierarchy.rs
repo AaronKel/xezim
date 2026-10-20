@@ -271,3 +271,6 @@ mod vif_specialized_collections;
 
 #[path = "hierarchy/vif_null_binding_copies.rs"]
 mod vif_null_binding_copies;
+
+#[path = "hierarchy/signed_generate_instances.rs"]
+mod signed_generate_instances;
