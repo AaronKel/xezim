@@ -245,6 +245,7 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   including relative and `$root` paths, instance arrays, interface hosts,
   active generate branches, type parameters and `defparam` overrides. Repeated
   binds retain upward module references and VPI port metadata (§23.11, §37).
+  Bare target names prefer the nearest visible instance over a same-named type.
   Recompile saved designs to refresh their hierarchy metadata.
 
 * Interface static initializers evaluate runtime system functions in each
