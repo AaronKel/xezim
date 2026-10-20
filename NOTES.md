@@ -310,6 +310,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   virtual-interface recovery and postfix-span regressions.
   (#397 and #398, reported by lwflwf1)
 
+* Undefined statement macro calls recover as one placeholder, preserving the
+  undefined-macro diagnostic and the following statement (§22.5.1).
+  (#451, reported by lwflwf1)
+* Assertion, property and sequence clocking events accept `or` and comma
+  lists, including nested groups and per-term edge and `iff` conditions.
+  Each qualifying event advances the assertion and its sampled history
+  (§16.5, §9.4.2). Recompile saved designs.
+  (#453, reported by lwflwf1)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
@@ -341,6 +350,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   dumping like `--wave`. (#347, reported by akashlevy)
 
 **Maintenance**
+
+* Core CI runs the parser crate's unit, integration and documentation tests,
+  and verifies its minimum supported Rust version explicitly.
+  (#455, reported by lwflwf1)
 
 * Expanded regression coverage for default-valued array arguments and nested
   associative collections, including repeated calls and queue element isolation.
