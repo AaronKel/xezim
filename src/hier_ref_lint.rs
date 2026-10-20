@@ -216,10 +216,17 @@ impl<'a> Names<'a> {
         self.sorted.get(i).is_some_and(|k| k.starts_with(p))
     }
 
+    /// §27.6: generated scopes have placeholder signals for lookup, but
+    /// those placeholders are not values whose members may bypass checking.
+    fn generate_scope(&self, n: &str) -> bool {
+        self.elab.signals.get(n)
+            .is_some_and(|s| s.type_name.as_deref() == Some("$genblock"))
+    }
+
     /// `n` names a scope: an instance, a generate or named block, or
     /// anything else that holds declarations of its own.
     fn scope(&self, n: &str) -> bool {
-        self.insts.contains_key(n) || self.blocks.contains(n) || self.under(&format!("{n}."))
+        self.insts.contains_key(n) || self.blocks.contains(n) || self.generate_scope(n) || self.under(&format!("{n}."))
     }
 
     /// `n` is the top, an instance or a generate block: a scope whose every
@@ -229,7 +236,7 @@ impl<'a> Names<'a> {
         if n.is_empty() || self.insts.contains_key(n) {
             return true;
         }
-        if self.item(n) || self.blocks.contains(n) {
+        if (self.item(n) && !self.generate_scope(n)) || self.blocks.contains(n) {
             return false;
         }
         let leaf = n.rsplit('.').next().unwrap_or(n);
@@ -247,6 +254,16 @@ impl<'a> Names<'a> {
             if self.insts.contains_key(key.as_str()) {
                 return Step::Scope(key);
             }
+        }
+        if self.generate_scope(&bare) {
+            return match &seg.sel {
+                Some(s) => {
+                    let key = format!("{bare}{s}");
+                    if self.scope(&key) { Step::Scope(key) } else { Step::Missing }
+                }
+                None if self.under(&format!("{bare}[")) => Step::Item,
+                None => Step::Missing,
+            };
         }
         if self.item(&bare) {
             return Step::Item;
@@ -347,17 +364,16 @@ impl<'a> Names<'a> {
         // Where the first component can resolve, nearest first: a child of
         // the scope or of an enclosing one, an enclosing instance named by
         // its instance or definition name, or the top by its name.
-        let mut starts: Vec<String> = Vec::new();
         let mut level = Some(scope);
         while let Some(l) = level {
             match self.step(l, head) {
                 Step::Item => return Ok(()),
-                Step::Scope(s) => starts.push(s),
+                Step::Scope(s) => return self.walk(s, &segs[1..]),
                 Step::Missing => {}
             }
             if l.is_empty() {
                 if head.name == self.elab.name {
-                    starts.push(String::new());
+                    return self.walk(String::new(), &segs[1..]);
                 }
             } else {
                 let leaf = l.rsplit('.').next().unwrap_or(l);
@@ -366,21 +382,12 @@ impl<'a> Names<'a> {
                     .as_ref()
                     .is_some_and(|s| *leaf == format!("{}{s}", head.name));
                 if named || self.insts.get(l).is_some_and(|d| *d == head.name) {
-                    starts.push(l.to_string());
+                    return self.walk(l.to_string(), &segs[1..]);
                 }
             }
             level = parent(l);
         }
-        let mut miss = None;
-        for s in starts {
-            match self.walk(s, &segs[1..]) {
-                Ok(()) => return Ok(()),
-                Err(m) => {
-                    miss.get_or_insert(m);
-                }
-            }
-        }
-        miss.map_or(Ok(()), Err)
+        Ok(())
     }
 }
 
