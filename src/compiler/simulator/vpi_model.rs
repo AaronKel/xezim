@@ -1659,7 +1659,30 @@ impl<'a> Builder<'a> {
                     b.target_module.name == def_name
                 } else {
                     paths.filter(|p| !p.is_empty()).any(|p| {
-                        let joined: Vec<&str> = p.iter().map(|i| i.name.as_str()).collect();
+                        // §23.11: absolute target indices use the root
+                        // module's constants, not a same-named child parameter.
+                        let root = &p[0].name.name;
+                        let prefix = if *root == self.sim.module.name {
+                            String::new()
+                        } else {
+                            format!("{root}.")
+                        };
+                        let bind_params = self.params_for(&prefix);
+                        let mut joined = Vec::with_capacity(p.len());
+                        for segment in p {
+                            let mut name = segment.name.name.clone();
+                            for index in &segment.selects {
+                                let Some(value) = xezim_core::elaborate::const_eval_i64_with_params(
+                                    index,
+                                    Some(&bind_params),
+                                ) else {
+                                    return false;
+                                };
+                                use std::fmt::Write as _;
+                                let _ = write!(name, "[{value}]");
+                            }
+                            joined.push(name);
+                        }
                         joined.join(".") == full
                     })
                 }
