@@ -260,10 +260,9 @@ def run_one_unit(
             )
         if not profraws:
             raise RuntimeError(f"Test unit {unit_id} produced no coverage profile.")
-        if profraws:
-            covered = extract_covered_regions(
-                llvm_profdata, llvm_cov, bin_path, profraws, profdata
-            )
+        covered = extract_covered_regions(
+            llvm_profdata, llvm_cov, bin_path, profraws, profdata
+        )
     finally:
         shutil.rmtree(unit_dir, ignore_errors=True)
 
