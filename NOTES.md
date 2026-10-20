@@ -234,6 +234,24 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Generated module instances use signed genvars, preserving negative indices
   and terminating descending loops correctly (§27.4).
 
+* Virtual-interface collection copies preserve element identity. Queue edits,
+  associative deletion and dynamic-array allocation use the current values,
+  and absent elements read as null (§7.5–§7.10, §25.10).
+* Task `ref`, `output` and `inout` virtual-interface arguments propagate
+  rebinding and null values, preserve input isolation and retain their scope
+  across suspension (§13.5, §25.9).
+* Bind targets resolve against the effective hierarchy and declaration scope,
+  including relative and `$root` paths, instance arrays, interface hosts,
+  active generate branches, type parameters and `defparam` overrides. Repeated
+  binds retain upward module references and VPI port metadata (§23.11, §37).
+  Recompile saved designs to refresh their hierarchy metadata.
+
+* Interface static initializers evaluate runtime system functions in each
+  elaborated instance's scope before user processes, including nested,
+  generated, arrayed and bound interfaces. Already deferred initializers
+  retain their once-only side effects (§6.21, §25.3).
+  (#435, reported by AaronKel; #436, contributed by AaronKel)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
