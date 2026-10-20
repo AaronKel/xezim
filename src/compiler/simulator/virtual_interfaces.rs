@@ -2052,6 +2052,12 @@ impl Simulator {
         }
         match &recv.kind {
             ExprKind::Paren(inner) => self.vif_recv_target(inner),
+            // The receiver-call machinery has already evaluated this call
+            // once; its virtual-interface result carries the instance token.
+            ExprKind::Call { .. } => {
+                let token = self.recv_call_memo_hit(recv)?.to_u64()?;
+                self.iface_by_token(token).map(|b| (b.to_string(), None))
+            }
             ExprKind::Ident(h) if h.root.is_none() => self.vif_recv_path(&h.path),
             ExprKind::MemberAccess {
                 expr: owner,
@@ -2205,7 +2211,14 @@ impl Simulator {
     /// to a few emptiness and name checks.
     pub(super) fn vif_rebase_expr(&self, e: &Expression) -> Option<Expression> {
         let alias_possible = self.iface_alias_possible();
-        if !alias_possible && self.virtual_iface_bindings.is_empty() && !self.vif_tokens_stored {
+        // Returned handles live in the current receiver memo. They must not
+        // enable collection-token lookup on every later member expression.
+        let returned_possible = !self.recv_call_memo.is_empty();
+        if !alias_possible
+            && self.virtual_iface_bindings.is_empty()
+            && !self.vif_tokens_stored
+            && !returned_possible
+        {
             return None;
         }
         // Only CHAINS are rebased: a bare `v` read/write (or `d.v`, `varr[0]`)
@@ -2218,7 +2231,11 @@ impl Simulator {
             | ExprKind::RangeSelect { .. } => {}
             _ => return None,
         }
-        if !alias_possible && !self.vif_tokens_stored && !self.chain_may_name_vif(e) {
+        if !alias_possible
+            && !self.vif_tokens_stored
+            && !returned_possible
+            && !self.chain_may_name_vif(e)
+        {
             return None;
         }
         self.vif_rebase_chain(e)

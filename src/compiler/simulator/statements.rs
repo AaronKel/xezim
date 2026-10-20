@@ -3464,6 +3464,17 @@ impl Simulator {
         {
             return;
         }
+        // §10.4.2 / §25.9: evaluate receiver calls once while capturing an
+        // NBA target, before rebasing it to the interface instance. Re-enter
+        // with those calls pinned so callbacks still fire once below.
+        if let StatementKind::NonblockingAssign { lvalue, rvalue, .. } = &stmt.kind
+            && (Self::recv_chain_call(rvalue).is_some() || Self::recv_chain_call(lvalue).is_some())
+            && let Some(base) = self.pin_stmt_recv_calls(&[rvalue, lvalue])
+        {
+            self.exec_statement(stmt);
+            self.recv_call_memo.truncate(base);
+            return;
+        }
         // §38.36.1 cbStmt, before the statement runs (interpreted code only).
         if self.vpi_cb_mask & vpi_cb::m(vpi_cb::CB_STMT) != 0 {
             self.vpi_stmt_hook(stmt, false);
@@ -4926,15 +4937,15 @@ impl Simulator {
                         self.stage_ret_struct_colls(e);
                     }
                     self.return_value = Some(v);
-                    // §25.9: a returned VIRTUAL INTERFACE carries only a
-                    // sentinel value; record the instance it is bound to so
-                    // the caller's `vd = getter();` can re-establish the
-                    // alias. Guarded on the name resolving to a REAL
-                    // interface instance, so ordinary returns never match.
+                    // §25.9: return the interface's handle token as well as
+                    // its binding, so a memoized `getter().member` receiver
+                    // can resolve the instance without repeating the call.
                     let vif_free = !self.vif_rhs_possible(e);
                     if let Some(bound) = (!vif_free).then(|| self.resolve_vif_rhs_name(e)).flatten()
                     {
                         if self.is_interface_instance(&bound) {
+                            self.return_value =
+                                Some(Value::from_u64(Self::iface_handle_token(&bound), 32));
                             self.last_vif_return = Some(bound);
                         }
                     }

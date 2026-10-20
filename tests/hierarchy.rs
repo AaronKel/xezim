@@ -262,3 +262,6 @@ mod package_virtual_interfaces;
 
 #[path = "hierarchy/vif_associative_bindings.rs"]
 mod vif_associative_bindings;
+
+#[path = "hierarchy/vif_returned_receivers.rs"]
+mod vif_returned_receivers;
