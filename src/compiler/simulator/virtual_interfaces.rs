@@ -797,7 +797,12 @@ impl Simulator {
                         // only the sentinel and the alias was lost.
                         self.last_vif_return = None;
                         let v = self.eval_expr(rvalue);
-                        if let Some(bound) = self.last_vif_return.take() {
+                        let returned = self.last_vif_return.take().or_else(|| {
+                            v.to_u64()
+                                .and_then(|token| self.iface_by_token(token))
+                                .map(str::to_string)
+                        });
+                        if let Some(bound) = returned {
                             if frame_local {
                                 if let Some(f) = self.local_iface_aliases.last_mut() {
                                     f.insert(name.to_string(), bound);
@@ -805,6 +810,12 @@ impl Simulator {
                             } else {
                                 self.viface_var_aliases.insert(name.to_string(), bound);
                             }
+                        } else if frame_local {
+                            if let Some(f) = self.local_iface_aliases.last_mut() {
+                                f.remove(name);
+                            }
+                        } else {
+                            self.viface_var_aliases.remove(name);
                         }
                         self.assign_value(lvalue, &v);
                         return true;
@@ -827,6 +838,20 @@ impl Simulator {
                             self.assign_value(lvalue, &Value::from_u64(token, 32));
                             return true;
                         }
+                    }
+                    // §25.9: copying an unbound handle replaces the previous
+                    // binding with null, rather than leaving a stale alias.
+                    if !matches!(rvalue.kind, ExprKind::Null) {
+                        let value = self.eval_expr(rvalue);
+                        if frame_local {
+                            if let Some(f) = self.local_iface_aliases.last_mut() {
+                                f.remove(name);
+                            }
+                        } else {
+                            self.viface_var_aliases.remove(name);
+                        }
+                        self.assign_value(lvalue, &value);
+                        return true;
                     }
                 }
             }
@@ -1057,8 +1082,20 @@ impl Simulator {
             self.virtual_iface_bindings.remove(&slot);
             return true;
         }
-        let Some(rhs_name) = self.resolve_vif_rhs_name(rvalue) else {
-            return false;
+        let rhs_name = self
+            .resolve_vif_rhs_name(rvalue)
+            .filter(|name| self.is_interface_instance(name));
+        let rhs_name = match rhs_name {
+            Some(name) => name,
+            None => {
+                let value = self.eval_expr(rvalue);
+                if let Some(name) = value.to_u64().and_then(|v| self.iface_by_token(v)) {
+                    name.to_string()
+                } else {
+                    self.virtual_iface_bindings.remove(&slot);
+                    return true;
+                }
+            }
         };
         // Record the binding. Subsequent `obj.<prop>.<member>` accesses
         // will follow it; the modport (if any) is consulted at write

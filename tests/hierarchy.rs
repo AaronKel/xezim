@@ -268,3 +268,6 @@ mod vif_returned_receivers;
 
 #[path = "hierarchy/vif_specialized_collections.rs"]
 mod vif_specialized_collections;
+
+#[path = "hierarchy/vif_null_binding_copies.rs"]
+mod vif_null_binding_copies;

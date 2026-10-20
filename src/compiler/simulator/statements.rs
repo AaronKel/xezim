@@ -1751,11 +1751,8 @@ impl Simulator {
             };
         // §25.9 / IEEE 1800-2023 Table 6-7: a virtual-interface handle
         // defaults to `null`, also when its type is a typedef alias
-        // (`vif_t v;`). The spelled-out `virtual bus_if v;` has no data
-        // width (w0 == 0) and was already zeroed below.
-        let is_vif_handle = !is_class_handle
-            && matches!(data_type, crate::ast::types::DataType::TypeReference { .. })
-            && Self::dt_is_virtual_iface(data_type, &self.module);
+        // (`vif_t v;`) or an explicit `virtual bus_if v` declaration.
+        let is_vif_handle = !is_class_handle && Self::dt_is_virtual_iface(data_type, &self.module);
         let mut default_v = if is_real_type {
             Value::from_f64(0.0)
         } else if two_state || is_class_handle || w0 == 0 || unknown_typeref_handle || is_vif_handle
