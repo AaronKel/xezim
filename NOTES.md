@@ -36,6 +36,16 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   arrays, instances in generate blocks and generate blocks as 1-bit signals.
   They are scopes, not signals, so their bins could never be covered and the
   top instance's toggle score read low (§23.6). (#441)
+* A value a VPI client writes at time 0 is the toggle-coverage baseline.
+  Values written from the end-of-slot callbacks (`cbReadWriteSynch`,
+  `cbAtEndOfSimTime`) reach toggle coverage and the waveform dumps in their
+  own time slot, not the next one. A value written from
+  `cbStartOfSimulation` is evaluated in the time-0 slot even when nothing
+  else runs there, so the logic it drives no longer reads x until the next
+  slot. cocotb writes its first values from both, so in a design with
+  nothing of its own at time 0 every signal those values reached lost its
+  first toggle. A toggle is counted once per time slot from the slot's net
+  change (§38.36.2, §38.36.3). (#442)
 
 * Class task handles and local variables remain alive across same-slot
   clocking waits, including guarded waits and cancellation (§14.13).
