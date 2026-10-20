@@ -4538,6 +4538,8 @@ struct TaskCleanup {
     /// (`active_task_pids`). None for frames without a stable name.
     task_name: Option<String>,
     output_bindings: Vec<(String, crate::ast::expr::Expression)>,
+    /// §25.9: flat binding slots shadowed by this task's formals.
+    saved_vif_formals: Vec<(String, Option<Value>)>,
     assoc_params: Vec<(String, String, bool)>,
     array_params: Vec<String>,
     /// `(formal, actual, lo, hi)` for an `output`/`inout`/`ref` ARRAY formal:
