@@ -47,7 +47,11 @@ endmodule
 "#;
     let sim = simulate(src, 20).expect("simulate failed");
     // pick(k) true for even k -> bits 0 and 2 set -> 4'b0101.
-    assert_eq!(i(&sim, "res"), 0b0101, "const-fn generate-if condition in a child");
+    assert_eq!(
+        i(&sim, "res"),
+        0b0101,
+        "const-fn generate-if condition in a child"
+    );
 }
 
 /// The same, at TOP level (the `elaborate_generate_if` path, which used to
@@ -194,9 +198,9 @@ endmodule
     // Packed layout: x is the HIGHER field (declared first in packed struct),
     // y is lower.  coord_t = {x[1:0], y[1:0]} -> bits[3:2]=x, bits[1:0]=y.
     let out = i(&sim, "out") as u64;
-    assert_eq!((out >>  0) & 0xf, 0b0000, "router 0 coord (x=0,y=0)");
-    assert_eq!((out >>  4) & 0xf, 0b0100, "router 1 coord (x=1,y=0)");
-    assert_eq!((out >>  8) & 0xf, 0b0001, "router 2 coord (x=0,y=1)");
+    assert_eq!((out >> 0) & 0xf, 0b0000, "router 0 coord (x=0,y=0)");
+    assert_eq!((out >> 4) & 0xf, 0b0100, "router 1 coord (x=1,y=0)");
+    assert_eq!((out >> 8) & 0xf, 0b0001, "router 2 coord (x=0,y=1)");
     assert_eq!((out >> 12) & 0xf, 0b0101, "router 3 coord (x=1,y=1)");
 }
 
@@ -219,4 +223,67 @@ endmodule
         err.contains("constant"),
         "the error should mention the constant requirement: {err}"
     );
+}
+
+/// §13.4.3: typed arguments reach struct fields without a 32-bit bridge.
+#[test]
+fn constant_function_struct_fields_keep_wide_and_signed_arguments() {
+    let source = r#"
+package values;
+  typedef struct packed { bit flag; } flags_t;
+  function automatic bit high(longint unsigned x); return x[40]; endfunction
+  function automatic bit high128(logic [127:0] x); return x[100]; endfunction
+  function automatic bit negative(longint x); return x < 0; endfunction
+  function automatic longint unsigned wide(); return 64'h10000000000; endfunction
+endpackage
+module child(output logic [4:0] result_bits);
+  import values::*;
+  for (genvar r=0; r<1; r++) begin : g
+    localparam flags_t A = '{flag: high(64'h10000000000)};
+    localparam flags_t B = '{flag: high128(128'h10000000000000000000000000)};
+    localparam flags_t C = '{flag: negative(-64'sd1)};
+    localparam flags_t D = '{flag: high(wide())};
+    localparam flags_t E = '{flag: high(64'h8000000000 + 64'h8000000000)};
+    assign result_bits = {A.flag,B.flag,C.flag,D.flag,E.flag};
+  end
+endmodule
+module top;
+  logic [4:0] result_bits;
+  child u(result_bits);
+endmodule
+"#;
+    let sim = simulate(source, 20).expect("typed constant evaluation");
+    assert_eq!(i(&sim, "result_bits"), 31);
+}
+
+/// §13.3 / §10.7: formals provide conversion and expression sizing.
+#[test]
+fn constant_function_formal_conversion_neighbors() {
+    let source = r#"
+package conversions;
+  typedef struct packed { bit flag; } flags_t;
+  function automatic bit narrow(int x); return x == 0; endfunction
+  function automatic bit signed_byte(byte x); return x < 0; endfunction
+  function automatic bit clean(bit [1:0] x); return x === 2'b00; endfunction
+  function automatic bit rounded(int x); return x == 3; endfunction
+  function automatic bit sized(logic [7:0] x); return x == 8'd16; endfunction
+endpackage
+module child(output logic [4:0] result_bits);
+  import conversions::*;
+  for (genvar r=0; r<1; r++) begin : g
+    localparam flags_t A = '{flag: narrow(64'h10000000000)};
+    localparam flags_t B = '{flag: signed_byte(8'hff)};
+    localparam flags_t C = '{flag: clean(2'bxz)};
+    localparam flags_t D = '{flag: rounded(2.5)};
+    localparam flags_t E = '{flag: sized(4'hf + 4'h1)};
+    assign result_bits = {A.flag,B.flag,C.flag,D.flag,E.flag};
+  end
+endmodule
+module top;
+  logic [4:0] result_bits;
+  child u(result_bits);
+endmodule
+"#;
+    let sim = simulate(source, 20).expect("constant formal conversion");
+    assert_eq!(i(&sim, "result_bits"), 31);
 }
