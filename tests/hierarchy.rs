@@ -265,3 +265,6 @@ mod vif_associative_bindings;
 
 #[path = "hierarchy/vif_returned_receivers.rs"]
 mod vif_returned_receivers;
+
+#[path = "hierarchy/vif_specialized_collections.rs"]
+mod vif_specialized_collections;

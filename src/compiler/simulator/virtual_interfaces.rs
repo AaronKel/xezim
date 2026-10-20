@@ -2022,7 +2022,11 @@ impl Simulator {
                 let (_, (_, mp)) = self.class_vif_decl(cn, name)?;
                 (self.handle_collection_name(oh, name)?, mp.clone())
             }
-            None if self.vif_collection(name) => (name.to_string(), None),
+            None if self.vif_collection(name) => (
+                self.static_method_coll_key(name)
+                    .unwrap_or_else(|| name.to_string()),
+                None,
+            ),
             None => return None,
         };
         let token = self.coll_elem_handle(&coll, name, index)? as u64;
@@ -2076,33 +2080,45 @@ impl Simulator {
                 let owner = self.vif_owner_of_expr(owner)?;
                 self.vif_named_target(Some(owner), &member.name, None)
             }
-            ExprKind::Index { expr: base, index } => match &base.kind {
-                ExprKind::Ident(h)
-                    if h.root.is_none() && h.path.last().is_some_and(|s| s.selects.is_empty()) =>
+            ExprKind::Index { expr: base, index } => {
+                // §8.25 / §25.10: a specialized static collection stores
+                // interface tokens under its per-specialization key.
+                if self.vif_tokens_stored
+                    && let Some(coll) = self.static_vif_key(base)
+                    && let Some(token) = self.coll_elem_handle(&coll, "", index)
+                    && let Some(bound) = self.iface_by_token(token as u64)
                 {
-                    let (last, owner) = h.path.split_last()?;
-                    let name = last.name.name.as_str();
-                    if owner.is_empty() {
-                        return self.vif_named_target(None, name, Some(index));
-                    }
-                    if !self.vif_prop_name_possible(name) {
-                        return None;
-                    }
-                    let owner = self.vif_owner_of_path(owner)?;
-                    self.vif_named_target(Some(owner), name, Some(index))
+                    return Some((bound.to_string(), None));
                 }
-                ExprKind::MemberAccess {
-                    expr: owner,
-                    member,
-                } => {
-                    if !self.vif_prop_name_possible(&member.name) {
-                        return None;
+                match &base.kind {
+                    ExprKind::Ident(h)
+                        if h.root.is_none()
+                            && h.path.last().is_some_and(|s| s.selects.is_empty()) =>
+                    {
+                        let (last, owner) = h.path.split_last()?;
+                        let name = last.name.name.as_str();
+                        if owner.is_empty() {
+                            return self.vif_named_target(None, name, Some(index));
+                        }
+                        if !self.vif_prop_name_possible(name) {
+                            return None;
+                        }
+                        let owner = self.vif_owner_of_path(owner)?;
+                        self.vif_named_target(Some(owner), name, Some(index))
                     }
-                    let owner = self.vif_owner_of_expr(owner)?;
-                    self.vif_named_target(Some(owner), &member.name, Some(index))
+                    ExprKind::MemberAccess {
+                        expr: owner,
+                        member,
+                    } => {
+                        if !self.vif_prop_name_possible(&member.name) {
+                            return None;
+                        }
+                        let owner = self.vif_owner_of_expr(owner)?;
+                        self.vif_named_target(Some(owner), &member.name, Some(index))
+                    }
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         }
     }
@@ -2773,6 +2789,7 @@ impl Simulator {
             return false;
         }
         match coll.split_once('#') {
+            Some((h, _)) if h.parse::<usize>().is_err() => self.static_vif_collection(coll),
             Some((h, prop)) => {
                 self.vif_prop_name_possible(prop)
                     && h.parse::<usize>()
@@ -2795,11 +2812,25 @@ impl Simulator {
     /// stored bare or as `Cls::pq`)?
     pub(super) fn static_vif_collection(&self, coll: &str) -> bool {
         let leaf = coll.rsplit("::").next().unwrap_or(coll);
-        self.vif_prop_name_possible(leaf)
+        if self.vif_prop_name_possible(leaf)
             && self.module.classes.values().any(|cd| {
                 cd.virtual_iface_properties.contains_key(leaf)
                     && cd.static_collections.iter().any(|(n, ..)| n == leaf)
             })
+        {
+            return true;
+        }
+        let Some((base, _)) = &self.current_spec else {
+            return false;
+        };
+        let Some(cd) = self.module.classes.get(base) else {
+            return false;
+        };
+        cd.static_collections.iter().any(|(n, ..)| n == leaf)
+            && cd
+                .property_types
+                .get(leaf)
+                .is_some_and(|dt| self.is_virtual_iface_type(dt))
     }
 
     /// §25.9: does `dt` denote a virtual-interface handle type — `virtual
