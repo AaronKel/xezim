@@ -287,3 +287,32 @@ endmodule
     let sim = simulate(source, 20).expect("constant formal conversion");
     assert_eq!(i(&sim, "result_bits"), 31);
 }
+
+/// §7.2.1 / §13.4.3: later generated constants can select earlier struct fields.
+#[test]
+fn generated_struct_fields_feed_later_constants() {
+    let source = r#"
+package field_values;
+  typedef struct packed { logic [3:0] a,b,c,d,e; } fields_t;
+  function automatic int identity(int value); return value; endfunction
+endpackage
+module child(output logic [19:0] result_bits);
+  import field_values::*;
+  for(genvar r=0;r<1;r++) begin:g
+    localparam fields_t A = '{a:1,b:2,c:3,d:4,e:5};
+    localparam int B0 = identity(A.a);
+    localparam int B1 = A.b + identity(A.a);
+    localparam int B2 = A.c;
+    localparam int B3 = identity(A.d) << 1;
+    localparam int B4 = A.e == 5;
+    assign result_bits = {B0[3:0],B1[3:0],B2[3:0],B3[3:0],B4[3:0]};
+  end
+endmodule
+module top;
+  logic [19:0] result_bits;
+  child u(result_bits);
+endmodule
+"#;
+    let sim = simulate(source, 20).expect("dependent generated struct fields");
+    assert_eq!(i(&sim, "result_bits"), 0x13381);
+}
