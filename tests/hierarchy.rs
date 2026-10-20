@@ -281,11 +281,14 @@ mod signed_generate_instances;
 #[path = "hierarchy/vif_sibling_regressions.rs"]
 mod vif_sibling_regressions;
 
-#[path = "hierarchy/vif_sibling_neighbors.rs"]
-mod vif_sibling_neighbors;
-
 #[path = "hierarchy/bind_sibling_regressions.rs"]
 mod bind_sibling_regressions;
 
+#[path = "hierarchy/vif_sibling_neighbors.rs"]
+mod vif_sibling_neighbors;
+
 #[path = "hierarchy/bind_sibling_neighbors.rs"]
 mod bind_sibling_neighbors;
+
+#[path = "hierarchy/interface_static_initializers.rs"]
+mod interface_static_initializers;
