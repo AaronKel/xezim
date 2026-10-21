@@ -443,6 +443,60 @@ impl Simulator {
         self.record_ast_loop_heat(iterations);
     }
 
+    /// A selected row of a fixed array of collections has its own store.
+    /// Resolve the declaration before evaluating selectors, so a failed
+    /// probe cannot repeat an index expression's side effects.
+    #[cold]
+    #[inline(never)]
+    fn foreach_selected_collection(&mut self, array: &Expression) -> Option<String> {
+        let selected = match &array.kind {
+            ExprKind::Ident(h) if h.path.iter().any(|p| !p.selects.is_empty()) => {
+                std::borrow::Cow::Owned(Self::hier_select_chain(h, array.span))
+            }
+            ExprKind::Index { .. } => std::borrow::Cow::Borrowed(array),
+            _ => return None,
+        };
+        if let Some(name) = self.class_array_of_coll_key(&selected) {
+            return Some(name);
+        }
+        let mut indices = Vec::new();
+        let mut base = selected.as_ref();
+        while let ExprKind::Index { expr, index } = &base.kind {
+            indices.push(index.as_ref());
+            base = expr;
+        }
+        let ExprKind::Ident(h) = &base.kind else {
+            return None;
+        };
+        let mut name = self.resolve_hier_name(h).into_owned();
+        if let Some(local) = self.dyn_name_lookup(&name) {
+            name = local.to_string();
+        }
+        if self.foreach_dims(&name).is_none()
+            && let Some(scoped) = self.hint_scoped(&name)
+        {
+            name = scoped;
+        }
+        let dims = self.foreach_dims(&name)?;
+        if dims.len() != indices.len() {
+            return None;
+        }
+        let mut first = name.clone();
+        for &(lo, _) in &dims {
+            first.push_str(&format!("[{lo}]"));
+        }
+        if !self.module.associative_arrays.contains_key(&first)
+            && !self.module.dynamic_arrays.contains(&first)
+        {
+            return None;
+        }
+        for index in indices.into_iter().rev() {
+            let value = self.eval_expr(index).to_i64().unwrap_or(0);
+            name.push_str(&format!("[{value}]"));
+        }
+        Some(name)
+    }
+
     pub(super) fn exec_stmt_foreach_inner(
         &mut self,
         _stmt: &Statement,
@@ -627,7 +681,14 @@ impl Simulator {
         // instance-scoped associative array (base may be a 2-seg
         // Ident `b.edges` or a MemberAccess).
         {
-            if let Some(an) = self.expr_assoc_name(array) {
+            let selected = match &array.kind {
+                ExprKind::Index { .. } => self.foreach_selected_collection(array),
+                ExprKind::Ident(h) if h.path.iter().any(|p| !p.selects.is_empty()) => {
+                    self.foreach_selected_collection(array)
+                }
+                _ => None,
+            };
+            if let Some(an) = selected.or_else(|| self.expr_assoc_name(array)) {
                 // §12.7.3 `foreach (m[i, j])` over a DYNAMIC ARRAY OF
                 // (`<h>#m[i].size`), so the two dimensions cannot be
                 // iterated as a rectangle.
@@ -867,6 +928,9 @@ impl Simulator {
                     // of a failed u64 parse clobbering it to 0.
                     let (kw, ks_sign) = self.assoc_index_width_for(&an).unwrap_or((32, false));
                     self.widths.insert(var.name.clone(), kw);
+                    let var_scope = (!an.contains('#'))
+                        .then(|| an.rsplit_once('.').map(|(scope, _)| scope.to_string()))
+                        .flatten();
                     for key in keys {
                         if self.finished {
                             break;
@@ -888,7 +952,7 @@ impl Simulator {
                             v.is_signed = ks_sign;
                             v
                         };
-                        self.set_loop_var(&var.name, kv);
+                        self.set_loop_var_aliased(var_scope.as_deref(), &var.name, kv);
                         self.continue_flag = false;
                         *iterations = iterations.saturating_add(1);
                         self.exec_statement(body);
@@ -5795,6 +5859,15 @@ impl Simulator {
             })),
             _ => None,
         };
+        let key_info = match &dims[k] {
+            UD::Associative { data_type, .. } => super::elaborate::assoc_key_type_info(
+                data_type.as_deref(),
+                &self.module.parameters,
+                &self.module.typedefs,
+                &self.module.typedef_types,
+            ),
+            _ => (None, None),
+        };
         let mut elems = Vec::new();
         for sfx in Self::nd_elem_suffixes(&shape) {
             let en = format!("{}{}", name, sfx);
@@ -5806,6 +5879,15 @@ impl Simulator {
             }
             match assoc_key {
                 Some(is_str) => {
+                    if let Some(index) = key_info.0 {
+                        self.module.assoc_index_widths.insert(en.clone(), index);
+                    }
+                    if let Some(key_type) = &key_info.1 {
+                        self.module
+                            .assoc_key_type_names
+                            .insert(en.clone(), key_type.clone());
+                    }
+                    self.module.assoc_elem_widths.insert(en.clone(), w);
                     self.module.associative_arrays.insert(en, is_str);
                 }
                 None => {
