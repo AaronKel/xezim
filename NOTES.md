@@ -338,6 +338,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   Nonvacuous successes remain recorded across delayed and multiple matches
   (§16.14.8, §20.12). (#445, reported by akashlevy)
 
+* Static virtual interfaces retain their specialization through qualified,
+  typedef and object-member reads, inheritance, copies, null assignments and
+  output writeback. Nested local bindings restore the enclosing interface
+  after function, task and loop scopes end (§6.21, §8.26, §25.9).
+  (#431, #433; #465 and #466 contributed by Ganesh-TNL)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
