@@ -176,3 +176,13 @@ fn package_import_dependencies() {
         &["T|importenv 4 5 17 29 29"],
     );
 }
+
+#[test]
+fn aggregate_elements_preserve_member_reads() {
+    check(
+        "aggregate_elements",
+        include_str!("../issue_cases/package_array_params/aggregate_elements.sv"),
+        "top",
+        &["T|aggregate 9 10 7 8 13 4 5 101 011 0 1"],
+    );
+}
