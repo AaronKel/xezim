@@ -323,6 +323,13 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   directory. Test overrides persist while the recorded build is unchanged,
   including empty overrides. (#426, reported by akashlevy)
 
+* Interface-array slices retain their selected instances' parameters, signal
+  widths and connections when passed to array ports or forwarded through
+  another module. (#463)
+* Fixed arrays of associative arrays apply each row's declared key width and
+  signedness to lookups, iteration and traversal, including class properties
+  and automatic task storage. (#464, reported by chenbhil)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
