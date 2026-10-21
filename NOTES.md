@@ -329,6 +329,9 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Fixed arrays of associative arrays apply each row's declared key width and
   signedness to lookups, iteration and traversal, including class properties
   and automatic task storage. (#464, reported by chenbhil)
+* Continuous assignments and `always_comb` writes preserve the complete width
+  of nested packed elements and sub-arrays, including packed struct elements
+  wider than 32 bits (§7.4.1). (#461, contributed by chenbhil)
 
 **Performance**
 
