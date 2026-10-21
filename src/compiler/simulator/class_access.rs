@@ -657,10 +657,8 @@ impl Simulator {
             // fixed). Keep the qualified spelling when it names a
             // collection; package VARIABLES still hoist bare as before.
             if qual.is_none() {
-                qual = self.pkg_qual_collection_key(
-                    &hier.path[0].name.name,
-                    &hier.path[1].name.name,
-                );
+                qual =
+                    self.pkg_qual_collection_key(&hier.path[0].name.name, &hier.path[1].name.name);
             }
             let stripped: String = qual
                 .as_deref()
@@ -756,7 +754,25 @@ impl Simulator {
                     &self.module.interface_port_aliases,
                     &self.module.name,
                 );
-                (bound != name).then(|| bound.into_owned())
+                // An enclosing hint can itself end in a port name. Rebasing
+                // a relative name headed by that same port would duplicate
+                // it (actual.port.member). Only accept a binding that names
+                // declared storage or a subroutine; otherwise ordinary scope
+                // lookup must continue (§23.8).
+                let known = bound != name
+                    && (self.signal_name_to_id.contains_key(bound.as_ref())
+                        || self.signals.contains_key(bound.as_ref())
+                        || self.module.parameters.contains_key(bound.as_ref())
+                        || self.module.arrays.contains_key(bound.as_ref())
+                        || self.module.arrays_2d.contains_key(bound.as_ref())
+                        || self.module.arrays_nd.contains_key(bound.as_ref())
+                        || self.module.dynamic_arrays.contains(bound.as_ref())
+                        || self.module.associative_arrays.contains_key(bound.as_ref())
+                        || self.module.struct_members.contains_key(bound.as_ref())
+                        || self.module.functions.contains_key(bound.as_ref())
+                        || self.module.tasks.contains_key(bound.as_ref())
+                        || self.instance_by_path(bound.as_ref()).is_some());
+                known.then(|| bound.into_owned())
             };
             if let Some(bound) = resolve(&raw) {
                 return bound;
@@ -1574,5 +1590,44 @@ impl Simulator {
         self.table_modified = true;
         self.after_signal_write_premirrored(id);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §23.8 / §25.3: a port-scoped lookup hint cannot duplicate that port
+    /// in the physical interface path, including assertion clock lookups.
+    #[test]
+    fn interface_port_hint_resolves_declared_clock() {
+        let sim = crate::simulate(
+            r#"
+interface bus_if; logic clk; endinterface
+module agent(bus_if bus); endmodule
+module top; bus_if bus(); agent a(bus); initial #1 $finish; endmodule
+module control; endmodule
+"#,
+            2,
+        )
+        .unwrap();
+        let span = crate::ast::Span::new(0, 0);
+        let expression =
+            Simulator::hier_ident_expr(Simulator::iface_path_segs("bus.clk", span), span);
+        let ExprKind::Ident(hier) = expression.kind else {
+            unreachable!()
+        };
+        for hint in ["top.a.bus", "top.a", "top.bus"] {
+            *sim.name_resolve_hint.borrow_mut() = Some(hint.to_string());
+            let resolved = sim.resolve_hier_name_uncached(&hier);
+            // Both the formal port path and the physical path may remain
+            // valid names, but they must select the same signal storage.
+            assert_eq!(
+                sim.signal_name_to_id.get(resolved.as_str()),
+                sim.signal_name_to_id.get("top.bus.clk"),
+                "{hint}: {resolved}"
+            );
+            assert!(sim.signal_name_to_id.contains_key(resolved.as_str()));
+        }
     }
 }
