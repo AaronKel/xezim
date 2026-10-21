@@ -571,12 +571,13 @@ impl Simulator {
         let mut iface_alias_frame: HashMap<String, String> = HashMap::default();
         for (i, port) in fd.ports.iter().enumerate() {
             if i < args.len() {
-                if let Some((f, b)) =
-                    self.vif_formal_alias(&port.data_type, &port.name.name, &args[i])
-                {
+                if let Some((f, b)) = self.vif_formal_alias(port, &args[i], &locals) {
                     iface_alias_frame.insert(f, b);
                 }
             }
+        }
+        if !iface_alias_frame.is_empty() {
+            self.consume_vif_argument_return();
         }
         self.local_iface_aliases.push(iface_alias_frame);
         self.commit_formal_dyn(formal_dyn);

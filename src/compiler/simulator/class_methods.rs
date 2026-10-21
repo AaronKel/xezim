@@ -1922,12 +1922,13 @@ impl Simulator {
                 let plan_fresh = plan.type_gen == self.type_tables_gen;
                 for (i, port) in ports.iter().enumerate() {
                     if i < args.len() && !(plan_fresh && plan.ports[i].never_vif) {
-                        if let Some((f, b)) =
-                            self.vif_formal_alias(&port.data_type, &port.name.name, &args[i])
-                        {
+                        if let Some((f, b)) = self.vif_formal_alias(port, &args[i], &locals) {
                             iface_alias_frame.insert(f, b);
                         }
                     }
+                }
+                if !iface_alias_frame.is_empty() {
+                    self.consume_vif_argument_return();
                 }
                 // PURE_SV_LRM §8.25: a `static` member of a parameterized
                 // class is per-SPECIALIZATION. Reached from an INSTANCE method

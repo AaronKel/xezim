@@ -996,7 +996,10 @@ impl Simulator {
                 // A same-named class vif PROPERTY written bare inside a
                 // method takes the binding path below, not the var alias.
                 let shadows_class_prop = is_viface_var
-                    && !self.local_stack.last().is_some_and(|f| f.contains_key(name))
+                    && !self
+                        .local_stack
+                        .last()
+                        .is_some_and(|f| f.contains_key(name))
                     && self
                         .this_stack
                         .last()
@@ -1824,17 +1827,35 @@ impl Simulator {
     /// actual vif is bound).
     pub(super) fn vif_formal_alias(
         &self,
-        dt: &crate::ast::types::DataType,
-        formal: &str,
+        port: &crate::ast::decl::FunctionPort,
         arg: &Expression,
+        locals: &HashMap<String, Value>,
     ) -> Option<(String, String)> {
-        if !self.is_virtual_iface_type(dt) {
+        if !self.is_virtual_iface_type(&port.data_type) {
             return None;
         }
-        Some((
-            formal.to_string(),
-            self.resolve_vif_rhs_name_strict(arg).unwrap_or_default(),
-        ))
+        let formal = port.name.name.as_str();
+        // §13.5.2: an output starts at its type's default, with no copy-in.
+        if matches!(port.direction, crate::ast::types::PortDirection::Output) {
+            return Some((formal.to_string(), String::new()));
+        }
+        let bound = self.resolve_vif_rhs_name_strict(arg).or_else(|| {
+            // Calls and conditional actuals were evaluated while binding
+            // the ports. Recover that token without executing them again.
+            let token = locals.get(formal)?.to_u64().filter(|&token| token != 0)?;
+            self.iface_by_token(token).map(str::to_string)
+        });
+        Some((formal.to_string(), bound.unwrap_or_default()))
+    }
+
+    /// A getter used as an argument has already delivered its token to the
+    /// formal. Its return marker must not bind the callee's scalar result.
+    pub(super) fn consume_vif_argument_return(&mut self) {
+        if self.vif_return_pending {
+            self.signals.remove("__vif_return__");
+            self.vif_return_pending = false;
+        }
+        self.last_vif_return = None;
     }
 
     /// LRM §25.9: resolve a leading identifier through the active

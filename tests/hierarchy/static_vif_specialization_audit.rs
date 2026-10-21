@@ -95,3 +95,22 @@ fn static_vif_audit_static_writeback() {
         ],
     );
 }
+
+#[test]
+fn static_vif_audit_call_values_and_output_defaults() {
+    check(
+        include_str!("../issue_cases/static_vif_call_arguments_audit.sv"),
+        &[
+            "T|call-null 0 1",
+            "T|method-call 17",
+            "T|free-call 17 1",
+            "T|conditional 17 29",
+            "T|calls 2",
+            "T|null-call 1",
+            "T|calls-after-null 3",
+            "T|free-output-null 1",
+            "T|method-output-null 1",
+            "T|task-output-null 1",
+        ],
+    );
+}
