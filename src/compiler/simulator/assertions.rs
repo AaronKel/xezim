@@ -798,7 +798,7 @@ impl Simulator {
             SvaNode::Impl { .. } => SvaState::Impl {
                 ante: SvaRun::with_env(env.clone()),
                 ante_alive: true,
-                matched_any: false,
+                nonvacuous: false,
                 cons: Vec::new(),
             },
             SvaNode::Followed { .. } => SvaState::Followed {
@@ -1128,7 +1128,7 @@ impl Simulator {
                 SvaState::Impl {
                     ante: arun,
                     ante_alive,
-                    matched_any,
+                    nonvacuous,
                     cons,
                 },
             ) => {
@@ -1139,12 +1139,14 @@ impl Simulator {
                     let (m, alive) = self.sva_run_advance(ante, arun, false);
                     *ante_alive = alive;
                     if !m.is_empty() {
-                        *matched_any = true;
                         for env in &m {
                             fresh.push(Self::sva_new_state(cons_node, env));
                         }
                     }
                 }
+                // §16.14.8: a matching antecedent is not enough. At least
+                // one consequent must succeed nonvacuously; remember that
+                // success while other matches and consequents remain pending.
                 let mut failed = false;
                 let mut keep: Vec<(u32, SvaState)> = Vec::new();
                 for (mut delay, mut cst) in cons.drain(..) {
@@ -1157,7 +1159,8 @@ impl Simulator {
                     }
                     match self.sva_advance(cons_node, &mut cst) {
                         Some(SvaOutcome::Fail) => failed = true,
-                        Some(_) => {}
+                        Some(SvaOutcome::Pass) => *nonvacuous = true,
+                        Some(SvaOutcome::Vacuous) => {}
                         None => keep.push((0, cst)),
                     }
                 }
@@ -1165,7 +1168,8 @@ impl Simulator {
                     if *overlap {
                         match self.sva_advance(cons_node, &mut cst) {
                             Some(SvaOutcome::Fail) => failed = true,
-                            Some(_) => {}
+                            Some(SvaOutcome::Pass) => *nonvacuous = true,
+                            Some(SvaOutcome::Vacuous) => {}
                             None => keep.push((0, cst)),
                         }
                     } else {
@@ -1179,7 +1183,7 @@ impl Simulator {
                     return Some(SvaOutcome::Fail);
                 }
                 if !*ante_alive && cons.is_empty() {
-                    Some(if *matched_any {
+                    Some(if *nonvacuous {
                         SvaOutcome::Pass
                     } else {
                         SvaOutcome::Vacuous
