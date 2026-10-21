@@ -333,6 +333,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   of nested packed elements and sub-arrays, including packed struct elements
   wider than 32 bits (§7.4.1). (#461, contributed by chenbhil)
 
+* Nested implications and property `if` preserve vacuous successes through
+  their consequents, so `$assertvacuousoff` suppresses their pass actions.
+  Nonvacuous successes remain recorded across delayed and multiple matches
+  (§16.14.8, §20.12). (#445, reported by akashlevy)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
