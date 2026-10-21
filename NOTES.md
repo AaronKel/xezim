@@ -344,6 +344,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   after function, task and loop scopes end (§6.21, §8.26, §25.9).
   (#431, #433; #465 and #466 contributed by Ganesh-TNL)
 
+* Virtual-interface formals preserve the bindings of call and conditional
+  arguments without repeating getter calls or leaking their bindings into
+  scalar results. Output formals start null and copy that default back when
+  left unassigned (§13.5.2, §25.9).
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
