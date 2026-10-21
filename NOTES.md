@@ -349,6 +349,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   scalar results. Output formals start null and copy that default back when
   left unassigned (§13.5.2, §25.9).
 
+* Hierarchical references through interface ports resolve to the connected
+  interface instance, including modports, nested connections and generated
+  instances. Reads, writes, waits, events and subroutine calls share that
+  instance's storage (§23.8, §25.3). Recompile saved designs to refresh their
+  interface-port connections.
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
