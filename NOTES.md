@@ -355,6 +355,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   instance's storage (§23.8, §25.3). Recompile saved designs to refresh their
   interface-port connections.
 
+* Unpacked parameter arrays preserve declared bounds, element types and
+  nested selections across package imports and hierarchical reads. Instance
+  body overrides and array-dependent constants use the selected values
+  (§6.20.2, §26.3). (#425, reported by Ganesh-TNL;
+  #467 and companion core changes contributed by Ganesh-TNL)
+
+* Assertions and sampled-value functions continue to tick when their clock
+  is reached through an interface port from a nested scope (§16.9.3, §23.8).
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
