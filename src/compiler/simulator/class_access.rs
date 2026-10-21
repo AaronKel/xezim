@@ -694,6 +694,45 @@ impl Simulator {
     }
 
     pub(super) fn resolve_hier_name_uncached(&self, hier: &HierarchicalIdentifier) -> String {
+        // §25.3 / §23.8: a hierarchical reference through an interface port
+        // names its connected instance, before ordinary suffix fallbacks.
+        if !self.module.interface_port_aliases.is_empty() {
+            let mut raw = String::new();
+            for (i, seg) in hier.path.iter().enumerate() {
+                if seg.name.name == "$root" && i == 0 {
+                    continue;
+                }
+                if !raw.is_empty() {
+                    raw.push('.');
+                }
+                raw.push_str(&seg.name.name);
+                if i + 1 < hier.path.len() {
+                    for select in &seg.selects {
+                        if let Some(index) = Self::try_const_u64(select) {
+                            use std::fmt::Write as _;
+                            let _ = write!(raw, "[{index}]");
+                        }
+                    }
+                }
+            }
+            let resolve = |name: &str| {
+                let bound = xezim_core::elaborate::interface_ports::resolve(
+                    name,
+                    &self.module.interface_port_aliases,
+                    &self.module.name,
+                );
+                (bound != name).then(|| bound.into_owned())
+            };
+            if let Some(bound) = resolve(&raw) {
+                return bound;
+            }
+            if hier.root.is_none()
+                && let Some(qualified) = self.hint_scoped(&raw)
+                && let Some(bound) = resolve(&qualified)
+            {
+                return bound;
+            }
+        }
         let common_prefix_len = |a: &str, b: &str| -> usize {
             let mut n = 0usize;
             for (sa, sb) in a.split('.').zip(b.split('.')) {

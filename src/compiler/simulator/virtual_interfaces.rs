@@ -1690,6 +1690,40 @@ impl Simulator {
         {
             return Some(rest.to_string());
         }
+        // §25.3: the formal interface-port path is an alias, so it need
+        // not be a suffix of any physical subroutine key in the table.
+        let top_shadowed = !explicit_root
+            && path
+                .strip_prefix(self.module.name.as_str())
+                .is_some_and(|s| s.starts_with('.'))
+            && (self.dyn_name_lookup(&self.module.name).is_some()
+                || self.eval_ident_handle(&self.module.name).is_some());
+        if !self.module.interface_port_aliases.is_empty() && !top_shadowed {
+            let lookup = |candidate: &str| {
+                let bound = xezim_core::elaborate::interface_ports::resolve(
+                    candidate,
+                    &self.module.interface_port_aliases,
+                    &self.module.name,
+                );
+                (bound != candidate
+                    && (self.module.functions.contains_key(bound.as_ref())
+                        || self.module.tasks.contains_key(bound.as_ref())))
+                .then(|| bound.into_owned())
+            };
+            if let Some(bound) = lookup(path) {
+                return Some(bound);
+            }
+            if !explicit_root {
+                let hint = self.name_resolve_hint.borrow();
+                let mut scope = hint.as_deref();
+                while let Some(current) = scope {
+                    if let Some(bound) = lookup(&format!("{current}.{path}")) {
+                        return Some(bound);
+                    }
+                    scope = current.rsplit_once('.').map(|(p, _)| p);
+                }
+            }
+        }
         // Only a path that ends some subroutine key can resolve below.
         if !self.class_member_names().subroutine_suffixes.contains(path) {
             return None;

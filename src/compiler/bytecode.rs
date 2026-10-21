@@ -10522,6 +10522,10 @@ impl<'a> BytecodeCompiler<'a> {
                 || self.queue_vars.is_some_and(|m| m.contains(&elem))
                 || self.dynamic_arrays.is_some_and(|m| m.contains(&elem)))
         };
+        let canonical = self.signal_name_to_id.canonical_interface_name(&raw);
+        if canonical != raw && self.arrays.contains_key(canonical.as_ref()) {
+            return dense(&canonical).then(|| canonical.into_owned());
+        }
         if self.arrays.contains_key(&raw) {
             return dense(&raw).then_some(raw);
         }

@@ -311,3 +311,6 @@ mod static_vif_specialization_audit;
 
 #[path = "hierarchy/static_vif_scope_audit.rs"]
 mod static_vif_scope_audit;
+
+#[path = "hierarchy/interface_port_hierarchy.rs"]
+mod interface_port_hierarchy;
