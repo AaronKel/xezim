@@ -996,6 +996,7 @@ impl Simulator {
                 // A same-named class vif PROPERTY written bare inside a
                 // method takes the binding path below, not the var alias.
                 let shadows_class_prop = is_viface_var
+                    && !self.local_stack.last().is_some_and(|f| f.contains_key(name))
                     && self
                         .this_stack
                         .last()

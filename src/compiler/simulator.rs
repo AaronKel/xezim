@@ -4505,6 +4505,9 @@ struct BlockScopeSave {
     declarations: Vec<DeclShadow>,
     /// The enclosing frame's string-kind overlay, not the global name table.
     string_kinds: Vec<(String, Option<bool>)>,
+    /// Virtual-interface aliases and auxiliary slots hidden by this block.
+    vif_aliases: Vec<(String, Option<String>)>,
+    vif_slots: Vec<(String, Option<Value>)>,
     /// A suspend-aware for loop closes its variable scope at the same sentinel.
     loop_vars: Vec<LoopVarSnapshot>,
     owns_loop_frame: bool,
