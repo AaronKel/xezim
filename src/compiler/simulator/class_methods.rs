@@ -2280,7 +2280,7 @@ impl Simulator {
                     self.modclass_depth.set(self.modclass_depth.get() - 1);
                     *self.activation_scope.borrow_mut() = prev;
                 }
-                self.local_iface_aliases.pop();
+                let vif_alias_ended = self.local_iface_aliases.pop().unwrap_or_default();
                 if self.parked_from_exec {
                     // The process was parked by exec_statement's Wait handler.
                     // Keep break/return flags set so they propagate up to
@@ -2520,10 +2520,14 @@ impl Simulator {
                     self.vif_formals_exit(saved, &vf, &outs)
                 };
                 for (pn, v, caller) in writebacks {
-                    if let Some(nm) = vif_ended.get(&pn) {
-                        self.vif_bind_actual(&caller, nm);
-                    }
-                    self.assign_value(&caller, &v);
+                    self.vif_writeback(
+                        &caller,
+                        &v,
+                        vif_alias_ended
+                            .get(&pn)
+                            .or_else(|| vif_ended.get(&pn))
+                            .map(String::as_str),
+                    );
                 }
                 for (caller_lval, v) in struct_wb {
                     self.assign_value(&caller_lval, &v);

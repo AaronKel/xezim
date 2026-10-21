@@ -305,3 +305,6 @@ mod pr_core_followups;
 
 #[path = "hierarchy/interface_array_slices.rs"]
 mod interface_array_slices;
+
+#[path = "hierarchy/static_vif_specialization_audit.rs"]
+mod static_vif_specialization_audit;

@@ -731,7 +731,7 @@ impl Simulator {
             }
         }
         self.sync_static_locals();
-        self.local_iface_aliases.pop();
+        let vif_alias_ended = self.local_iface_aliases.pop().unwrap_or_default();
         self.func_call_stack.pop();
         self.fn_ret_collection_stack.pop();
         self.fn_ret_assoc_stack.pop();
@@ -857,10 +857,14 @@ impl Simulator {
             self.vif_formals_exit(vif_saved, &vif_formals, &outs)
         };
         for (pn, v, caller) in writebacks {
-            if let Some(nm) = vif_ended.get(&pn) {
-                self.vif_bind_actual(&caller, nm);
-            }
-            self.assign_value(&caller, &v);
+            self.vif_writeback(
+                &caller,
+                &v,
+                vif_alias_ended
+                    .get(&pn)
+                    .or_else(|| vif_ended.get(&pn))
+                    .map(String::as_str),
+            );
         }
         for (caller_lval, v) in struct_wb {
             self.assign_value(&caller_lval, &v);
@@ -1025,7 +1029,9 @@ impl Simulator {
         }
         for (actual, bound) in vif_outputs {
             if bound.is_empty() {
-                self.try_bind_virtual_iface(&actual, &Expression::new(ExprKind::Null, actual.span));
+                let null = Expression::new(ExprKind::Null, actual.span);
+                self.bind_static_vif(&actual, &null);
+                self.try_bind_virtual_iface(&actual, &null);
                 self.assign_value(&actual, &Value::zero(32));
             } else {
                 self.vif_bind_actual(&actual, &bound);
