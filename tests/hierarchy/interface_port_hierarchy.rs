@@ -176,3 +176,26 @@ endmodule
         assert!(text.contains(expected), "{name}: {text}");
     }
 }
+
+#[test]
+fn interface_port_hierarchy_instance_port_name_collision() {
+    let source = r#"
+interface bus_if; logic state = 1; endinterface
+module regs(bus_if bus);
+ int value = 3;
+ function int twice(input int n); return 2*n; endfunction
+ initial #1 value = twice(value);
+endmodule
+module top;
+ bus_if b();
+ regs bus(b);
+ initial begin
+   #2 $display("T|collision %0d %0d",bus.value,bus.bus.state);
+   $finish;
+ end
+endmodule
+"#;
+    let (ok, text) = run("collision", source);
+    assert!(ok, "{text}");
+    assert!(text.contains("T|collision 6 1"), "{text}");
+}

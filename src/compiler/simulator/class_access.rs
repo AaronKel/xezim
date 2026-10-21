@@ -726,7 +726,23 @@ impl Simulator {
             if let Some(bound) = resolve(&raw) {
                 return bound;
             }
-            if hier.root.is_none()
+            // A rewritten absolute name such as `p.pv` already names its
+            // declaration. Prefixing the hint `p` again could turn it into
+            // `p.p.pv`, where `p.p` happens to be an interface-port alias.
+            let declared = raw.contains('.')
+                && (self.signal_name_to_id.contains_key(raw.as_str())
+                    || self.signals.contains_key(&raw)
+                    || self.module.arrays.contains_key(&raw)
+                    || self.module.arrays_2d.contains_key(&raw)
+                    || self.module.arrays_nd.contains_key(&raw)
+                    || self.module.dynamic_arrays.contains(&raw)
+                    || self.module.queue_vars.contains(&raw)
+                    || self.module.associative_arrays.contains_key(&raw)
+                    || self.module.struct_members.contains_key(&raw)
+                    || self.module.functions.contains_key(&raw)
+                    || self.module.tasks.contains_key(&raw));
+            if !declared
+                && hier.root.is_none()
                 && let Some(qualified) = self.hint_scoped(&raw)
                 && let Some(bound) = resolve(&qualified)
             {
