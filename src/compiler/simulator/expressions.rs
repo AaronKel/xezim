@@ -2072,17 +2072,23 @@ impl Simulator {
         // qualified key (package variables still hoist bare as before).
         let pkg_qual_collection = match &expr.kind {
             ExprKind::Index { expr: base, .. } | ExprKind::RangeSelect { expr: base, .. } => {
+                // §26.3 / §7.4: every select belongs to the qualified
+                // collection, including the outer select of a nested index.
+                let mut base = base.as_ref();
+                while let ExprKind::Index { expr, .. }
+                | ExprKind::RangeSelect { expr, .. }
+                | ExprKind::Paren(expr) = &base.kind
+                {
+                    base = expr;
+                }
                 match &base.kind {
                     ExprKind::Ident(h)
                         if h.path.len() == 2
                             && h.path[0].selects.is_empty()
                             && self.module.packages.contains(&h.path[0].name.name) =>
                     {
-                        self.pkg_qual_collection_key(
-                            &h.path[0].name.name,
-                            &h.path[1].name.name,
-                        )
-                        .is_some()
+                        self.pkg_qual_collection_key(&h.path[0].name.name, &h.path[1].name.name)
+                            .is_some()
                     }
                     _ => false,
                 }
@@ -5344,13 +5350,14 @@ impl Simulator {
                                     }
                                     return v;
                                 }
-                                // §7.4.6: out of range on a FIXED array reads
-                                // x at the element width. Falling through
-                                // reached the bit-select fallback, a 1-bit x
-                                // that the store then zero-extended.
+                                // §7.4.6 / Table 7-1: an invalid fixed-array
+                                // index yields the element type's default,
+                                // fitted to its width and signedness.
                                 if !self.module.dynamic_arrays.contains(&*name) {
                                     if let Some(ew) = self.module.arrays.get(&*name).map(|a| a.2) {
-                                        return Value::new(ew.max(1));
+                                        return self
+                                            .assoc_missing_elem_value(&name)
+                                            .unwrap_or_else(|| Value::new(ew.max(1)));
                                     }
                                 }
                             }

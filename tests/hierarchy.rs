@@ -314,3 +314,6 @@ mod static_vif_scope_audit;
 
 #[path = "hierarchy/interface_port_hierarchy.rs"]
 mod interface_port_hierarchy;
+
+#[path = "hierarchy/package_array_params.rs"]
+mod package_array_params;
