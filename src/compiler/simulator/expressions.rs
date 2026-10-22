@@ -4643,6 +4643,14 @@ impl Simulator {
                 r
             }
             ExprKind::Index { expr, index } => {
+                // §8.25: a specialized constant array is immutable class-scope
+                // storage. Resolve it before a placeholder instance property's
+                // packed-shape probe can reinterpret its element type as a bit.
+                if Self::expr_has_specialization(expr)
+                    && let Some(v) = self.class_param_array_element(expr, index)
+                {
+                    return v;
+                }
                 // Element select on a packed multi-dimensional CLASS property.
                 if let Some((h, prop, idx_exprs)) = self.prop_index_chain_parts(expr, index) {
                     // §7.4: an element of an unpacked array property of
@@ -4740,11 +4748,17 @@ impl Simulator {
                 // `Cls::S` Ident — so the base resolved to a phantom
                 // scalar and the select read a bit of it. Materialize the
                 // specialization's elements on first read.
-                if base_nm
+                // A qualified class name can resolve to the same bare leaf
+                // as a module array. Only bypass the class lookup for a bare
+                // array whose name cannot denote a member of this class scope.
+                let ordinary_array = base_nm
                     .as_deref()
-                    .is_none_or(|n| !self.module.arrays.contains_key(n))
-                    && let Some(v) = self.class_param_array_element(expr, index)
-                {
+                    .is_some_and(|n| self.module.arrays.contains_key(n))
+                    && matches!(&expr.kind, ExprKind::Ident(h) if h.path.len() == 1
+                        && !((self.current_spec.is_some()
+                            || self.class_context_stack.last().is_some_and(|c| c.is_some()))
+                            && self.class_member_names().static_or_param.contains(&h.path[0].name.name)));
+                if !ordinary_array && let Some(v) = self.class_param_array_element(expr, index) {
                     return v;
                 }
                 // §7.4.6 / §11.5.1: an x/z index reads x at the ELEMENT width,

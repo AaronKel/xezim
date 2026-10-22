@@ -245,15 +245,12 @@ impl Simulator {
         if start.is_none() && n == 1 {
             // Bare `LP[i]`: the enclosing specialization (a static method
             // of the specialization set it) or class context names the
-            // scope. A bare name that resolves to a module-scope array or
-            // signal is not class-scope — leave it to the ordinary arms.
+            // scope. Locals and formals shadow class members; class members
+            // in turn shadow a same-named module array or signal.
             if self.dyn_name_lookup(&leaf).is_some()
-                || self
-                    .local_stack
-                    .last()
-                    .is_some_and(|f| f.contains_key(&leaf))
-                || self.module.arrays.contains_key(&leaf)
-                || self.signal_name_to_id.contains_key(&leaf)
+                || self.local_stack.last().is_some_and(|f| {
+                    f.contains_key(&leaf) || f.contains_key(&format!("\u{1}array_formal:{leaf}"))
+                })
             {
                 return None;
             }
@@ -296,8 +293,8 @@ impl Simulator {
                 (
                     cd.array_properties.contains_key(&leaf)
                         && (cd.param_order.iter().any(|p| *p == leaf)
-                            || (cd.static_properties.contains(&leaf)
-                                && cd.properties.get(&leaf).is_some_and(|s| s.is_const))),
+                            || (cd.properties.get(&leaf).is_some_and(|s| s.is_const)
+                                && !cd.property_order.contains(&leaf))),
                     cd.static_fixed_arrays.iter().any(|(nm, ..)| *nm == leaf),
                     cd.extends.clone(),
                 )
@@ -327,6 +324,15 @@ impl Simulator {
                     ),
                     None => Some(Value::new(ew.max(1))),
                 };
+            }
+            // §8.14: a nearer field hides an inherited constant of the same
+            // name. Leave that field to the normal instance read path.
+            if self.module.classes.get(&cn).is_some_and(|cd| {
+                cd.properties.contains_key(&leaf)
+                    || cd.queue_properties.contains_key(&leaf)
+                    || cd.assoc_properties.contains_key(&leaf)
+            }) {
+                return None;
             }
             cur = extends;
         }
@@ -553,8 +559,8 @@ impl Simulator {
         };
         if !cd.array_properties.contains_key(leaf)
             || !(cd.param_order.iter().any(|name| name == leaf)
-                || (cd.static_properties.contains(leaf)
-                    && cd.properties.get(leaf).is_some_and(|s| s.is_const)))
+                || (cd.properties.get(leaf).is_some_and(|s| s.is_const)
+                    && !cd.property_order.iter().any(|p| p == leaf)))
             || self
                 .class_prop_struct(handle, leaf)
                 .is_some_and(|s| Self::spreads_member_wise(&s))

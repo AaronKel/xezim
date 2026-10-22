@@ -370,3 +370,40 @@ end endmodule
         .collect::<Vec<_>>();
     assert_eq!(got, ["T|objbounds 1 63"]);
 }
+
+#[test]
+fn class_array_module_name_collision() {
+    let source = r#"class C;localparam int A[2]='{1,2};endclass
+module top;int A[2]='{9,9};initial $display("T|collision %0d %0d",C::A[0],A[0]);endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|collision 1 9"]);
+}
+
+#[test]
+fn class_array_method_module_collision() {
+    let source = r#"class C;localparam int A[2]='{1,2};static function int read();return A[0];endfunction endclass
+module top;int A[2]='{9,9};initial $display("T|methodcollision %0d %0d",C::read(),A[0]);endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|methodcollision 1 9"]);
+}
+
+#[test]
+fn class_array_derived_field_shadow() {
+    let source = r#"class B;localparam int A[2]='{1,2};endclass
+class C extends B;int A[2]='{7,8};function int read();return A[0];endfunction endclass
+module top;initial begin C c=new;$display("T|derivedshadow %0d %0d",c.read(),B::A[0]);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|derivedshadow 7 1"]);
+}

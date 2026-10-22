@@ -3919,6 +3919,7 @@ impl Simulator {
             pending_spec_inits: Vec::new(),
             spec_init_depth: 0,
             construct_init_depth: 0,
+            pending_class_initializers: HashMap::default(),
             var_class_types: HashMap::default(),
             var_type_args: HashMap::default(),
             var_container_types: HashMap::default(),

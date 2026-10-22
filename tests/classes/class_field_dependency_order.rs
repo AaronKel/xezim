@@ -1,15 +1,7 @@
-//! A CLASS-FIELD initializer that READS another field must see that field's
-//! computed value, not its default.
-//!
-//! `construction.rs` evaluates property initializers against a half-built
-//! object: the ones containing a call are deferred to construction time and
-//! evaluated once each in declaration order, but a plain initializer such as
-//! `string h_derived = {h, ".derived"};` is captured at declaration time while
-//! `h` is still `""`, so the derived field is born as `".derived"`.  The same
-//! hole covers `int r_plus1 = r + 1;` over a `$urandom_range` field, which comes
-//! out as 1.  The settlement pass re-evaluates the plain fields that (transitively)
-//! read a deferred field, each exactly once, and leaves everything else alone.
-//! Verified against the reference simulator.
+//! IEEE 1800 §8.7 / §10.7: property initializers run once in declaration
+//! order, after the base constructor and before the remaining constructor body.
+//! Direct reads, calls, aggregates and transitive dependencies use the declared
+//! assignment type and the declaring class's scope.
 
 fn lines(src: &str, top: &str) -> Vec<String> {
     xezim::simulate_multi(
@@ -344,4 +336,172 @@ module top;initial begin C c=new;
         .filter(|s| s.starts_with("T|"))
         .collect::<Vec<_>>();
     assert_eq!(got, ["T|hidden 8 22"]);
+}
+
+#[test]
+fn field_initialization_base_constructor() {
+    if !super::compiled_method_test_env::policies(&[("0", "1000"), ("1", "0"), ("1", "1000")]) {
+        return;
+    }
+    let source = r#"class B;
+ int root=1;
+ function new(int n=7);root=n;endfunction
+endclass
+class C extends B;
+ int derived=root+1;
+ function new();super.new(7);endfunction
+endclass
+module top;initial begin C c=new;$display("T|base_ctor %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|base_ctor 7 8"]);
+}
+
+#[test]
+fn field_initialization_implicit_super() {
+    if !super::compiled_method_test_env::policies(&[("0", "1000"), ("1", "0"), ("1", "1000")]) {
+        return;
+    }
+    let source = r#"class B;int root=1;function new(int n=7);root=n;endfunction endclass
+class C extends B;int derived=root+1;function new();endfunction endclass
+module top;initial begin C c=new;$display("T|implicit %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|implicit 7 8"]);
+}
+
+#[test]
+fn field_initialization_inherited_constructor() {
+    if !super::compiled_method_test_env::policies(&[("0", "1000"), ("1", "0"), ("1", "1000")]) {
+        return;
+    }
+    let source = r#"class B;int root=1;function new(int n=7);root=n;endfunction endclass
+class C extends B;int derived=root+1;endclass
+module top;initial begin C c=new;$display("T|inherited_ctor %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|inherited_ctor 7 8"]);
+}
+
+#[test]
+fn field_initialization_constructor_chain() {
+    if !super::compiled_method_test_env::policies(&[("0", "1000"), ("1", "0"), ("1", "1000")]) {
+        return;
+    }
+    let source = r#"class B;int root=1;function new();root=7;endfunction endclass
+class M extends B;int middle=root+1;function new();super.new();middle+=2;endfunction endclass
+class C extends M;int derived=middle+1;function new();super.new();endfunction endclass
+module top;initial begin C c=new;$display("T|chain %0d %0d %0d",c.root,c.middle,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|chain 7 10 11"]);
+}
+
+#[test]
+fn field_initialization_constructor_side_effect_order() {
+    if !super::compiled_method_test_env::policies(&[("0", "1000"), ("1", "0"), ("1", "1000")]) {
+        return;
+    }
+    let source = r#"package p;int calls=0;function int tick();calls++;return calls;endfunction endpackage
+class B;int first=p::tick();function new();void'(p::tick());endfunction endclass
+class C extends B;int second=p::tick();function new();super.new();void'(p::tick());endfunction endclass
+module top;initial begin C c=new;$display("T|ctorcount %0d %0d %0d",c.first,c.second,p::calls);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|ctorcount 1 3 4"]);
+}
+
+#[test]
+fn field_initialization_explicit_super_argument() {
+    if !super::compiled_method_test_env::policies(&[("0", "1000"), ("1", "0"), ("1", "1000")]) {
+        return;
+    }
+    let source = r#"class B;int root=1;function new(int n=7);root=n;endfunction endclass
+class C extends B;int derived=root+1;function new(int n);super.new(n);endfunction endclass
+module top;initial begin C c=new(11);$display("T|superarg %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|superarg 11 12"]);
+}
+
+#[test]
+fn field_initialization_inline_extends_argument() {
+    if !super::compiled_method_test_env::policies(&[("0", "1000"), ("1", "0"), ("1", "1000")]) {
+        return;
+    }
+    let source = r#"class B;int root=1;function new(int n=7);root=n;endfunction endclass
+class C#(int N=4) extends B(N*2);int derived=root+1;function new();endfunction endclass
+module top;initial begin C#(6) c=new;$display("T|extendsarg %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|extendsarg 12 13"]);
+}
+
+#[test]
+fn field_initialization_type_parameter_new() {
+    let source = r#"package p;int count=0;endpackage
+class Item;int tag=7;endclass
+class Holder#(type T=Item);
+ T value=new;
+ function new();p::count++;endfunction
+endclass
+module top;initial begin Holder h=new;$display("T|typednew %0d %0d",p::count,h.value.tag);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|typednew 1 7"]);
+}
+
+#[test]
+fn field_initialization_extern_constructor() {
+    let source = r#"package p;int count=0;endpackage
+class B;int root=1;extern function new(int n);endclass
+function B::new(int n);p::count++;root=n;endfunction
+class C extends B;int derived=root+1;extern function new(int n);endclass
+function C::new(int n);int temporary;super.new(n);endfunction
+module top;initial begin C c=new(7);$display("T|extern %0d %0d %0d",c.root,c.derived,p::count);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|extern 7 8 1"]);
+}
+
+#[test]
+fn field_initialization_type_parameter_specialized_new() {
+    let source = r#"package p;int count=0;endpackage
+class Item#(int N=7);int tag=N;endclass
+class Holder#(type T=Item#(7));T value=new;function new();p::count++;endfunction endclass
+module top;initial begin Holder a=new;Holder#(Item#(9)) b=new;
+ $display("T|typedspec %0d %0d %0d",p::count,a.value.tag,b.value.tag);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|typedspec 2 7 9"]);
 }

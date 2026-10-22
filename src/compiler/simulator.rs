@@ -2520,6 +2520,7 @@ mod class_members;
 mod class_methods;
 mod class_specialization;
 mod class_array_constants;
+mod property_initialization;
 mod clocking;
 mod collection_methods;
 mod collections;
@@ -6979,6 +6980,9 @@ pub struct Simulator {
     /// Recursion guard for evaluating call-bearing instance-property
     /// initializers at construction (see `evaluate_call_init_at_construct`).
     construct_init_depth: u32,
+    /// Classes awaiting their §8.7 initialization for each constructing object.
+    pending_class_initializers:
+        HashMap<usize, Vec<std::sync::Arc<crate::compiler::elaborate::ElaboratedClass>>>,
     /// Class-typed procedural locals — variable name -> class type name.
     /// Lets a later `name = new();` know which class to construct.
     var_class_types: HashMap<String, String>,
