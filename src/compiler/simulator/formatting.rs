@@ -807,7 +807,7 @@ impl Simulator {
         handle: Option<usize>,
         prop: &str,
     ) -> Option<u32> {
-        // §8.10: a hidden base property has a qualified storage key.
+        // §8.14: a hidden base property has a qualified storage key.
         let storage_prop = prop;
         let (class_name, prop) = prop.rsplit_once("::").unwrap_or((class_name, prop));
         let memo = self

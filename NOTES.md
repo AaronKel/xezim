@@ -387,7 +387,7 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 * Class instance and static property assignments take the declared signing
   even when the right-hand side already has the destination width. Hidden
-  base properties use their own declarations and type bindings (§10.7, §8.10).
+  base properties use their own declarations and type bindings (§10.7, §8.14).
   (#499, reported by akashlevy)
 * Procedural bitwise `&`, `|`, `^` and `~^` results are signed when both
   operands are signed, preserving arithmetic and comparison behavior
