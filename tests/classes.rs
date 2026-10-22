@@ -782,3 +782,6 @@ mod class_assignment_types_499;
 
 #[path = "classes/class_param_array_reads_503.rs"]
 mod class_param_array_reads_503;
+
+#[path = "classes/class_field_dependency_order.rs"]
+mod class_field_dependency_order;
