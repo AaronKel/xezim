@@ -18,12 +18,12 @@ endmodule
         Err(e) => e,
         Ok(_) => panic!("a parameter may not read a specparam"),
     };
+    assert!(err.contains("§6.20.5"), "unexpected diagnostic: {}", err);
     assert!(
-        err.contains("§6.20.5"),
-        "unexpected diagnostic: {}",
+        err.contains("specify parameter 'delay'"),
+        "unexpected: {}",
         err
     );
-    assert!(err.contains("specify parameter 'delay'"), "unexpected: {}", err);
 }
 
 #[test]
@@ -63,8 +63,60 @@ endmodule
 "#;
     let sim = simulate(src, 10).expect("legal specparam directions must elaborate");
     assert!(
-        sim.output.iter().any(|o| o.message == "OK|legal specparam directions"),
+        sim.output
+            .iter()
+            .any(|o| o.message == "OK|legal specparam directions"),
         "{:?}",
         sim.output
     );
+}
+// §6.20.5: declaration order and unrelated lexical scopes do not change the rule.
+#[test]
+fn forward_specparam_is_rejected() {
+    let err = simulate("module top; parameter P=D+1; specparam D=3; endmodule", 10)
+        .err()
+        .expect("declaration must be rejected");
+    assert!(err.contains("§6.20.5"), "{err}");
+}
+#[test]
+fn header_parameter_may_not_read_specparam() {
+    let err = simulate(
+        "module top #(parameter P=D+1)(); specparam D=3; endmodule",
+        10,
+    )
+    .err()
+    .expect("declaration must be rejected");
+    assert!(err.contains("§6.20.5"), "{err}");
+}
+#[test]
+fn specparam_names_do_not_leak_between_modules() {
+    let result = simulate(
+        r#"module first; specparam D=3; endmodule
+ module top; parameter D=4; localparam P=D+1; initial $display("T|scope %0d",P); endmodule"#,
+        10,
+    )
+    .unwrap();
+    assert!(result.output.iter().any(|o| o.message == "T|scope 5"));
+}
+#[test]
+fn generate_local_constant_shadows_outer_specparam() {
+    let result = simulate(
+        r#"module top; specparam D=3;
+ if(1) begin:g localparam D=4; localparam P=D+1; initial $display("T|scope %0d",P); end
+ endmodule"#,
+        10,
+    )
+    .unwrap();
+    assert!(result.output.iter().any(|o| o.message == "T|scope 5"));
+}
+#[test]
+fn unrelated_class_constant_is_not_a_specparam() {
+    let result = simulate(
+        r#"module first; specparam D=3; endmodule
+ class c; localparam D=4; localparam P=D+1; endclass
+ module top; initial $display("T|scope %0d",c::P); endmodule"#,
+        10,
+    )
+    .unwrap();
+    assert!(result.output.iter().any(|o| o.message == "T|scope 5"));
 }
