@@ -420,6 +420,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   elements and increment/decrement results retain their declared types
   (#501, reported by akashlevy).
 
+* Packed selects in parameterized child instances use each instance's
+  elaborated dimensions, including typedef element widths and hierarchical
+  reads (§7.4.1/§23.10; #507, contributed by chenbhil).
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
