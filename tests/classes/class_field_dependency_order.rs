@@ -505,3 +505,24 @@ module top;initial begin Holder a=new;Holder#(Item#(9)) b=new;
         .collect::<Vec<_>>();
     assert_eq!(got, ["T|typedspec 2 7 9"]);
 }
+
+#[test]
+fn class_handle_array_field_allocates_collection() {
+    let got = lines(
+        r#"
+class Item; int tag=7; endclass
+class Holder #(type T=Item); T values[]=new[2]; endclass
+module top;
+    initial begin
+        Holder h=new;
+        $display("T|handles %0d %0d %0d",h.values.size(),h.values[0]==null,h.values[1]==null);
+    end
+endmodule
+"#,
+        "top",
+    )
+    .into_iter()
+    .filter(|line| line.starts_with("T|"))
+    .collect::<Vec<_>>();
+    assert_eq!(got, ["T|handles 2 1 1"]);
+}

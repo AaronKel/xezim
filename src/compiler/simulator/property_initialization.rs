@@ -171,20 +171,34 @@ impl Simulator {
                 self.inst_key_scratch = q;
                 slot
             };
-            // A mailbox/semaphore member with an inline `= new()` must be
-            // ALLOCATED here. The `expr_contains_call` skip below leaves it
-            // null otherwise (the constructor has no explicit `mb = new()`),
-            // so try_put/get silently fail when member mailboxes are initialized.
+            // §8.7, §7.5.1: a dynamic-array property initialized with its
+            // constructor (`int da[] = new[4];`) is sized here, like the
+            // same assignment as the first statement of `new()`. The
+            // call-bearing deferral below evaluated it as a scalar and
+            // left the array empty.
+            if let Some((n_expr, src_expr)) = Self::sized_new_parts(init) {
+                let scoped = format!("{}#{}", handle, pname);
+                if self.module.dynamic_arrays.contains(scoped.as_str()) {
+                    self.fill_sized_new(&scoped, n_expr, src_expr);
+                    continue;
+                }
+            }
+            // §8.7: a mailbox/semaphore initializer allocates one container
+            // for this object before its constructor body runs.
             let cont_kind = cdef
                 .properties
                 .get(&pname)
                 .and_then(|s| s.type_name.as_deref())
                 .and_then(Self::container_base);
             let (is_new, ctor_args): (bool, &[Expression]) = match &init.kind {
-                ExprKind::Call { func, args } if matches!(&func.kind, ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].name.name == "new") => {
+                ExprKind::Call { func, args } if matches!(&func.kind, ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].name.name == "new" && h.path[0].selects.is_empty()) => {
                     (true, args.as_slice())
                 }
-                ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].name.name == "new" => {
+                ExprKind::Ident(h)
+                    if h.path.len() == 1
+                        && h.path[0].name.name == "new"
+                        && h.path[0].selects.is_empty() =>
+                {
                     (true, &[])
                 }
                 _ => (false, &[]),
@@ -198,15 +212,8 @@ impl Simulator {
                 }
                 continue;
             }
-            // A class-typed property with an inline `= new(...)` must be
-            // CONSTRUCTED here, mirroring the statement-assignment path
-            // (`lvalue = new(args)` -> instantiate_class_with_type_args).
-            // The expr_contains_call skip below leaves it null otherwise,
-            // so a property like `my_catcher catcher = new(14);` (whose
-            // constructor is never explicitly called in the enclosing
-            // new()) stays null -- surfacing as null object handle failures.
-            // Only fires for a property whose declared type is a user class
-            // (containers are handled above).
+            // §8.7/§8.25: construct the field's concrete declared class,
+            // retaining its type-parameter and typedef specialization.
             if is_new {
                 let prop_tn = self.class_prop_type_name(handle, &slot).or_else(|| {
                     cdef.properties
@@ -275,18 +282,6 @@ impl Simulator {
                     }
                 }
                 continue;
-            }
-            // §8.7, §7.5.1: a dynamic-array property initialized with its
-            // constructor (`int da[] = new[4];`) is sized here, like the
-            // same assignment as the first statement of `new()`. The
-            // call-bearing deferral below evaluated it as a scalar and
-            // left the array empty.
-            if let Some((n_expr, src_expr)) = Self::sized_new_parts(init) {
-                let scoped = format!("{}#{}", handle, pname);
-                if self.module.dynamic_arrays.contains(scoped.as_str()) {
-                    self.fill_sized_new(&scoped, n_expr, src_expr);
-                    continue;
-                }
             }
             // §7.9.11: an associative-array property's pattern
             // initializer (`int m[int] = '{1: 5, default: -1}`) fills the
