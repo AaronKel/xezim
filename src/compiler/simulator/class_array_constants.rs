@@ -295,7 +295,9 @@ impl Simulator {
                 };
                 (
                     cd.array_properties.contains_key(&leaf)
-                        && cd.param_defaults.iter().any(|(p, _)| *p == leaf),
+                        && (cd.param_order.iter().any(|p| *p == leaf)
+                            || (cd.static_properties.contains(&leaf)
+                                && cd.properties.get(&leaf).is_some_and(|s| s.is_const))),
                     cd.static_fixed_arrays.iter().any(|(nm, ..)| *nm == leaf),
                     cd.extends.clone(),
                 )
@@ -550,7 +552,9 @@ impl Simulator {
             return false;
         };
         if !cd.array_properties.contains_key(leaf)
-            || !cd.param_defaults.iter().any(|(name, _)| name == leaf)
+            || !(cd.param_order.iter().any(|name| name == leaf)
+                || (cd.static_properties.contains(leaf)
+                    && cd.properties.get(leaf).is_some_and(|s| s.is_const)))
             || self
                 .class_prop_struct(handle, leaf)
                 .is_some_and(|s| Self::spreads_member_wise(&s))
