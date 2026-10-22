@@ -4740,7 +4740,11 @@ impl Simulator {
                 // `Cls::S` Ident — so the base resolved to a phantom
                 // scalar and the select read a bit of it. Materialize the
                 // specialization's elements on first read.
-                if let Some(v) = self.class_param_array_element(expr, index) {
+                if base_nm
+                    .as_deref()
+                    .is_none_or(|n| !self.module.arrays.contains_key(n))
+                    && let Some(v) = self.class_param_array_element(expr, index)
+                {
                     return v;
                 }
                 // §7.4.6 / §11.5.1: an x/z index reads x at the ELEMENT width,

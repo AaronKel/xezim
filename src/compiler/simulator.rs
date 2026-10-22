@@ -2519,6 +2519,7 @@ mod class_access;
 mod class_members;
 mod class_methods;
 mod class_specialization;
+mod class_array_constants;
 mod clocking;
 mod collection_methods;
 mod collections;
@@ -3299,14 +3300,14 @@ impl StaticMap {
 /// with unpacked dimensions (`class C #(int unsigned TBL [4] = '{...})`,
 /// read `C#(..)::TBL[i]`) or a class-body `localparam` array (`LP[i]`).
 /// Lazily built on first element read by
-/// `Simulator::materialize_class_param_array`; `lo`/`hi`/`ew` mirror what
-/// `module.arrays` holds for a module-scope array so bounds/x-z handling
-/// matches the ordinary fixed-array read arms.
+/// `Simulator::materialize_class_param_array`; `lo`/`hi` preserve bounds;
+/// `default` carries the declared element type for invalid/unknown indices.
 #[derive(Debug, Clone)]
 struct ClassParamArray {
     lo: i64,
     hi: i64,
-    ew: u32,
+    descending: bool,
+    default: Value,
     elems: Vec<Value>,
 }
 

@@ -517,32 +517,16 @@ impl Simulator {
                 cd.property_inits
                     .iter()
                     .filter(|(p, _)| {
-                        cd.static_fixed_arrays.iter().any(|(n, ..)| n.as_str() == p.as_str())
+                        cd.static_fixed_arrays
+                            .iter()
+                            .any(|(n, ..)| n.as_str() == p.as_str())
                     })
                     .map(|(p, e)| (cn.clone(), p.clone(), e.clone()))
                     .collect::<Vec<_>>()
             })
             .collect();
         for (cn, prop, init) in static_fixed_inits {
-            let Some(&(_, lo, hi, ew)) = self
-                .module
-                .classes
-                .get(&cn)
-                .and_then(|cd| cd.static_fixed_arrays.iter().find(|(n, ..)| *n == prop))
-            else {
-                continue;
-            };
-            let items: Vec<&Expression> = match &init.kind {
-                ExprKind::AssignmentPattern(items) => items.iter().map(|it| it.expr()).collect(),
-                _ => continue,
-            };
-            let key = format!("{}::{}", cn, prop);
-            self.class_context_stack.push(Some(cn.clone()));
-            for (i, item) in (lo..=hi).zip(items.iter()) {
-                let v = self.eval_expr(item).resize(ew.max(1));
-                self.signals.insert(format!("{}[{}]", key, i), v);
-            }
-            self.class_context_stack.pop();
+            self.initialize_class_fixed_array(&cn, &prop, &init);
         }
 
         // Run static property initializers that call functions, e.g. riscv-dv's

@@ -132,3 +132,97 @@ fn bind_inserted_static_init_is_per_instance() {
         "{out}"
     );
 }
+#[test]
+fn elaborated_init_generate() {
+    let source = r#"module leaf #(int P=2);string path=$sformatf("%m");string val=$sformatf("P=%0d",P);endmodule
+module top;
+for(genvar g=0;g<2;g++)begin:bank
+leaf#(g+3) u();
+end
+if(0)begin:disabled_branch leaf u();end
+initial begin #1;
+$display("T|gen %s %s %s %s",bank[0].u.path,bank[0].u.val,bank[1].u.path,bank[1].u.val);
+end endmodule
+"#;
+    let got = lines(source, "top");
+    assert!(
+        got.iter()
+            .any(|line| line == "T|gen top.bank[0].u P=3 top.bank[1].u P=4"),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn elaborated_init_instance_array() {
+    let source = r#"module leaf;string path=$sformatf("%m");endmodule
+module top;leaf u[1:0]();initial begin #1;
+$display("T|array %s %s",u[0].path,u[1].path);end endmodule
+"#;
+    let got = lines(source, "top");
+    assert!(
+        got.iter().any(|line| line == "T|array top.u[0] top.u[1]"),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn elaborated_init_interface() {
+    let source = r#"interface iface;string path=$sformatf("%m");endinterface
+module top;iface a();iface b();initial begin #1;
+$display("T|if %s %s",a.path,b.path);end endmodule
+"#;
+    let got = lines(source, "top");
+    assert!(got.iter().any(|line| line == "T|if top.a top.b"), "{got:?}");
+}
+
+#[test]
+fn elaborated_init_program() {
+    let source = r#"program punit;string path=$sformatf("%m");endprogram
+module top;punit a();punit b();initial begin #1;
+$display("T|prog %s %s",a.path,b.path);end endmodule
+"#;
+    let got = lines(source, "top");
+    assert!(
+        got.iter().any(|line| line == "T|prog top.a top.b"),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn elaborated_init_once() {
+    let source = r#"package p;int calls=0;function int bump();calls++;return calls;endfunction endpackage
+module leaf;string val=$sformatf("%0d",p::bump());endmodule
+module top;leaf a();leaf b();initial begin #1;
+$display("T|once %0d",p::calls);
+end endmodule
+"#;
+    let got = lines(source, "top");
+    assert!(got.iter().any(|line| line == "T|once 2"), "{got:?}");
+}
+
+#[test]
+fn elaborated_init_bind_generate() {
+    let source = r#"module host;endmodule
+module harness #(int P=7);string path=$sformatf("%m");string val=$sformatf("P=%0d",P);int rnd=$urandom_range(1,9999);endmodule
+bind host harness#(8) h();
+module top;
+for(genvar g=0;g<2;g++)begin:bank host u();end
+initial begin #1;
+$display("T|bindgen %s %s %s %s",bank[0].u.h.path,bank[0].u.h.val,bank[1].u.h.path,bank[1].u.h.val);
+$display("T|rand %0d %0d",bank[0].u.h.rnd,bank[1].u.h.rnd);
+end endmodule
+"#;
+    let got = lines(source, "top");
+    assert!(
+        got.iter()
+            .any(|line| line == "T|bindgen top.bank[0].u.h P=8 top.bank[1].u.h P=8"),
+        "{got:?}"
+    );
+    let rand = got
+        .iter()
+        .find(|line| line.starts_with("T|rand "))
+        .expect("random values printed");
+    for value in rand.split_whitespace().skip(1) {
+        assert!((1..=9999).contains(&value.parse::<u32>().expect("random integer")));
+    }
+}

@@ -3101,6 +3101,9 @@ impl Simulator {
                     self.assign_class_assoc_pattern(&scoped, val_w, items);
                     continue;
                 }
+                if self.initialize_class_constant_array(handle, &cdef.name, &pname) {
+                    continue;
+                }
                 // Only re-evaluate side-effect-free initializers. Ones that call
                 // a function or constructor (`= new`, `= f()`) can recurse or
                 // mutate state and are the constructor's job; leave their
