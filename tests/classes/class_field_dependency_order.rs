@@ -116,3 +116,232 @@ fn plain_class_field_initializers_are_untouched() {
     assert!(out.contains("LIT=literal"), "{out}");
     assert!(out.contains("LIT2=literal-tail"), "{out}");
 }
+#[test]
+fn field_initialization_call_after_plain() {
+    let source = r#"class C;
+ int root=$urandom_range(7,7);
+ int derived=root+1;
+ int snapshot=take(derived);
+ function int take(int n);return n;endfunction
+endclass
+module top;initial begin C c=new;$display("T|calls %0d %0d %0d",c.root,c.derived,c.snapshot);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|calls 7 8 8"]);
+}
+
+#[test]
+fn field_initialization_side_effect() {
+    let source = r#"package p;int calls=0;endpackage
+class C;
+ int root=$urandom_range(7,7);
+ int derived=root+p::calls++;
+endclass
+module top;initial begin C c=new;$display("T|effects %0d %0d %0d",c.root,c.derived,p::calls);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|effects 7 7 1"]);
+}
+
+#[test]
+fn field_initialization_cast() {
+    let source = r#"class C;
+ int root=$urandom_range(7,7);
+ int derived=int'(root)+1;
+endclass
+module top;initial begin C c=new;$display("T|cast %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|cast 7 8"]);
+}
+
+#[test]
+fn field_initialization_range() {
+    let source = r#"class C;
+ int root=$urandom_range(7,7);
+ int derived=root[7:0]+1;
+endclass
+module top;initial begin C c=new;$display("T|range %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|range 7 8"]);
+}
+
+#[test]
+fn field_initialization_multiple_dependencies() {
+    let source = r#"class C;
+ int root=$urandom_range(7,7);
+ int aa=root+1;
+ int bb=aa+1;
+ int cc=bb+1;
+ int dd=cc+1;
+ int ee=dd+1;
+ int ff=ee+1;
+ int gg=ff+1;
+ int hh=gg+1;
+ int ii=hh+1;
+ int jj=ii+1;
+ int kk=jj+1;
+ int ll=kk+1;
+ int mm=ll+1;
+ int nn=mm+1;
+ int result=root+nn;
+endclass
+module top;initial begin C c=new;$display("T|multiple %0d %0d %0d",c.root,c.nn,c.result);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|multiple 7 21 28"]);
+}
+
+#[test]
+fn field_initialization_explicit_this() {
+    let source = r#"class C;
+ int root=$urandom_range(7,7);
+ int derived=this.root+1;
+endclass
+module top;initial begin C c=new;$display("T|this %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|this 7 8"]);
+}
+
+#[test]
+fn field_initialization_inherited() {
+    let source = r#"class B;
+ int root=$urandom_range(7,7);
+endclass
+class C extends B;
+ int derived=root+1;
+endclass
+module top;initial begin C c=new;$display("T|inherit %0d %0d",c.root,c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|inherit 7 8"]);
+}
+
+#[test]
+fn field_initialization_function_result_types() {
+    let source = r#"package p;function int take();return -1;endfunction endpackage
+class C;
+ bit [3:0] narrow=p::take();
+ int unsigned u=p::take();
+ int signed s=p::take();
+ int snapshot=narrow+1;
+endclass
+module top;initial begin C c=new;$display("T|fit %0d %0d %0d %0d",c.narrow,c.u,c.s,c.snapshot);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|fit 15 4294967295 -1 16"]);
+}
+
+#[test]
+fn field_initialization_plain_context_width() {
+    let source = r#"class C;
+ int sum=1'b1+1'b1;
+ int integral=1.6;
+ real fractional=2;
+endclass
+module top;initial begin C c=new;$display("T|context %0d %0d %0.1f",c.sum,c.integral,c.fractional+0.5);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|context 2 2 2.5"]);
+}
+
+#[test]
+fn field_initialization_specialized_state() {
+    let source = r#"class C#(type T=int);
+ T v='x;
+ T next=v;
+endclass
+module top;initial begin C#(int) a=new;C#(integer) b=new;
+ $display("T|state %0d %0d %0d %0d",$isunknown(a.v),$isunknown(a.next),$isunknown(b.v),$isunknown(b.next));end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|state 0 0 1 1"]);
+}
+
+#[test]
+fn field_initialization_constructor_call_count() {
+    let source = r#"package p;int calls=0;function int tick();calls++;return calls;endfunction endpackage
+class C;
+ int first=p::tick();
+ int copied=first+1;
+ int last=p::tick()+copied;
+endclass
+module top;initial begin C a=new;C b=new;
+ $display("T|count %0d %0d %0d %0d %0d %0d %0d",a.first,a.copied,a.last,b.first,b.copied,b.last,p::calls);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|count 1 2 4 3 4 8 4"]);
+}
+
+#[test]
+fn field_initialization_array_call_count() {
+    let source = r#"package p;int calls=0;function int tick();calls++;return calls;endfunction endpackage
+class C;
+ int a[2]='{p::tick(),p::tick()};
+ int copied=a[0]+a[1];
+endclass
+module top;initial begin C c=new;
+ $display("T|arraycalls %0d %0d %0d %0d",c.a[0],c.a[1],c.copied,p::calls);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|arraycalls 1 2 3 2"]);
+}
+
+#[test]
+fn field_initialization_hidden_base() {
+    let source = r#"class B;
+ int root=$urandom_range(7,7);
+ int derived=root+1;
+ function int base_value();return derived;endfunction
+endclass
+class C extends B;
+ int root=$urandom_range(20,20);
+ int derived=root+2;
+endclass
+module top;initial begin C c=new;
+ $display("T|hidden %0d %0d",c.base_value(),c.derived);end endmodule
+"#;
+    let got = lines(source, "top")
+        .into_iter()
+        .filter(|s| s.starts_with("T|"))
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["T|hidden 8 22"]);
+}

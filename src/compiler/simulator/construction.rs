@@ -1593,102 +1593,39 @@ impl Simulator {
         out
     }
 
-    /// The names an initializer READS that could be sibling fields of the same
-    /// object: a bare `Ident` (`h`) and a `this.h` member access.  A deeper
-    /// hierarchical reference (`pkg.h`, `u.h`) names another scope, and an
-    /// expression with selects (`q[i]`) is not a plain field read, so neither is
-    /// collected — pulling those in would re-run an initializer that never
-    /// depended on this object's field.
-    fn collect_field_reads(e: &Expression, out: &mut Vec<String>) {
-        match &e.kind {
-            ExprKind::Ident(hier) => {
-                if hier.path.len() == 1 && hier.path[0].selects.is_empty() {
-                    out.push(hier.path[0].name.name.clone());
-                }
-            }
-            ExprKind::MemberAccess { expr, member } => {
-                if matches!(expr.kind, ExprKind::This) {
-                    out.push(member.name.clone());
-                } else {
-                    Self::collect_field_reads(expr, out);
-                }
-            }
-            ExprKind::Unary { operand, .. } => Self::collect_field_reads(operand, out),
-            ExprKind::Binary { left, right, .. } => {
-                Self::collect_field_reads(left, out);
-                Self::collect_field_reads(right, out);
-            }
-            ExprKind::Conditional {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                Self::collect_field_reads(condition, out);
-                Self::collect_field_reads(then_expr, out);
-                Self::collect_field_reads(else_expr, out);
-            }
-            ExprKind::Concatenation(parts) => {
-                for p in parts {
-                    Self::collect_field_reads(p, out);
-                }
-            }
-            ExprKind::Replication { count, exprs } => {
-                Self::collect_field_reads(count, out);
-                for e in exprs {
-                    Self::collect_field_reads(e, out);
-                }
-            }
-            ExprKind::Paren(inner) => Self::collect_field_reads(inner, out),
-            ExprKind::Index { expr, index } => {
-                Self::collect_field_reads(expr, out);
-                Self::collect_field_reads(index, out);
-            }
-            _ => {}
-        }
-    }
-
-    /// Evaluate an instance-property initializer that contains a function call
-    /// (`uvm_root r = uvm_root::get()`, `uvm_factory f = cs.get_factory()`,
-    /// etc.) at CONSTRUCTION time and store the result on the instance.
-    ///
-    /// Field initializers legally run at every construction (as if the first
-    /// statements of `new()`), but the main property-init loop skips
-    /// call-bearing initializers to avoid recursion. Singleton getter
-    /// initializers like these MUST run here: their elaborate-time value is
-    /// always null (the singletons don't exist during elaboration), so
-    /// skipping left every UVM test that caches `uvm_root::get()` /
-    /// `uvm_coreservice_t::get()` / `cs.get_factory()` as a field null, and
-    /// the factory-based tests (type/instance aliases + overrides) silently
-    /// registered nothing.
-    pub(super) fn evaluate_call_init_at_construct(
+    /// §8.7 / §10.7: evaluate a scalar property initializer once, in its
+    /// declared assignment context, while constructing the object.
+    fn evaluate_property_init_at_construct(
         &mut self,
         handle: usize,
         pname: &str,
         init: &Expression,
-        fit: bool,
-    ) -> bool {
-        // Guard: evaluating a field initializer may itself construct objects.
-        // Cap the depth so a pathological self-referential field init can't
-        // recurse without bound. 64 is far beyond any legitimate chain.
+        real: bool,
+    ) {
+        // An initializer may construct another object. Bound malformed
+        // self-recursive declarations without re-running any initializer.
         if self.construct_init_depth >= 64 {
-            return false;
+            return;
         }
+        let width = self.heap_prop_width(handle, pname);
         self.construct_init_depth += 1;
-        let mut v = self.eval_expr(init);
+        let value = if let Some(width) = width {
+            self.eval_expr_ctx(init, width)
+        } else {
+            self.eval_expr(init)
+        };
         self.construct_init_depth -= 1;
-        // An initializer is an assignment to the property (§8.7, §10.7): it
-        // takes the property's width in this specialization, as a store from
-        // a method body does — `bit [W-1:0] pc = W'(5)` is W bits wide.
-        // Only a parameterized chain (`fit`) can need it: elsewhere the
-        // stores were never fitted here and the common UVM handle
-        // initializers stay on the cheap path.
-        if fit && !v.is_real && !pname.contains("::") {
-            v = self.fit_class_prop(handle, pname, &v);
-        }
+        let value = if real {
+            Value::from_f64(value.to_f64())
+        } else if let Some(width) = width {
+            self.fit_pattern_item_value(value, width)
+        } else {
+            value
+        };
+        let value = self.fit_class_prop(handle, pname, &value);
         if let Some(Some(inst)) = self.heap.get_mut(handle) {
-            inst.properties.insert(pname.to_string(), v);
+            inst.properties.insert(pname.to_string(), value);
         }
-        true
     }
 
     pub(super) fn instantiate_class(
@@ -3007,17 +2944,20 @@ impl Simulator {
             // context unset, so `e_a v = DUP;` fell through to the flat
             // design-wide map and picked up an unrelated class's `DUP`.
             self.class_context_stack.push(Some(cdef.name.clone()));
-            let inits: Vec<(String, &Expression)> = cdef
+            // §8.7: every initializer runs once, in declaration order.
+            // Splitting calls from plain expressions lets later calls capture
+            // stale fields; replaying readers also repeats their side effects.
+            let mut inits: Vec<(String, &Expression)> = cdef
                 .property_inits
                 .iter()
                 .map(|(k, v)| (k.clone(), v))
                 .collect();
-            let mut deferred_call_inits: Vec<(String, Expression, String)> = Vec::new();
-            // §8.7 companion: the scalar initializers that contain NO call and so
-            // were evaluated in the loop below.  Recorded so the ones that READ a
-            // deferred field can be re-evaluated after it (see the note there).
-            // (pname, init, slot)
-            let mut plain_inits: Vec<(String, Expression, String)> = Vec::new();
+            inits.sort_by_key(|(name, _)| {
+                cdef.property_order
+                    .iter()
+                    .position(|p| p == name)
+                    .unwrap_or(usize::MAX)
+            });
             for (pname, init) in inits {
                 // A STATIC member is shared across all instances (it lives in
                 // `class_statics`, not per-instance), so it must NOT be
@@ -3028,6 +2968,9 @@ impl Simulator {
                 // (this=null) was parked on, and execution stalled after the
                 // first phase. The static-init path (compile()) allocates the
                 // single shared instance once.
+                if self.initialize_class_constant_array(handle, &cdef.name, &pname) {
+                    continue;
+                }
                 if cdef.static_properties.contains(&pname) {
                     continue;
                 }
@@ -3158,22 +3101,6 @@ impl Simulator {
                     let scoped = format!("{}#{}", handle, pname);
                     let val_w = cdef.properties.get(&pname).map(|s| s.width).unwrap_or(32);
                     self.assign_class_assoc_pattern(&scoped, val_w, items);
-                    continue;
-                }
-                if self.initialize_class_constant_array(handle, &cdef.name, &pname) {
-                    continue;
-                }
-                // Only re-evaluate side-effect-free initializers. Ones that call
-                // a function or constructor (`= new`, `= f()`) can recurse or
-                // mutate state and are the constructor's job; leave their
-                // elaborate-time value in place.
-                if Self::expr_contains_call(&init) {
-                    // Scalar (non-collection) call-bearing initializers are
-                    // re-evaluated at construction in a fixed point below so
-                    // field-order dependencies resolve (a later-declared field
-                    // can read an earlier one). Collected here and run after
-                    // the non-call initializers so singletons are up.
-                    deferred_call_inits.push((pname.clone(), init.clone(), slot));
                     continue;
                 }
                 // Queue / dynamic-array member initializer (`int q[$] =
@@ -3309,106 +3236,8 @@ impl Simulator {
                         continue;
                     }
                 }
-                // This is the plain scalar path: remember it (pname, init, slot)
-                // so a field that reads a deferred initializer can be redone
-                // after that initializer has run.
-                plain_inits.push((pname.clone(), init.clone(), slot.clone()));
-                let mut val = self.eval_expr(&init);
-                // §11.8.1: the re-evaluated initializer must be stamped with
-                // the PROPERTY's declared signedness and width, not the
-                // literal's. `bit [15:0] u = -1;` otherwise stored a signed
-                // value and `c.u > 0` compared as -1 rather than 65535.
-                //
-                // §8.25 / §6.20.2: the width is THIS specialization's —
-                // `bit [W-1:0] pv = '1` in `pbase #(8)` is 8 bits of 1s
-                // (§5.7.1 fills to the target), and `T data = '1` follows the
-                // type `T` is bound to — not the default-parameter width the
-                // class table records.
-                if let Some(sig) = cdef.properties.get(&pname) {
-                    if !sig.is_real && !val.is_real {
-                        let w = if chain_is_param {
-                            self.class_prop_width_impl(&cdef.name, Some(handle), &pname)
-                                .unwrap_or(sig.width)
-                        } else {
-                            sig.width
-                        };
-                        if w > 0 && val.width != w {
-                            val = val.resize(w);
-                        }
-                        val.is_signed = if sig
-                            .type_name
-                            .as_ref()
-                            .is_some_and(|t| cdef.type_param_names.contains(t))
-                        {
-                            self.class_prop_signed_of(handle, &pname)
-                        } else {
-                            sig.is_signed
-                        };
-                    }
-                }
-                if let Some(Some(inst)) = self.heap.get_mut(handle) {
-                    inst.properties.insert(slot, val);
-                }
-            }
-            // Fixed point over the deferred call-bearing instance property
-            // initializers. Field initializers legally run in DECLARATION order
-            // at construction; a later field may read an earlier one (e.g.
-            // `uvm_coreservice_t cs = uvm_coreservice_t::get();` then
-            // `uvm_factory factory = cs.get_factory();`). `property_inits` is an
-            // unordered map, so repeat the pass until a full round changes
-            // nothing — dependency chains settle regardless of iteration order.
-            // §8.7: field initializers run ONCE each, in DECLARATION order (as
-            // if they were the first statements of `new()`), so a later field
-            // may read an earlier one and an initializer with side effects
-            // (`int id = counter::take();`) fires exactly once. A fixed-point
-            // loop over the unordered map re-ran every initializer up to N+1
-            // times (reference: ids 1/2 3/4 5/6; the loop gave 5/6 11/12 17/18).
-            if !deferred_call_inits.is_empty() {
-                let order = &cdef.property_order;
-                deferred_call_inits.sort_by_key(|(pname, _, _)| {
-                    order.iter().position(|p| p == pname).unwrap_or(usize::MAX)
-                });
-                for (_, init, slot) in &deferred_call_inits {
-                    self.evaluate_call_init_at_construct(handle, slot, init, chain_is_param);
-                }
-            }
-            // §8.7 companion: a field whose initializer merely READS one of the
-            // deferred fields (`string h2 = {h, ".d"}` written after
-            // `string h = $sformatf("%m")`) contains no call, so the
-            // `expr_contains_call` filter above never revisits it — it kept the
-            // value folded while `h` still held its elaborate-time placeholder.
-            // Pull those readers in transitively (`d2` reads `d1` reads `d`) and
-            // evaluate each EXACTLY ONCE, in the order the dependencies settle,
-            // which is declaration order for a legal chain (§8.7: a field may
-            // only read an earlier one).
-            if !deferred_call_inits.is_empty() && !plain_inits.is_empty() {
-                let mut settled: Vec<String> = deferred_call_inits
-                    .iter()
-                    .map(|(p, _, _)| p.clone())
-                    .collect();
-                loop {
-                    let mut progressed = false;
-                    for (pname, init, slot) in &plain_inits {
-                        if settled.iter().any(|s| s == pname) {
-                            continue;
-                        }
-                        let mut reads: Vec<String> = Vec::new();
-                        Self::collect_field_reads(init, &mut reads);
-                        if reads.iter().any(|n| settled.iter().any(|s| s == n)) {
-                            self.evaluate_call_init_at_construct(
-                                handle,
-                                slot,
-                                init,
-                                chain_is_param,
-                            );
-                            settled.push(pname.clone());
-                            progressed = true;
-                        }
-                    }
-                    if !progressed {
-                        break;
-                    }
-                }
+                let real = cdef.properties.get(&pname).is_some_and(|sig| sig.is_real);
+                self.evaluate_property_init_at_construct(handle, &slot, init, real);
             }
             self.class_context_stack.pop();
         }
