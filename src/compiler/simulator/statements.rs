@@ -686,6 +686,7 @@ impl Simulator {
             && let Some((an, dims)) = self.fixed_dims_of_colls(array)
             && vars.len() == dims.len() + 1
             && vars[..dims.len()].iter().all(|v| v.is_some())
+            && vars.last().is_some_and(Option::is_some)
         {
             let names: Vec<Option<String>> = vars
                 .iter()
@@ -697,6 +698,9 @@ impl Simulator {
             let nd = dims.len();
             let mut idx: Vec<i64> = dims.iter().map(|d| d.0).collect();
             'elems: loop {
+                if self.finished || self.return_flag || self.disable_target.is_some() {
+                    break;
+                }
                 let en = idx
                     .iter()
                     .fold(an.clone(), |n, &i| Self::name_with_index(&n, i));
@@ -712,7 +716,9 @@ impl Simulator {
                             if is_str {
                                 Value::from_string(k)
                             } else if kw > 64 {
-                                Value::from_str_radix(k, 16, kw)
+                                let mut v = Value::from_str_radix(k, 16, kw);
+                                v.is_signed = signed;
+                                v
                             } else {
                                 let mut v =
                                     Value::from_u64(k.parse::<i64>().unwrap_or(0) as u64, kw);
@@ -727,7 +733,7 @@ impl Simulator {
                         .collect()
                 };
                 for kv in keys {
-                    if self.finished {
+                    if self.finished || self.return_flag || self.disable_target.is_some() {
                         break 'elems;
                     }
                     for (d, n) in names[..nd].iter().enumerate() {
@@ -753,8 +759,8 @@ impl Simulator {
                         break 'elems;
                     }
                     d -= 1;
-                    idx[d] += 1;
-                    if idx[d] <= dims[d].1 {
+                    if idx[d] != dims[d].1 {
+                        idx[d] += if dims[d].0 <= dims[d].1 { 1 } else { -1 };
                         break;
                     }
                     idx[d] = dims[d].0;

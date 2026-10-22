@@ -591,7 +591,7 @@ impl Simulator {
         for (d, ix) in idxs.into_iter().enumerate() {
             let i = self.eval_expr(ix).to_i64().unwrap_or(0);
             if let Some(b) = &bounds
-                && !(b[d].0..=b[d].1).contains(&i)
+                && !(b[d].0.min(b[d].1)..=b[d].0.max(b[d].1)).contains(&i)
             {
                 return None;
             }
@@ -648,7 +648,12 @@ impl Simulator {
                 break;
             };
             if let Some((shape, _, _)) = cd.array_of_coll_properties.get(&member) {
-                let bounds = fixed_only.then(|| shape.clone());
+                let bounds = fixed_only.then(|| {
+                    cd.array_prop_decl_dims
+                        .get(&member)
+                        .cloned()
+                        .unwrap_or_else(|| shape.clone())
+                });
                 return Some((handle, member, shape.len(), bounds));
             }
             if !fixed_only

@@ -232,3 +232,75 @@ endmodule",
     assert_line(&msgs, "handle_assoc n=2");
     assert_line(&msgs, "blk s=6 t=3");
 }
+
+// §12.7.3: fixed dimensions keep declaration order, even above collections.
+#[test]
+fn descending_module_collection_order() {
+    let msgs = messages(
+        r#"module top; int q[2:0][1:0][$];
+ initial begin
+ q[2][1].push_back(1);q[1][0].push_back(2);q[0][1].push_back(3);
+ foreach(q[i,j,k]) $display("T|order %0d %0d %0d",i,j,q[i][j][k]);
+ end endmodule"#,
+    );
+    let lines: Vec<_> = msgs
+        .iter()
+        .filter(|s| s.starts_with("T|"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(lines, ["T|order 2 1 1", "T|order 1 0 2", "T|order 0 1 3"]);
+}
+#[test]
+fn descending_inherited_class_collection_order() {
+    let msgs = messages(
+        r#"class base; int q[1:-1][1:0][$]; endclass
+ class child extends base;
+ function void run();
+ q[1][1].push_back(1);q[0][0].push_back(2);q[-1][1].push_back(3);
+ foreach(q[i,j,k]) $display("T|order %0d %0d %0d",i,j,q[i][j][k]);
+ endfunction endclass
+ module top;initial begin child h=new;h.run();end endmodule"#,
+    );
+    let lines: Vec<_> = msgs
+        .iter()
+        .filter(|s| s.starts_with("T|"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(lines, ["T|order 1 1 1", "T|order 0 0 2", "T|order -1 1 3"]);
+}
+#[test]
+fn string_keys_and_hierarchical_collection_base() {
+    let msgs = messages(
+        r#"module child;int a[2][2][string];
+ initial begin a[1][1]["b"]=2;a[1][1]["a"]=1;end endmodule
+ module top;child u();initial begin #1;
+ foreach(u.a[i,j,k]) $display("T|key %s %0d",k,u.a[i][j][k]);
+ end endmodule"#,
+    );
+    let lines: Vec<_> = msgs
+        .iter()
+        .filter(|s| s.starts_with("T|"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(lines, ["T|key a 1", "T|key b 2"]);
+}
+#[test]
+fn return_exits_all_collection_dimensions() {
+    let msgs = messages(
+        r#"class c; int q[2][2][$];
+ function int find();
+ q[0][1].push_back(17);q[1][1].push_back(23);
+ foreach(q[i,j,k]) return q[i][j][k]; return -1;
+ endfunction endclass
+ module top;initial begin c h=new;$display("T|return %0d",h.find());end endmodule"#,
+    );
+    assert_line(&msgs, "T|return 17");
+}
+#[test]
+fn omitted_trailing_collection_dimension_is_not_iterated() {
+    let msgs = messages(
+        r#"module top;int q[2][3][$];int n;
+ initial begin q[0][0].push_back(1);n=0;foreach(q[i,j,])n++;$display("T|outer %0d",n);end endmodule"#,
+    );
+    assert_line(&msgs, "T|outer 6");
+}

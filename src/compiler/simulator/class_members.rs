@@ -1605,10 +1605,18 @@ impl Simulator {
                 .chain(self.module.associative_arrays.keys());
             for n in names {
                 if let Some((root, _)) = n.split_once('[')
-                    && !root.contains(['.', '#'])
-                    && self.module.var_decl_types.contains_key(root)
+                    && !root.contains('#')
+                    && (self.module.var_decl_types.contains_key(root)
+                        || self.module.arrays.contains_key(root)
+                        || self.module.arrays_2d.contains_key(root)
+                        || self.module.arrays_nd.contains_key(root))
                 {
+                    // §12.7.3 / §23.8: a hierarchical module array is a
+                    // declared root too; leaf names are only probe hints.
                     set.insert(root.to_string());
+                    if let Some((_, leaf)) = root.rsplit_once('.') {
+                        set.insert(leaf.to_string());
+                    }
                 }
             }
             let mut work: Vec<DataType> = Vec::new();

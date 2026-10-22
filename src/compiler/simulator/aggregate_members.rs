@@ -2795,22 +2795,38 @@ impl Simulator {
         &mut self,
         array: &Expression,
     ) -> Option<(String, Vec<(i64, i64)>)> {
-        let ExprKind::Ident(h) = &array.kind else {
-            return None;
-        };
-        if h.path.iter().any(|s| !s.selects.is_empty())
-            || !self.indexed_coll_root(&h.path.last()?.name.name)
-        {
-            return None;
-        }
         if let Some(r) = self.class_fixed_array_of_coll_base(array) {
             return Some(r);
         }
-        if h.path.len() != 1 {
+        let flat;
+        let array = if matches!(array.kind, ExprKind::Ident(_)) {
+            array
+        } else {
+            flat = Self::member_chain_as_hier_ident(array)?;
+            &flat
+        };
+        let ExprKind::Ident(h) = &array.kind else {
+            return None;
+        };
+        if h.path.iter().any(|s| !s.selects.is_empty()) {
             return None;
         }
         let name = self.resolve_hier_name(h).into_owned();
-        let dims = self.foreach_dims(&name)?;
+        // This arm requires fixed outer dimensions, not a collection's
+        // allocated backing range.
+        if self.module.dynamic_arrays.contains(&name)
+            || self.module.associative_arrays.contains_key(&name)
+        {
+            return None;
+        }
+        let shape = self.foreach_dims(&name)?;
+        let dims = self
+            .module
+            .unpacked_decl_dims
+            .get(&name)
+            .filter(|dims| dims.len() == shape.len())
+            .cloned()
+            .unwrap_or(shape);
         let first = dims
             .iter()
             .fold(name.clone(), |n, d| Self::name_with_index(&n, d.0));
