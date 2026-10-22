@@ -511,3 +511,6 @@ mod const_fn_call_in_generate_if;
 
 #[path = "types/fixed_assoc_key_types.rs"]
 mod fixed_assoc_key_types;
+
+#[path = "types/body_type_parameters_498.rs"]
+mod body_type_parameters_498;
