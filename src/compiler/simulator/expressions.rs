@@ -1854,54 +1854,66 @@ impl Simulator {
         (self.recv_call_memo.len() > base).then_some(base)
     }
 
-    /// §8.4: the class object a hierarchical member path reads THROUGH, when it
-    /// has one.  In `tb.u_leaf.obj.field` the object is what `tb.u_leaf.obj`
-    /// stores; when that resolves to a live heap object the trailing segment is a
-    /// CLASS MEMBER and must come from the heap, not from the signal table —
-    /// otherwise a same-named flat signal silently wins and the object is never
-    /// read.  Returns `None` for any path whose parent is not a live object
-    /// (plain module, net, or struct paths), so those keep today's behavior.
+    /// §8.4/§23.7: resolve the declared class boundary before following
+    /// object properties. Integral values and unrelated leaf names cannot
+    /// establish a class boundary.
     pub(super) fn hier_parent_handle(
         &self,
         hier: &crate::ast::expr::HierarchicalIdentifier,
     ) -> Option<usize> {
-        if hier.path.len() < 2 || hier.path.iter().any(|s| !s.selects.is_empty()) {
+        if self.no_class_objects()
+            || hier.path.len() < 3
+            || hier.path.iter().any(|s| !s.selects.is_empty())
+            || self.bare_name_is_class_channel(&hier.path[0].name.name)
+        {
             return None;
         }
-        let parent_segs: Vec<&str> = hier.path[..hier.path.len() - 1]
-            .iter()
-            .map(|s| s.name.name.as_str())
-            .collect();
-        // id-collision-in-heap guard: the parent's VALUE may only be read back as
-        // a handle when the name statically denotes a class object.  A struct
-        // variable, a plain vector, or a hierarchical net also yields an integer
-        // here, and treating that as an index splices someone else's object.
-        // Composed names are registered relative to the TOP module (§23.7/§4c), so
-        // `tb.u_leaf.obj` is typed under `u_leaf.obj` — probe the same spellings
-        // the value lookup uses, or a legitimate hierarchical class variable is
-        // rejected and the read falls back to the flat signal table.
-        let denotes = {
-            let mut d = self.dotted_segments_denote_class_object(&parent_segs);
-            if !d {
-                let dotted = parent_segs.join(".");
-                if let Some(rest) = dotted.strip_prefix(&format!("{}.", self.module.name)) {
-                    let alt: Vec<&str> = rest.split('.').collect();
-                    d = self.dotted_segments_denote_class_object(&alt);
-                }
+        let segs: Vec<&str> = hier.path.iter().map(|s| s.name.name.as_str()).collect();
+        for split in (1..segs.len()).rev() {
+            let dotted = segs[..split].join(".");
+            let name = dotted
+                .strip_prefix(&format!("{}.", self.module.name))
+                .unwrap_or(&dotted);
+            let class = self
+                .module
+                .var_decl_types
+                .get(name)
+                .and_then(|dt| self.declared_typeref_name(dt))
+                .or_else(|| {
+                    self.module
+                        .signals
+                        .get(name)
+                        .and_then(|s| s.type_name.clone())
+                })
+                .or_else(|| {
+                    self.signal_name_to_id
+                        .get(name)
+                        .and_then(|id| self.signal_type_names.get(id).cloned())
+                })
+                .and_then(|tn| self.resolve_typeref_class_name_str(&tn));
+            let mut handle = if split == 1 && self.bare_name_is_class_channel(segs[0]) {
+                self.eval_ident_handle(segs[0])
+            } else if class.is_some() {
+                self.get_signal_value_by_name(name)
+                    .and_then(|v| v.to_u64())
+                    .map(|v| v as usize)
+            } else {
+                None
+            };
+            for member in &segs[split..segs.len() - 1] {
+                handle = handle.and_then(|h| {
+                    let tn = self.class_prop_type_name(h, member)?;
+                    self.resolve_typeref_class_name_str(&tn)?;
+                    self.member_handle(h, member)
+                });
             }
-            d
-        };
-        if !denotes {
-            return None;
+            if let Some(h) =
+                handle.filter(|&h| h != 0 && self.heap.get(h).is_some_and(|o| o.is_some()))
+            {
+                return Some(h);
+            }
         }
-        let parent = parent_segs.join(".");
-        let h = self
-            .get_signal_value_by_name(&parent)
-            .and_then(|v| v.to_u64())? as usize;
-        if h == 0 || h >= self.heap.len() || self.heap.get(h).and_then(|o| o.as_ref()).is_none() {
-            return None;
-        }
-        Some(h)
+        None
     }
 
     /// Evaluate expression with a context width hint (for proper shift sizing).
@@ -3162,6 +3174,24 @@ impl Simulator {
                             return val.clone();
                         }
                     }
+                    // §8.4: the object's own storage wins over the signal table.
+                    // `tb.u_leaf.obj.field` used to be looked up as the flat name
+                    // "tb.u_leaf.obj.field", which fell through to the leaf and
+                    // returned tb's own `field` signal — the object was never
+                    // consulted.  Only taken when the parent really is a live
+                    // object AND declares the member, so struct/net paths are
+                    // untouched.
+                    if let Some(h) = self.hier_parent_handle(hier) {
+                        let member_name = hier.path[hier.path.len() - 1].name.name.as_str();
+                        let via = hier.path[hier.path.len() - 2].name.name.as_str();
+                        let mut mval = self.static_read_via_handle(h, Some(via), None, member_name);
+                        if mval.is_none() {
+                            mval = self.read_member_value(h, member_name);
+                        }
+                        if let Some(mval) = mval {
+                            return mval;
+                        }
+                    }
                     // SV-2023: class-handle dereference. If a leading dotted
                     // prefix names a signal storing a class handle (e.g. a
                     // parameterized static like `registry#(byte)::singleton`),
@@ -3438,24 +3468,6 @@ impl Simulator {
                                     }
                                 }
                             }
-                        }
-                    }
-                    // §8.4: the object's own storage wins over the signal table.
-                    // `tb.u_leaf.obj.field` used to be looked up as the flat name
-                    // "tb.u_leaf.obj.field", which fell through to the leaf and
-                    // returned tb's own `field` signal — the object was never
-                    // consulted.  Only taken when the parent really is a live
-                    // object AND declares the member, so struct/net paths are
-                    // untouched.
-                    if let Some(h) = self.hier_parent_handle(hier) {
-                        let member_name = hier.path[hier.path.len() - 1].name.name.as_str();
-                        let via = hier.path[hier.path.len() - 2].name.name.as_str();
-                        let mut mval = self.static_read_via_handle(h, Some(via), None, member_name);
-                        if mval.is_none() {
-                            mval = self.read_member_value(h, member_name);
-                        }
-                        if let Some(mval) = mval {
-                            return mval;
                         }
                     }
                     // Handle hierarchical ident that might be class member access: obj.prop

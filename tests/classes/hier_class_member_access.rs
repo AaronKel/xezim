@@ -144,3 +144,159 @@ fn non_class_parents_stay_on_the_signal_path() {
     assert!(out.contains("PLAIN=5"), "{out}");
     assert!(out.contains("VEC=60"), "{out}");
 }
+
+#[test]
+fn basic_relative() {
+    let got = lines(r#"class C; int n=42; endclass module leaf; C obj=new; endmodule module top;leaf u();int n=99;initial begin #1;$display("T|%0d",u.obj.n);u.obj.n=7;$display("T|%0d",u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7"]);
+}
+
+#[test]
+fn nested_object() {
+    let got = lines(r#"class B;int n=42;endclass class C;B child=new;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;$display("T|%0d",top.u.obj.child.n);top.u.obj.child.n=7;$display("T|%0d",top.u.obj.child.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7"]);
+}
+
+#[test]
+fn nonclass_collision() {
+    let got = lines(r#"class C;int n=42;endclass typedef struct packed {int n;} P;module leaf;P p=1;endmodule module top;leaf u();C p=new;initial begin #1;$display("T|%0d",top.u.p.n);top.u.p.n=7;$display("T|%0d %0d",top.u.p.n,p.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|1", "T|7 42"]);
+}
+
+#[test]
+fn nonclass_struct_property() {
+    let got = lines(r#"class C;int n=42;endclass typedef struct packed {int n;} P;class D;P bits=1;endclass module leaf;D obj=new;endmodule module top;leaf u();initial begin #1;$display("T|%0d",top.u.obj.bits.n);top.u.obj.bits.n=7;$display("T|%0d",top.u.obj.bits.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|1", "T|7"]);
+}
+
+#[test]
+fn generated_handle() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;for(genvar i=0;i<2;i++)begin:g leaf u();end initial begin #1;$display("T|%0d",top.g[0].u.obj.n);top.g[0].u.obj.n=7;$display("T|%0d",top.g[0].u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7"]);
+}
+
+#[test]
+fn array_handle() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj[2];initial foreach(obj[i])obj[i]=new;endmodule module top;leaf u();initial begin #1;$display("T|%0d",top.u.obj[0].n);top.u.obj[0].n=7;$display("T|%0d",top.u.obj[0].n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7"]);
+}
+
+#[test]
+fn member_slice() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;$display("T|%0d",top.u.obj.n[3:0]);top.u.obj.n[3:0]=7;$display("T|%0d",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|10", "T|39"]);
+}
+
+#[test]
+fn object_shadow() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();C obj=new;initial begin #1;obj.n=99;$display("T|%0d",top.u.obj.n);top.u.obj.n=7;$display("T|%0d %0d",top.u.obj.n,obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7 99"]);
+}
+
+#[test]
+fn local_object_shadow() {
+    let got = lines(r#"class C;int n=42;endclass module top;C obj=new;initial begin C obj;obj=new;obj.n=7;$display("T|%0d %0d",obj.n,top.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|7 42"]);
+}
+
+#[test]
+fn formal_object_shadow() {
+    let got = lines(r#"class C;int n=42;endclass module top;C obj=new;C other=new;function automatic int f(C obj);obj.n=7;return obj.n;endfunction initial begin $display("T|%0d",f(other));$display("T|%0d %0d",obj.n,other.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|7", "T|42 7"]);
+}
+
+#[test]
+fn class_property_shadow() {
+    let got = lines(r#"class C;int n=42;endclass class D;C obj=new;function int f();obj.n=7;return obj.n;endfunction endclass module top;C obj=new;D d=new;initial begin $display("T|%0d",d.f());$display("T|%0d %0d",obj.n,d.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|7", "T|42 7"]);
+}
+
+#[test]
+fn nested_alias() {
+    let got = lines(r#"class B;int n=42;endclass typedef B A;class C;A child=new;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;$display("T|%0d",top.u.obj.child.n);top.u.obj.child.n=7;$display("T|%0d",top.u.obj.child.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7"]);
+}
+
+#[test]
+fn nested_inherited() {
+    let got = lines(r#"class B;int n=42;endclass class P;B child=new;endclass class C extends P;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;$display("T|%0d",top.u.obj.child.n);top.u.obj.child.n=7;$display("T|%0d",top.u.obj.child.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7"]);
+}
+
+#[test]
+fn nested_type_parameter() {
+    let got = lines(r#"class B;int n=42;endclass class C#(type T=B);T child=new;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;$display("T|%0d",top.u.obj.child.n);top.u.obj.child.n=7;$display("T|%0d",top.u.obj.child.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42", "T|7"]);
+}
+
+#[test]
+fn member_bit() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;top.u.obj.n[0]=1;$display("T|%0d",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|43"]);
+}
+
+#[test]
+fn member_indexed_up() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;top.u.obj.n[0+:4]=7;$display("T|%0d",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|39"]);
+}
+
+#[test]
+fn member_indexed_down() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;top.u.obj.n[3-:4]=7;$display("T|%0d",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|39"]);
+}
+
+#[test]
+fn member_unknown_select() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();logic [3:0] idx='x;initial begin #1;top.u.obj.n[idx+:4]=7;$display("T|%0d",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|42"]);
+}
+
+#[test]
+fn member_bound_once() {
+    let got = lines(r#"class C;int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();int calls=0;function int base();calls++;return 0;endfunction initial begin #1;top.u.obj.n[base()+:4]=7;$display("T|%0d %0d",top.u.obj.n,calls);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|39 1"]);
+}
+
+#[test]
+fn member_ascending() {
+    let got = lines(r#"class C;logic[0:7] n=8'ha5;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;top.u.obj.n[0:3]=4'h3;$display("T|%h",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|35"]);
+}
+
+#[test]
+fn member_offset() {
+    let got = lines(r#"class C;logic[7:4] n=4'ha;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;top.u.obj.n[5:4]=3;$display("T|%h",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|b"]);
+}
+
+#[test]
+fn member_partial_oob() {
+    let got = lines(r#"class C;logic[3:0] n=4'ha;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;top.u.obj.n[4:2]=7;$display("T|%h",top.u.obj.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|e"]);
+}
+
+#[test]
+fn hier_static_slice() {
+    let got = lines(r#"class C;static int n=42;endclass module leaf;C obj=new;endmodule module top;leaf u();initial begin #1;top.u.obj.n[3:0]=7;$display("T|%0d %0d",top.u.obj.n,C::n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|39 39"]);
+}
+
+#[test]
+fn nested_static_handle() {
+    let got = lines(r#"class B;int n=42;endclass class C;static B child=new;endclass module leaf;C obj=new;endmodule module top;leaf u();B other=new;initial begin #1;other.n=9;C::child=other;$display("T|%0d",top.u.obj.child.n);top.u.obj.child.n=7;$display("T|%0d %0d",top.u.obj.child.n,other.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|9", "T|7 7"]);
+}
+
+#[test]
+fn whole_struct() {
+    let got=lines(r#"typedef struct {int n;} P;class C;P data;function new();data.n=42;endfunction endclass module leaf;C obj=new;endmodule module top;leaf u();P t;initial begin #1;top.u.obj.data.n=7;t=top.u.obj.data;$display("T|%0d %0d",t.n,top.u.obj.data.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|7 7"]);
+}
+
+#[test]
+fn whole_static_struct() {
+    let got=lines(r#"typedef struct {int n;} P;class C;static P data;endclass module leaf;C obj=new;endmodule module top;leaf u();P t;initial begin #1;top.u.obj.data.n=7;t=top.u.obj.data;$display("T|%0d %0d",t.n,top.u.obj.data.n);end endmodule"#, "top").into_iter().filter(|line| line.starts_with("T|")).collect::<Vec<_>>();
+    assert_eq!(got, ["T|7 7"]);
+}
