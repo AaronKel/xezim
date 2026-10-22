@@ -568,7 +568,12 @@ impl Simulator {
             SvaNode::Seq(nfa, _) => inject(nfa),
             SvaNode::Impl { ante, .. } | SvaNode::Followed { ante, .. } => inject(ante),
             SvaNode::Not(inner) => Self::sva_inject_init(inner, init),
-            SvaNode::And(a, b) | SvaNode::Or(a, b) => {
+            SvaNode::And(a, b)
+            | SvaNode::Or(a, b)
+            | SvaNode::Iff(a, b)
+            | SvaNode::Until {
+                left: a, right: b, ..
+            } => {
                 Self::sva_inject_init(a, init);
                 Self::sva_inject_init(b, init);
             }
@@ -646,6 +651,39 @@ impl Simulator {
             ExprKind::Unary { op, operand } if matches!(op, UnaryOp::SAlways) => {
                 SvaNode::Always((**operand).clone())
             }
+            ExprKind::Binary { op, left, right }
+                if matches!(op, BinaryOp::Until | BinaryOp::SUntil) =>
+            {
+                let strong = matches!(op, BinaryOp::SUntil);
+                if !Self::sva_is_temporal(left)
+                    && !Self::sva_is_temporal(right)
+                    && !Self::sva_has_property_op(left)
+                    && !Self::sva_has_property_op(right)
+                {
+                    // Keep the constant-space NFA for Boolean operands.
+                    SvaNode::Seq(self.sva_build_seq(e), strong)
+                } else {
+                    SvaNode::Until {
+                        left: Box::new(self.sva_compile_node(left)),
+                        right: Box::new(self.sva_compile_node(right)),
+                        strong,
+                    }
+                }
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Iff,
+                left,
+                right,
+            } if Self::sva_is_temporal(left)
+                || Self::sva_is_temporal(right)
+                || Self::sva_has_property_op(left)
+                || Self::sva_has_property_op(right) =>
+            {
+                SvaNode::Iff(
+                    Box::new(self.sva_compile_node(left)),
+                    Box::new(self.sva_compile_node(right)),
+                )
+            }
             // §16.12.2 `strong(seq)` / `weak(seq)` as a property.
             ExprKind::SystemCall { name, args }
                 if matches!(name.as_str(), "$sva_strong" | "$sva_weak") && args.len() == 1 =>
@@ -695,6 +733,17 @@ impl Simulator {
             (SvaNode::Or(na, nb), SvaState::Or { a, b, ra, rb }) => {
                 Self::sva_op_fails(ra, na, a) && Self::sva_op_fails(rb, nb, b)
             }
+            (SvaNode::Iff(na, nb), SvaState::And { a, b, ra, rb }) => {
+                Self::sva_op_fails(ra, na, a) != Self::sva_op_fails(rb, nb, b)
+            }
+            (
+                SvaNode::Until {
+                    left,
+                    right,
+                    strong,
+                },
+                SvaState::Until { ticks, .. },
+            ) => Self::sva_until_fails_at_end(left, right, *strong, ticks),
             _ => false,
         }
     }
@@ -772,9 +821,15 @@ impl Simulator {
                 true
             }
             ExprKind::Binary { op, left, right } => {
-                matches!(op, BinaryOp::OrMinusArrow | BinaryOp::OrFatArrow)
-                    || (matches!(op, BinaryOp::SvaAnd | BinaryOp::SeqOr)
-                        && (Self::sva_has_property_op(left) || Self::sva_has_property_op(right)))
+                matches!(
+                    op,
+                    BinaryOp::OrMinusArrow
+                        | BinaryOp::OrFatArrow
+                        | BinaryOp::Until
+                        | BinaryOp::SUntil
+                        | BinaryOp::Iff
+                ) || (matches!(op, BinaryOp::SvaAnd | BinaryOp::SeqOr)
+                    && (Self::sva_has_property_op(left) || Self::sva_has_property_op(right)))
             }
             ExprKind::Unary { op, operand } => {
                 matches!(op, UnaryOp::SEventually | UnaryOp::SAlways)
@@ -814,7 +869,7 @@ impl Simulator {
                 ante_alive: true,
                 cons: Vec::new(),
             },
-            SvaNode::And(a, b) => SvaState::And {
+            SvaNode::And(a, b) | SvaNode::Iff(a, b) => SvaState::And {
                 a: Box::new(Self::sva_new_state(a, env)),
                 b: Box::new(Self::sva_new_state(b, env)),
                 ra: None,
@@ -825,6 +880,11 @@ impl Simulator {
                 b: Box::new(Self::sva_new_state(b, env)),
                 ra: None,
                 rb: None,
+            },
+            SvaNode::Until { .. } => SvaState::Until {
+                env: env.clone(),
+                ticks: Vec::new(),
+                closed: false,
             },
             SvaNode::Eventually(_) | SvaNode::Always(_) => SvaState::Leaf(env.clone()),
         }
@@ -1345,6 +1405,29 @@ impl Simulator {
                     (Some(_), Some(_)) => Some(SvaOutcome::Fail),
                     _ => None,
                 }
+            }
+            (SvaNode::Iff(na, nb), SvaState::And { a, b, ra, rb }) => {
+                if ra.is_none() {
+                    *ra = self.sva_advance(na, a);
+                }
+                if rb.is_none() {
+                    *rb = self.sva_advance(nb, b);
+                }
+                match (*ra, *rb) {
+                    (Some(a), Some(b)) => {
+                        Some(if (a == SvaOutcome::Fail) != (b == SvaOutcome::Fail) {
+                            SvaOutcome::Fail
+                        } else if a == SvaOutcome::Vacuous && b == SvaOutcome::Vacuous {
+                            SvaOutcome::Vacuous
+                        } else {
+                            SvaOutcome::Pass
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            (SvaNode::Until { left, right, .. }, SvaState::Until { env, ticks, closed }) => {
+                self.sva_advance_until(left, right, env, ticks, closed)
             }
             (SvaNode::Eventually(e), SvaState::Leaf(env)) => {
                 if self.sva_eval_env(e, env).is_true() {

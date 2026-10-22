@@ -2511,6 +2511,7 @@ mod aggregate_expressions;
 mod aggregate_members;
 mod arguments;
 mod assertions;
+mod sva_until;
 mod assignments;
 mod bytecode_runtime;
 mod calls;
@@ -3728,6 +3729,13 @@ enum SvaNode {
     },
     And(Box<SvaNode>, Box<SvaNode>),
     Or(Box<SvaNode>, Box<SvaNode>),
+    Iff(Box<SvaNode>, Box<SvaNode>),
+    /// §16.12.12: arbitrary properties are started at each candidate tick.
+    Until {
+        left: Box<SvaNode>,
+        right: Box<SvaNode>,
+        strong: bool,
+    },
     /// §16.12.6 `s_eventually e`: holds once `e` samples true.
     Eventually(Expression),
     /// §16.12.6 `s_always e`: fails the first tick `e` samples false.
@@ -3772,8 +3780,22 @@ enum SvaState {
         ra: Option<SvaOutcome>,
         rb: Option<SvaOutcome>,
     },
+    Until {
+        env: SvaEnv,
+        ticks: Vec<SvaUntilTick>,
+        closed: bool,
+    },
     /// `s_eventually` / `s_always`, with the attempt's local variables.
     Leaf(SvaEnv),
+}
+
+/// One candidate start point of a property-valued until operand.
+#[derive(Debug, Clone)]
+struct SvaUntilTick {
+    left: SvaState,
+    right: SvaState,
+    left_result: Option<SvaOutcome>,
+    right_result: Option<SvaOutcome>,
 }
 
 /// Thompson-style construction of `SvaNfa` fragments.
@@ -3966,12 +3988,10 @@ impl SvaNfaBuilder {
             SvaSeq::Throughout(e, a) => {
                 self.sub(SvaCompound::Throughout(e.clone(), Self::build(a)))
             }
-            SvaSeq::Until(a, b) => {
-                self.sub(SvaCompound::Until {
-                    left: Self::build(a),
-                    right: Self::build(b),
-                })
-            }
+            SvaSeq::Until(a, b) => self.sub(SvaCompound::Until {
+                left: Self::build(a),
+                right: Self::build(b),
+            }),
             SvaSeq::Within(a, b) => {
                 // §16.9.10: `(1[*0:$] ##1 a ##1 1[*0:$]) intersect b`.
                 let span = crate::ast::Span::dummy();

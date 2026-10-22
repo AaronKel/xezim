@@ -3704,12 +3704,18 @@ impl Simulator {
                 // Logical implication / equivalence (IEEE §11.4.7). The SVA
                 // `iff` (§16.12.8), `property_expr1 iff property_expr2`, is
                 // logical equivalence too: true iff both hold or both don't.
-                if matches!(op, BinaryOp::LogImplies | BinaryOp::LogEquiv | BinaryOp::Iff) {
+                if matches!(
+                    op,
+                    BinaryOp::LogImplies | BinaryOp::LogEquiv | BinaryOp::Iff
+                ) {
                     let l = self.eval_expr_ctx(left, ctx_width);
                     let r = self.eval_expr_ctx(right, ctx_width);
                     return match op {
                         BinaryOp::LogImplies => l.logic_impl(&r),
-                        BinaryOp::LogEquiv | BinaryOp::Iff => l.logic_equiv(&r),
+                        BinaryOp::LogEquiv => l.logic_equiv(&r),
+                        // §16.12.8: iff compares PROPERTY truth values. An
+                        // unknown Boolean expression is a failed property.
+                        BinaryOp::Iff => Value::from_u64(u64::from(l.is_true() == r.is_true()), 1),
                         _ => unreachable!(),
                     };
                 }
