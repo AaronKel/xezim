@@ -1875,18 +1875,40 @@ impl Simulator {
         Some(segs)
     }
 
-    /// LRM §25.9: build the `local_iface_aliases` entry (formal_name ->
-    /// bound_interface_instance) for a virtual-interface formal arg. Accepts a
-    /// formal whose type is `DataType::Interface` (the `virtual <iface>` form)
-    /// or a `TypeReference` naming a known interface; resolves the ACTUAL via
-    /// the vif binding so `<formal>.member` inside the callee dispatches to the
-    /// real interface (was: passing a vif arg yielded a 0/X member read).
-    /// Must be called while `this_stack` is the CALLER's context (where the
-    /// actual vif is bound).
+    /// §13.5.3 / §25.9: materialize a formal's interface identity while
+    /// its actual/default expression is still in the correct lexical scope.
+    pub(super) fn vif_argument_value(
+        &self,
+        port: &crate::ast::decl::FunctionPort,
+        expr: &Expression,
+        value: Value,
+    ) -> Value {
+        if !Self::formal_may_carry_vif(&port.data_type)
+            || !self.is_virtual_iface_type(&port.data_type)
+        {
+            return value;
+        }
+        if matches!(port.direction, crate::ast::types::PortDirection::Output) {
+            return Value::zero(32);
+        }
+        if value
+            .to_u64()
+            .and_then(|token| self.iface_by_token(token))
+            .is_some()
+        {
+            return value;
+        }
+        self.resolve_vif_rhs_name_strict(expr)
+            .map(|bound| Value::from_u64(Self::iface_handle_token(&bound), 32))
+            .unwrap_or(value)
+    }
+
+    /// §25.9: dispatch through the identity captured while binding the formal.
+    /// Only a supplied actual may fall back to its caller-scope name.
     pub(super) fn vif_formal_alias(
         &self,
         port: &crate::ast::decl::FunctionPort,
-        arg: &Expression,
+        arg: Option<&Expression>,
         locals: &HashMap<String, Value>,
     ) -> Option<(String, String)> {
         if !self.is_virtual_iface_type(&port.data_type) {
@@ -1897,12 +1919,15 @@ impl Simulator {
         if matches!(port.direction, crate::ast::types::PortDirection::Output) {
             return Some((formal.to_string(), String::new()));
         }
-        let bound = self.resolve_vif_rhs_name_strict(arg).or_else(|| {
-            // Calls and conditional actuals were evaluated while binding
-            // the ports. Recover that token without executing them again.
-            let token = locals.get(formal)?.to_u64().filter(|&token| token != 0)?;
-            self.iface_by_token(token).map(str::to_string)
-        });
+        // §13.5.3: omitted defaults were already evaluated in the declaration
+        // scope. Reuse their value rather than resolving them in the caller.
+        let bound = locals
+            .get(formal)
+            .and_then(|value| value.to_u64())
+            .filter(|&token| token != 0)
+            .and_then(|token| self.iface_by_token(token))
+            .map(str::to_string)
+            .or_else(|| arg.and_then(|arg| self.resolve_vif_rhs_name_strict(arg)));
         Some((formal.to_string(), bound.unwrap_or_default()))
     }
 
@@ -3206,9 +3231,34 @@ impl Simulator {
         if self.viface_var_aliases.is_empty() {
             return None; // fast path: no vif variables bound anywhere
         }
-        self.viface_var_aliases
-            .get(self.vif_variable_name(name).as_ref())
-            .cloned()
+        let bound = self
+            .viface_var_aliases
+            .get(self.vif_variable_name(name).as_ref())?;
+        // §23.9 / §8.4: a frame-local or class property hides an enclosing
+        // module variable. Formal aliases above still take precedence.
+        if self
+            .local_stack
+            .last()
+            .is_some_and(|frame| frame.contains_key(name))
+        {
+            return None;
+        }
+        let class = self
+            .this_stack
+            .last()
+            .copied()
+            .flatten()
+            .and_then(|handle| self.heap.get(handle).and_then(|object| object.as_ref()))
+            .map(|object| object.class_name.as_str())
+            .or_else(|| {
+                self.class_context_stack
+                    .last()
+                    .and_then(|class| class.as_deref())
+            });
+        if class.is_some_and(|class| self.class_vif_decl(class, name).is_some()) {
+            return None;
+        }
+        Some(bound.clone())
     }
 
     /// §26.3: the task a `pkg::t` callee names — the package-qualified key

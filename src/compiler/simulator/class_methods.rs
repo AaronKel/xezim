@@ -1275,7 +1275,16 @@ impl Simulator {
                 // omitted (`.name()` / positional `,,`) slot from the formal's
                 // default before positional binding below.
                 let normalized = Self::normalize_call_args(ports, args);
+                let supplied = normalized
+                    .as_ref()
+                    .map(|_| Self::supplied_argument_mask(ports, args));
                 let args: &[Expression] = normalized.as_deref().unwrap_or(args);
+                let arg_supplied = |i: usize| {
+                    i < args.len()
+                        && supplied
+                            .as_ref()
+                            .is_none_or(|mask| mask.get(i).copied().unwrap_or(false))
+                };
                 // A function may set its result via the implicit
                 // return variable named after the function (`f = ...`)
                 // instead of an explicit `return`.
@@ -1369,7 +1378,10 @@ impl Simulator {
                                 } else {
                                     self.port_class_ref(port).is_some()
                                 };
-                            (port.name.name.as_str(), args.get(i).filter(|_| !plain))
+                            (
+                                port.name.name.as_str(),
+                                args.get(i).filter(|_| arg_supplied(i)).filter(|_| !plain),
+                            )
                         })
                         .collect()
                 };
@@ -1412,7 +1424,10 @@ impl Simulator {
                     // §13.5.3: an omitted argument binds the formal's DEFAULT
                     // through the aggregate binders below, like a supplied
                     // actual (see `exec_function_call_body`).
-                    let actual = args.get(i).or_else(|| Self::default_actual(port));
+                    let actual = args
+                        .get(i)
+                        .filter(|_| arg_supplied(i))
+                        .or_else(|| Self::default_actual(port));
                     // An associative-array `output`/`inout`/`ref` formal
                     // is copied back via the assoc-param signal-namespace
                     // merge, NOT the scalar `output_bindings` path (which
@@ -1422,7 +1437,7 @@ impl Simulator {
                         PortDirection::Output | PortDirection::Inout | PortDirection::Ref
                     ) && !is_assoc
                     {
-                        if i < args.len() {
+                        if arg_supplied(i) {
                             output_bindings.push((port.name.name.clone(), args[i].clone()));
                         } else if let Some(d) = port
                             .default
@@ -1593,8 +1608,9 @@ impl Simulator {
                             continue;
                         }
                     }
-                    let mut val = if i < args.len() {
-                        self.eval_expr(&args[i])
+                    let mut val = if arg_supplied(i) {
+                        let value = self.eval_expr(&args[i]);
+                        self.vif_argument_value(port, &args[i], value)
                     } else if let Some(def) = &port.default {
                         // Caller omitted this arg → apply the formal's
                         // default (was using 0). UVM uvm_sequence_base::
@@ -1616,6 +1632,7 @@ impl Simulator {
                         self.class_context_stack.push(Some(cname.clone()));
                         self.push_local_frame_typed(locals.clone(), frame_types.clone());
                         let v = self.eval_expr(def);
+                        let v = self.vif_argument_value(port, def, v);
                         self.pop_local_frame();
                         self.class_context_stack.pop();
                         self.this_stack.pop();
@@ -1925,11 +1942,16 @@ impl Simulator {
                         // §13.5.3: an omitted argument binds the formal's
                         // DEFAULT, so a virtual-interface method formal with a
                         // default still aliases the interface it names.
-                        let arg = args.get(i).or(port.default.as_ref());
-                        if let Some(expr) = arg {
-                            if let Some((f, b)) = self
-                                .vif_formal_alias(port, expr, &locals)
-                            {
+                        let arg = args
+                            .get(i)
+                            .filter(|_| arg_supplied(i))
+                            .or(port.default.as_ref());
+                        if arg.is_some() {
+                            if let Some((f, b)) = self.vif_formal_alias(
+                                port,
+                                args.get(i).filter(|_| arg_supplied(i)),
+                                &locals,
+                            ) {
                                 iface_alias_frame.insert(f, b);
                             }
                         }

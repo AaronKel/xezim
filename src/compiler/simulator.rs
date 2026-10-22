@@ -4561,6 +4561,8 @@ struct TaskCleanup {
     /// (`active_task_pids`). None for frames without a stable name.
     task_name: Option<String>,
     output_bindings: Vec<(String, crate::ast::expr::Expression)>,
+    /// §13.5.3: omitted outputs copy back in the declaration's scope.
+    default_output_bindings: Vec<(String, crate::ast::expr::Expression)>,
     /// §25.9: flat binding slots shadowed by this task's formals.
     saved_vif_formals: Vec<(String, Option<Value>)>,
     assoc_params: Vec<(String, String, bool)>,

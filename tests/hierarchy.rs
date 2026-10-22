@@ -317,3 +317,6 @@ mod interface_port_hierarchy;
 
 #[path = "hierarchy/package_array_params.rs"]
 mod package_array_params;
+
+#[path = "hierarchy/vif_defaults_469.rs"]
+mod vif_defaults_469;
