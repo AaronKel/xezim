@@ -517,3 +517,6 @@ mod body_type_parameters_498;
 
 #[path = "types/procedural_bitwise_sign_500.rs"]
 mod procedural_bitwise_sign_500;
+
+#[path = "types/arithmetic_shift_xz.rs"]
+mod arithmetic_shift_xz;
