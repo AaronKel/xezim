@@ -414,6 +414,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   variables cannot redirect hierarchical struct accesses (§8.4, §11.5.1, §23.7).
   (#497 and #506, reported and contributed by Ganesh-TNL)
 
+* Unsigned expression types reach context-determined operands before nested
+  division, modulus and widening are evaluated (§11.8.1/§11.8.2). Compiled
+  expressions also recognize unbased fill literals as unsigned. Signed array
+  elements and increment/decrement results retain their declared types
+  (#501, reported by akashlevy).
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
