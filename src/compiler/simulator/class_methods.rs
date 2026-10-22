@@ -204,6 +204,7 @@ impl Simulator {
             let mut assoc_props: HashSet<String> = HashSet::default();
             let mut string_props: HashSet<String> = HashSet::default();
             let mut static_or_param: HashSet<String> = HashSet::default();
+            let mut constant_arrays: HashSet<String> = HashSet::default();
             let mut string_methods: HashSet<String> = HashSet::default();
             for cd in self.module.classes.values() {
                 for (name, cm) in cd.methods.iter() {
@@ -237,6 +238,12 @@ impl Simulator {
                         }
                     }
                 }
+                constant_arrays.extend(cd.array_properties.keys().filter(|name| {
+                    cd.param_order.contains(*name)
+                        || (cd.properties.get(*name).is_some_and(|s| s.is_const)
+                            && !cd.property_order.contains(*name))
+                }).cloned());
+                constant_arrays.extend(cd.static_fixed_arrays.iter().map(|(name, ..)| name.clone()));
                 static_methods.extend(cd.static_methods.iter().cloned());
                 params.extend(cd.type_param_names.iter().cloned());
                 params.extend(cd.param_order.iter().cloned());
@@ -354,6 +361,7 @@ impl Simulator {
                 assoc_props,
                 string_props,
                 static_or_param,
+                constant_arrays,
             }
         })
     }

@@ -4723,10 +4723,13 @@ impl Simulator {
                 r
             }
             ExprKind::Index { expr, index } => {
-                // §8.25: a specialized constant array is immutable class-scope
-                // storage. Resolve it before a placeholder instance property's
-                // packed-shape probe can reinterpret its element type as a bit.
-                if Self::expr_has_specialization(expr)
+                // §8.25: class constant arrays precede packed-property probes.
+                // The declaration-name cache excludes ordinary indexed reads
+                // before constructing or resolving a class-scope path.
+                if !self.module.classes.is_empty()
+                    && Self::receiver_prop_name(expr).is_some_and(|name| {
+                        self.class_member_names().constant_arrays.contains(name)
+                    })
                     && let Some(v) = self.class_param_array_element(expr, index)
                 {
                     return v;
@@ -4814,32 +4817,6 @@ impl Simulator {
                             .unwrap_or_else(|| Value::new(ew)),
                         None => Value::new(ew),
                     };
-                }
-                // §8.25/§6.20.2 (issue #423): an element read of a
-                // class-scope ARRAY constant — a header value parameter
-                // with unpacked dims (`C#(..)::TBL[i]`), a class localparam
-                // array (`C#(..)::LP[i]`, bare `LP[i]` inside a static
-                // method of the specialization), or a static array
-                // property spelled past two segments
-                // (`pkg::Cls::ARR[i]`). No arm above sees these: the value
-                // parameter folds to a scalar default, the localparam
-                // registers only as per-INSTANCE const properties, and the
-                // static-fixed arm above matches only the 2-segment
-                // `Cls::S` Ident — so the base resolved to a phantom
-                // scalar and the select read a bit of it. Materialize the
-                // specialization's elements on first read.
-                // A qualified class name can resolve to the same bare leaf
-                // as a module array. Only bypass the class lookup for a bare
-                // array whose name cannot denote a member of this class scope.
-                let ordinary_array = base_nm
-                    .as_deref()
-                    .is_some_and(|n| self.module.arrays.contains_key(n))
-                    && matches!(&expr.kind, ExprKind::Ident(h) if h.path.len() == 1
-                        && !((self.current_spec.is_some()
-                            || self.class_context_stack.last().is_some_and(|c| c.is_some()))
-                            && self.class_member_names().static_or_param.contains(&h.path[0].name.name)));
-                if !ordinary_array && let Some(v) = self.class_param_array_element(expr, index) {
-                    return v;
                 }
                 // §7.4.6 / §11.5.1: an x/z index reads x at the ELEMENT width,
                 // NOT element 0. `to_u64`/`to_i64` mask x bits to zero and

@@ -3381,6 +3381,8 @@ struct ClassMemberNames {
     /// Every static property and class `localparam` name: the only names
     /// `static_prop_key` can resolve.
     static_or_param: HashSet<String>,
+    /// Names of class constant arrays and fixed static arrays.
+    constant_arrays: HashSet<String>,
     /// Names `plain_ident_read` leaves to the full path: static, vif and
     /// struct-capable properties, and the UVM activity constants.
     ident_slow: HashSet<String>,
