@@ -364,6 +364,27 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Assertions and sampled-value functions continue to tick when their clock
   is reached through an interface port from a nested scope (§16.9.3, §23.8).
 
+* `foreach` walks fixed outer dimensions and each inner collection in
+  declaration order, including descending bounds, inherited properties and
+  hierarchical module arrays (§12.7.3). (#492, contributed by chenbhil)
+* Assertion actions read Preponed samples even when the property does not
+  read the operand. Omitted virtual-interface arguments bind their defaults
+  once in the declaration scope and preserve input/output identity (§16.9.3,
+  §13.5.3). (#468 and #469, reported by akashlevy;
+  #493 contributed by Thomasb81)
+* Assertion `until`, `s_until` and `iff` evaluate property operands and pending
+  obligations, with strong end-of-simulation failure and Boolean X/Z truth
+  handling (§16.12.8, §16.12.12). Pure constraints in concrete classes and
+  parameter initializers that read specify parameters receive scoped
+  diagnostics (§18.5.2, §6.20.5). Recompile saved designs to refresh their
+  declaration metadata. (#493 and core #81, contributed by Thomasb81)
+* Compilation-unit constant functions are available to program and interface
+  constants, including parameter headers (§13.4.3).
+  (#488, reported by Dragon-Git)
+* Body type parameters retain widths, aliases, signing and class
+  specializations. Module instances bind their own type overrides (§6.20.3,
+  §8.3). (#498, reported by Dragon-Git)
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
