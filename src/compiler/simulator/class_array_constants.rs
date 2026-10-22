@@ -264,6 +264,19 @@ impl Simulator {
         // §8.25: a typedef carries its specialization too. Keep the receiver
         // even for a default/nonparameterized derived class, so an inherited
         // constant follows its extends bindings rather than the base defaults.
+        // A package qualification and its bare class spelling describe
+        // one specialization. Normalize the extracted base before following
+        // inheritance; serialized aliases do not share Arc identity.
+        let spec = spec.map(|(base, sig)| {
+            if start_class
+                .rsplit_once("::")
+                .is_some_and(|(_, leaf)| leaf == base)
+            {
+                (start_class.clone(), sig)
+            } else {
+                (base, sig)
+            }
+        });
         let spec = spec
             .or_else(|| resolved_sig.map(|s| (start_class.clone(), s)))
             .or_else(|| self.current_spec.clone().filter(|(b, _)| *b == start_class))

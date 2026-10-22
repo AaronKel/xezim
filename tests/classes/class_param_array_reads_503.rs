@@ -407,3 +407,76 @@ module top;initial begin C c=new;$display("T|derivedshadow %0d %0d",c.read(),B::
         .collect::<Vec<_>>();
     assert_eq!(got, ["T|derivedshadow 7 1"]);
 }
+
+#[test]
+fn class_array_package_cache_and_artifact() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!(
+        "xezim-class-array-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(dir.clone());
+    std::fs::write(
+        dir.join("input.sv"),
+        r#"
+package p;
+  class C #(int N=3);
+    localparam int A[2]='{N,N+1};
+  endclass
+endpackage
+module top;
+  initial $display("T|array %0d %0d",p::C#(7)::A[1],p::C#()::A[0]);
+endmodule
+"#,
+    )
+    .unwrap();
+    let run = |args: &[&str], expected: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_xezim"))
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        let actual = text
+            .lines()
+            .filter(|line| line.starts_with("T|"))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{text}");
+    };
+    run(&["--no-cache", "-s", "top", "input.sv"], &["T|array 8 3"]);
+    for _ in 0..2 {
+        run(
+            &["--cache-dir", "cache", "-s", "top", "input.sv"],
+            &["T|array 8 3"],
+        );
+    }
+    run(
+        &[
+            "--compile",
+            "--no-cache",
+            "-s",
+            "top",
+            "-o",
+            "input.xez",
+            "input.sv",
+        ],
+        &[],
+    );
+    run(&["--simulate", "input.xez"], &["T|array 8 3"]);
+}
