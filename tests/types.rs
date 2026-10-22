@@ -514,3 +514,6 @@ mod fixed_assoc_key_types;
 
 #[path = "types/body_type_parameters_498.rs"]
 mod body_type_parameters_498;
+
+#[path = "types/procedural_bitwise_sign_500.rs"]
+mod procedural_bitwise_sign_500;
