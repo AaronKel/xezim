@@ -785,3 +785,5 @@ mod class_param_array_reads_503;
 
 #[path = "classes/class_field_dependency_order.rs"]
 mod class_field_dependency_order;
+#[path = "classes/hier_class_member_access.rs"]
+mod hier_class_member_access;
