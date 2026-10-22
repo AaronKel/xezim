@@ -2128,23 +2128,70 @@ impl Simulator {
                 }
             }
             SK::TimingControl { stmt, .. } => self.sva_collect_action_sampled(stmt, out),
-            SK::For { body, .. }
-            | SK::While { body, .. }
-            | SK::DoWhile { body, .. }
-            | SK::Repeat { body, .. }
-            | SK::Forever { body }
-            | SK::Foreach { body, .. } => self.sva_collect_action_sampled(body, out),
+            SK::For {
+                init,
+                condition,
+                step,
+                body,
+            } => {
+                for init in init {
+                    match init {
+                        crate::ast::stmt::ForInit::VarDecl { init, .. } => {
+                            self.sva_collect_action_sampled_expr(init, out)
+                        }
+                        crate::ast::stmt::ForInit::Assign { lvalue, rvalue } => {
+                            self.sva_collect_action_sampled_expr(lvalue, out);
+                            self.sva_collect_action_sampled_expr(rvalue, out);
+                        }
+                    }
+                }
+                if let Some(condition) = condition {
+                    self.sva_collect_action_sampled_expr(condition, out);
+                }
+                for expr in step {
+                    self.sva_collect_action_sampled_expr(expr, out);
+                }
+                self.sva_collect_action_sampled(body, out);
+            }
+            SK::While { condition, body } | SK::DoWhile { body, condition } => {
+                self.sva_collect_action_sampled_expr(condition, out);
+                self.sva_collect_action_sampled(body, out);
+            }
+            SK::Repeat { count, body } => {
+                self.sva_collect_action_sampled_expr(count, out);
+                self.sva_collect_action_sampled(body, out);
+            }
+            SK::Forever { body } | SK::Foreach { body, .. } => {
+                self.sva_collect_action_sampled(body, out)
+            }
             SK::Case { expr, items, .. } => {
                 self.sva_collect_action_sampled_expr(expr, out);
                 for it in items {
+                    for pattern in &it.patterns {
+                        self.sva_collect_action_sampled_expr(pattern, out);
+                    }
+                    if let Some(guard) = &it.guard {
+                        self.sva_collect_action_sampled_expr(guard, out);
+                    }
                     self.sva_collect_action_sampled(&it.stmt, out);
                 }
             }
-            SK::BlockingAssign { rvalue, .. } => {
-                self.sva_collect_action_sampled_expr(rvalue, out)
+            SK::BlockingAssign { lvalue, rvalue }
+            | SK::NonblockingAssign { lvalue, rvalue, .. } => {
+                self.sva_collect_action_sampled_expr(lvalue, out);
+                self.sva_collect_action_sampled_expr(rvalue, out);
             }
-            SK::NonblockingAssign { rvalue, .. } => {
-                self.sva_collect_action_sampled_expr(rvalue, out)
+            SK::VarDecl { declarators, .. } => {
+                for d in declarators {
+                    if let Some(init) = &d.init {
+                        self.sva_collect_action_sampled_expr(init, out);
+                    }
+                }
+            }
+            SK::Return(Some(expr)) => self.sva_collect_action_sampled_expr(expr, out),
+            SK::Wait { condition, stmt } => {
+                self.sva_collect_action_sampled_expr(condition, out);
+                self.sva_collect_action_sampled(stmt, out);
             }
             SK::Expr(e) => self.sva_collect_action_sampled_expr(e, out),
             _ => {}
@@ -2164,11 +2211,17 @@ impl Simulator {
                     self.sva_collect_action_sampled_expr(a, out);
                 }
             }
-            ExprKind::Binary { left, right, .. } => {
+            ExprKind::Binary { left, right, .. }
+            | ExprKind::AssignExpr {
+                lvalue: left,
+                rvalue: right,
+            } => {
                 self.sva_collect_action_sampled_expr(left, out);
                 self.sva_collect_action_sampled_expr(right, out);
             }
-            ExprKind::Unary { operand, .. } | ExprKind::Paren(operand) => {
+            ExprKind::Unary { operand, .. }
+            | ExprKind::Paren(operand)
+            | ExprKind::MemberAccess { expr: operand, .. } => {
                 self.sva_collect_action_sampled_expr(operand, out)
             }
             ExprKind::Conditional {
@@ -2194,9 +2247,29 @@ impl Simulator {
                 self.sva_collect_action_sampled_expr(left, out);
                 self.sva_collect_action_sampled_expr(right, out);
             }
-            ExprKind::Concatenation(exprs) | ExprKind::Replication { exprs, .. } => {
+            ExprKind::Replication { count, exprs } => {
+                self.sva_collect_action_sampled_expr(count, out);
                 for a in exprs {
                     self.sva_collect_action_sampled_expr(a, out);
+                }
+            }
+            ExprKind::Concatenation(exprs) | ExprKind::StreamOp { exprs, .. } => {
+                for a in exprs {
+                    self.sva_collect_action_sampled_expr(a, out);
+                }
+            }
+            ExprKind::AssignmentPattern(items) => {
+                for item in items {
+                    self.sva_collect_action_sampled_expr(item.expr(), out);
+                }
+            }
+            ExprKind::NamedArg {
+                expr: Some(expr), ..
+            } => self.sva_collect_action_sampled_expr(expr, out),
+            ExprKind::Inside { expr, ranges } => {
+                self.sva_collect_action_sampled_expr(expr, out);
+                for range in ranges {
+                    self.sva_collect_action_sampled_expr(range, out);
                 }
             }
             _ => {}

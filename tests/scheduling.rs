@@ -371,3 +371,6 @@ mod sva_event_lists;
 
 #[path = "scheduling/nested_vacuity_445.rs"]
 mod nested_vacuity_445;
+
+#[path = "scheduling/sampled_action_468.rs"]
+mod sampled_action_468;
