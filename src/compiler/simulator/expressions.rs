@@ -1936,7 +1936,7 @@ impl Simulator {
     }
 
     /// Declared expression signedness without executing conditional arms or
-    /// calls. Consulted only when a nested shift needs type propagation.
+    /// calls. Context-determined operands need this type before evaluation.
     #[inline(never)]
     pub(super) fn expression_signed_hint(&mut self, expr: &Expression) -> Option<bool> {
         fn joint(left: Option<bool>, right: Option<bool>) -> Option<bool> {
@@ -1969,8 +1969,60 @@ impl Simulator {
                     })
             }),
             ExprKind::Paren(e) => self.expression_signed_hint(e),
+            ExprKind::Index { .. } => {
+                let mut root = expr;
+                let mut indices = 0;
+                loop {
+                    match &root.kind {
+                        ExprKind::Index { expr, .. } => {
+                            indices += 1;
+                            root = expr;
+                        }
+                        ExprKind::Paren(inner) => root = inner,
+                        _ => break,
+                    }
+                }
+                let ExprKind::Ident(h) = &root.kind else {
+                    return None;
+                };
+                if self.frame_bound_bare_name(h).is_some() {
+                    return self
+                        .get_expr_type_name(expr)
+                        .and_then(|name| self.concrete_type_signed(&name));
+                }
+                let name = self.resolve_hier_name(h);
+                let unpacked = if let Some((dims, _)) = self.module.arrays_nd.get(name.as_ref()) {
+                    dims.len()
+                } else if self.module.arrays_2d.contains_key(name.as_ref()) {
+                    2
+                } else {
+                    usize::from(
+                        self.module.arrays.contains_key(name.as_ref())
+                            || self.module.dynamic_arrays.contains(name.as_ref())
+                            || self.module.queue_vars.contains(name.as_ref())
+                            || self.is_associative_array(name.as_ref()),
+                    )
+                };
+                if indices > unpacked {
+                    // More indices can enter a nested queue or associative
+                    // row. Only a known scalar signal proves a packed select;
+                    // unknown class/local storage must retain its own type.
+                    return (unpacked == 0 && self.module.signals.contains_key(name.as_ref()))
+                        .then_some(false);
+                }
+                self.module.var_decl_types.get(name.as_ref()).map(|dt| {
+                    super::elaborate::is_type_signed_resolved(dt, &self.module.typedef_types)
+                })
+            }
             ExprKind::Unary {
-                op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot,
+                op:
+                    UnaryOp::Plus
+                    | UnaryOp::Minus
+                    | UnaryOp::BitNot
+                    | UnaryOp::PreIncr
+                    | UnaryOp::PreDecr
+                    | UnaryOp::PostIncr
+                    | UnaryOp::PostDecr,
                 operand,
             } => self.expression_signed_hint(operand),
             ExprKind::Unary { .. } => Some(false),
@@ -4159,33 +4211,39 @@ impl Simulator {
                     }
                     pre_r = Some(r0);
                 }
-                // §11.8.2: propagate unsigned type into nested shifts before
-                // their operands widen. Type probes never execute calls.
+                // §11.8.2: propagate unsigned type before nested arithmetic
+                // runs or its operands widen. Type probes never execute calls.
                 let joint_unsigned = if is_arith_or_bitwise
                     || matches!(op, BinaryOp::Div | BinaryOp::Mod)
                     || is_comparison
                 {
                     (!is_comparison && unsigned_context)
-                        || (has_shift
-                            && (pre_l
+                        || (pre_l
+                            .as_ref()
+                            .map(|v| v.is_signed)
+                            .or_else(|| self.expression_signed_hint(left))
+                            == Some(false)
+                            || pre_r
                                 .as_ref()
                                 .map(|v| v.is_signed)
-                                .or_else(|| self.expression_signed_hint(left))
-                                == Some(false)
-                                || pre_r
-                                    .as_ref()
-                                    .map(|v| v.is_signed)
-                                    .or_else(|| self.expression_signed_hint(right))
-                                    == Some(false)))
+                                .or_else(|| self.expression_signed_hint(right))
+                                == Some(false))
                 } else if widens_left {
                     unsigned_context
                 } else {
                     false
                 };
+                let literal_comparison = matches!(
+                    op,
+                    BinaryOp::CaseEq
+                        | BinaryOp::CaseNeq
+                        | BinaryOp::WildcardEq
+                        | BinaryOp::WildcardNeq
+                );
                 let left_unsigned =
-                    joint_unsigned && (!is_comparison || super::bytecode::has_context_shift(left));
+                    joint_unsigned && !(literal_comparison && Self::expr_is_signed_literal(left));
                 let right_unsigned =
-                    joint_unsigned && (!is_comparison || super::bytecode::has_context_shift(right));
+                    joint_unsigned && !(literal_comparison && Self::expr_is_signed_literal(right));
                 let mut l = match pre_l.take() {
                     Some(mut v) => {
                         if left_unsigned && !v.is_real {
@@ -4464,10 +4522,8 @@ impl Simulator {
                 }
                 let c = self.eval_expr(condition);
                 let arms_unsigned = unsigned_context
-                    || ((super::bytecode::has_context_shift(then_expr)
-                        || super::bytecode::has_context_shift(else_expr))
-                        && (self.expression_signed_hint(then_expr) == Some(false)
-                            || self.expression_signed_hint(else_expr) == Some(false)));
+                    || self.expression_signed_hint(then_expr) == Some(false)
+                    || self.expression_signed_hint(else_expr) == Some(false);
                 let arm_ctx = if arms_unsigned {
                     ctx_width
                         .max(self.lrm_self_width(then_expr).unwrap_or(0))
