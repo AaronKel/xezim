@@ -522,3 +522,6 @@ mod relaxed_static_initializers_351;
 mod string_casts_391;
 #[path = "misc/undefined_macro_recovery.rs"]
 mod undefined_macro_recovery;
+
+#[path = "misc/constant_scopes_488.rs"]
+mod constant_scopes_488;
