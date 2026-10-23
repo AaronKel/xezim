@@ -465,6 +465,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   names, aliases and same-named declarations (§15.5, §26.3), including triggers
   from package tasks (#526, contributed by aionhw). Saved compiled designs
   affected by package event name collisions require recompilation.
+* Package typedef aliases and imports retain collection dimensions and
+  packed element widths (§6.18, §26.3), including queues inside associative
+  arrays of structs and same-named scalar aliases. This completes the
+  xezim-core #83 namespace follow-up and preserves the #323 case reported
+  by Ganesh-TNL.
 
 **Performance**
 
