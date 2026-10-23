@@ -85,25 +85,51 @@ impl Simulator {
         Some(out)
     }
 
-    /// Instance prefix for resolving bare array names in the current process.
-    pub(super) fn process_scope_for_arrays(&self) -> Option<String> {
-        self.process_scope_hint
-            .get(&self.current_pid)
-            .cloned()
-            .or_else(|| self.name_resolve_hint.borrow().clone())
-            .filter(|s| !s.is_empty())
-    }
-
     pub(super) fn resolve_type_width_in_process_scope(
-        &self,
+        &mut self,
         dt: &crate::ast::types::DataType,
     ) -> u32 {
-        crate::compiler::scoped_arrays::resolve_type_width_with_instance_arrays(
+        use crate::compiler::scoped_arrays;
+        let mut view = HashMap::default();
+        for arg in scoped_arrays::query_operands(dt) {
+            let Some(name) = scoped_arrays::operand_name(arg) else {
+                continue;
+            };
+            let lexical = self.dyn_name_lookup(&name).map(str::to_string);
+            let scope = self
+                .name_resolve_hint
+                .borrow()
+                .clone()
+                .or_else(|| self.process_scope_hint.get(&self.current_pid).cloned());
+            let canonical = lexical
+                .or_else(|| {
+                    scope.as_ref().and_then(|scope| {
+                        let key = format!("{scope}.{name}");
+                        self.module.arrays.contains_key(&key).then_some(key)
+                    })
+                })
+                .or_else(|| self.array_operand_name(arg))
+                .or_else(|| self.module.arrays.contains_key(&name).then(|| name.clone()))
+                .or_else(|| {
+                    let key = name.replace('.', "::");
+                    self.module.arrays.contains_key(&key).then_some(key)
+                });
+            if let Some((key, shape)) = canonical.and_then(|key| {
+                self.module
+                    .arrays
+                    .get(&key)
+                    .copied()
+                    .map(|shape| (key, shape))
+            }) {
+                view.insert(name, shape);
+                view.insert(key, shape);
+            }
+        }
+        scoped_arrays::resolve_type_width(
             dt,
             Some(&self.module.parameters),
             Some(&self.module.typedefs),
-            self.process_scope_for_arrays().as_deref(),
-            &self.module.arrays,
+            &view,
         )
     }
 

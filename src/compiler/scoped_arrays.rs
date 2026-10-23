@@ -1,53 +1,97 @@
-//! Overlay instance-qualified `module.arrays` entries onto bare names for
-//! const-eval of `$size`/`$clog2` in block-local packed dimensions.
+//! Array-query operands needed to size a procedural declaration (§20.7).
 
-use crate::ast::types::DataType;
-use xezim_core::Value;
-use xezim_core::elaborate;
-use xezim_core::hasher::HashMap;
+use crate::ast::{
+    expr::{ExprKind, Expression},
+    types::{DataType, PackedDimension},
+};
+use xezim_core::{Value, elaborate, hasher::HashMap};
 
-/// Build an `ARRAYS_TLS` view where `scope.name` entries override bare `name`.
-pub(crate) fn arrays_view_for_instance_scope(
-    scope: &str,
-    arrays: &HashMap<String, (i64, i64, u32)>,
-) -> HashMap<String, (i64, i64, u32)> {
-    let mut view = arrays.clone();
-    let pref = format!("{}.", scope);
-    for (k, v) in arrays {
-        if let Some(rest) = k.strip_prefix(&pref)
-            && !rest.contains('.')
-            && !rest.contains('#')
-        {
-            view.insert(rest.to_string(), *v);
+/// Only range expressions can need array metadata. Scalar declarations return
+/// without allocating or scanning the design's array table.
+pub(crate) fn query_operands(dt: &DataType) -> Vec<&Expression> {
+    fn dimensions<'a>(dims: &'a [PackedDimension], out: &mut Vec<&'a Expression>) {
+        for d in dims {
+            if let PackedDimension::Range { left, right, .. } = d {
+                for e in [left, right] {
+                    crate::type_lint::visit_expr(e, &mut |e| {
+                        if let ExprKind::SystemCall { name, args } = &e.kind
+                            && matches!(
+                                name.as_str(),
+                                "$size"
+                                    | "$left"
+                                    | "$right"
+                                    | "$low"
+                                    | "$high"
+                                    | "$increment"
+                                    | "$dimensions"
+                                    | "$unpacked_dimensions"
+                                    | "$bits"
+                            )
+                            && let Some(arg) = args.first()
+                        {
+                            out.push(arg);
+                        }
+                    });
+                }
+            }
         }
     }
-    view
+    fn walk<'a>(dt: &'a DataType, out: &mut Vec<&'a Expression>) {
+        match dt {
+            DataType::IntegerVector { dimensions: d, .. }
+            | DataType::Implicit { dimensions: d, .. }
+            | DataType::TypeReference { dimensions: d, .. } => dimensions(d, out),
+            DataType::Struct(s) => {
+                dimensions(&s.dimensions, out);
+                for member in &s.members {
+                    walk(&member.data_type, out);
+                }
+            }
+            DataType::Enum(e) => {
+                dimensions(&e.dimensions, out);
+                if let Some(base) = &e.base_type {
+                    walk(base, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(dt, &mut out);
+    out
 }
 
-fn instance_has_scoped_array_keys(
-    scope: &str,
-    arrays: &HashMap<String, (i64, i64, u32)>,
-) -> bool {
-    let pref = format!("{}.", scope);
-    arrays.keys().any(|k| k.starts_with(&pref))
+pub(crate) fn operand_name(expr: &Expression) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Paren(e) => operand_name(e),
+        ExprKind::MemberAccess { expr, member } => {
+            Some(format!("{}.{}", operand_name(expr)?, member.name))
+        }
+        ExprKind::Ident(h) if h.root.is_none() && h.path.iter().all(|s| s.selects.is_empty()) => {
+            Some(
+                h.path
+                    .iter()
+                    .map(|s| s.name.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("."),
+            )
+        }
+        _ => None,
+    }
 }
 
-/// `resolve_type_width` with the current process/instance array shapes visible
-/// to `$size`/`$left`/… in packed dimension const-eval.
-pub(crate) fn resolve_type_width_with_instance_arrays(
+/// The caller resolves lexical names first. The temporary table contains only
+/// queried arrays, so installing it never copies unrelated design metadata.
+pub(crate) fn resolve_type_width(
     dt: &DataType,
     params: Option<&HashMap<String, Value>>,
     typedefs: Option<&HashMap<String, u32>>,
-    scope: Option<&str>,
     arrays: &HashMap<String, (i64, i64, u32)>,
 ) -> u32 {
     let run = || elaborate::resolve_type_width(dt, params, typedefs);
-    let Some(scope) = scope.filter(|s| !s.is_empty()) else {
-        return run();
-    };
-    if !instance_has_scoped_array_keys(scope, arrays) {
-        return run();
+    if arrays.is_empty() {
+        run()
+    } else {
+        elaborate::with_arrays(arrays, run)
     }
-    let view = arrays_view_for_instance_scope(scope, arrays);
-    elaborate::with_arrays(&view, run)
 }

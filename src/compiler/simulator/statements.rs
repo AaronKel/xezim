@@ -2864,6 +2864,12 @@ impl Simulator {
                 } else {
                     bare.clone()
                 };
+                if name == bare
+                    && let Some(frame) = self.local_dyn.last_mut()
+                    && !frame.iter().any(|(local, _)| local == &bare)
+                {
+                    frame.push((bare.clone(), name.clone()));
+                }
                 self.module.arrays.insert(name.clone(), (lo, hi, w));
                 if descending {
                     self.module.descending_arrays.insert(name.clone());

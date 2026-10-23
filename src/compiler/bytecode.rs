@@ -7118,15 +7118,7 @@ impl<'a> BytecodeCompiler<'a> {
                 span,
             } = cur
             else {
-                return factor.saturating_mul(
-                    crate::compiler::scoped_arrays::resolve_type_width_with_instance_arrays(
-                        cur,
-                        self.params,
-                        self.typedefs,
-                        inst_scope,
-                        self.arrays,
-                    ),
-                );
+                return factor.saturating_mul(self.decl_width_with_arrays(cur, inst_scope));
             };
             if !type_args.is_empty() || name.has_specialized_scope() {
                 break;
@@ -7138,15 +7130,7 @@ impl<'a> BytecodeCompiler<'a> {
                 dimensions: dimensions.clone(),
                 span: *span,
             };
-            factor = factor.saturating_mul(
-                crate::compiler::scoped_arrays::resolve_type_width_with_instance_arrays(
-                    &dims,
-                    self.params,
-                    self.typedefs,
-                    inst_scope,
-                    self.arrays,
-                ),
-            );
+            factor = factor.saturating_mul(self.decl_width_with_arrays(&dims, inst_scope));
             if self.runtime_type_param(name, owner) {
                 return crate::compiler::elaborate::resolve_type_width(dt, self.params, None);
             }
@@ -7165,13 +7149,36 @@ impl<'a> BytecodeCompiler<'a> {
                 break;
             }
         }
-        crate::compiler::scoped_arrays::resolve_type_width_with_instance_arrays(
-            dt,
-            self.params,
-            self.typedefs,
-            inst_scope,
-            self.arrays,
-        )
+        self.decl_width_with_arrays(dt, inst_scope)
+    }
+
+    fn decl_width_with_arrays(&self, dt: &crate::ast::types::DataType, scope: Option<&str>) -> u32 {
+        use crate::compiler::scoped_arrays;
+        let mut view = HashMap::default();
+        for arg in scoped_arrays::query_operands(dt) {
+            let Some(name) = scoped_arrays::operand_name(arg) else {
+                continue;
+            };
+            let shape = if let Some(local) = self.local_var_array.get(&name) {
+                Some((
+                    local.lo,
+                    local.lo + local.regs.len() as i64 - 1,
+                    local.elem_w,
+                ))
+            } else if let Some(&(_, width, len, lo)) = self.local_array_regs.get(&name) {
+                Some((lo, lo + len as i64 - 1, width))
+            } else {
+                scope
+                    .and_then(|scope| self.arrays.get(&cat_dot(scope, &name)))
+                    .or_else(|| self.arrays.get(&name))
+                    .or_else(|| self.arrays.get(&name.replace('.', "::")))
+                    .copied()
+            };
+            if let Some(shape) = shape {
+                view.insert(name, shape);
+            }
+        }
+        scoped_arrays::resolve_type_width(dt, self.params, self.typedefs, &view)
     }
 
     /// Packed ELEMENT width of a declared type, for register-backed locals:
