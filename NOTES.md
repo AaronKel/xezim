@@ -6,7 +6,7 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 # What's new in 0.11
 
-### Unreleased
+### 0.11.3 — hierarchy, interfaces, assertions and collection correctness (October 2026)
 
 **Correctness**
 
@@ -495,6 +495,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   after enough interpreted loop iterations, including `foreach`; default
   admission continues to use call counts. (#326, contributed by Thomasb81)
 
+* The integrated correctness fixes use 1.18% more host instructions on AXI4
+  and 0.004% more on C906 CoreMark than the previous main revision
+  (`5cd31ee5`). Outputs match, and C906 guest cycles are unchanged. These
+  measurements cover two interleaved AXI4 pairs and one C906 pair with one
+  CoreMark iteration; they do not establish a general performance trend.
+
 **Command line**
 
 * `--tee <file>` copies stdout/stderr and DPI/VPI output to a transcript while
@@ -516,6 +522,20 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * Shortened simulation windows and optimized dependency test builds reduce
   regression runtime. Coverage analysis stops on failed or unprofiled tests.
   (#458, contributed by Thomasb81)
+
+**Validation**
+
+* The integrated fixes at `290911d5`, pinned to xezim-core `247ee9e`, pass
+  5,412 default debug tests in CI, with one existing ignored test, plus two
+  JIT smoke tests. Core and parser CI pass 98 and 142 tests respectively.
+  The 32 DPI tests pass on Linux's nested-scheduler fallback and on macOS
+  with both fibers and the fallback. Both repositories pass their minimum
+  supported Rust version checks.
+* Local release checks pass 4,830 related simulator tests, 98 core tests and
+  142 parser tests. Production-build checks pass 211 saved-design and cache
+  checks across 24 fixtures, six AVIP workloads, and C906 hello with output
+  identical to the saved reference. The C906 CoreMark comparison also
+  preserves the full program output and 295,294 guest cycles.
 
 ### 0.11.2 — class, collection and DPI parity fixes, `-uvm`, crash-safe FST dumps (October 2026)
 

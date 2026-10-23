@@ -81,7 +81,7 @@
 
 **Open**
 - Apache 2.0 licensed, developed in the open
-- More than 4,500 regression tests, many checked against a commercial
+- More than 5,400 regression tests, many checked against a commercial
   reference simulator
 - Built with AI assistance as part of the engineering workflow
 
@@ -180,8 +180,7 @@ with few, very hot blocks (Ibex CoreMark −23%), so measure it on yours.
 - **UVM:** the mbits-mirafra AVIP base tests for AXI4, APB, I3C, SPI and
   AXI4-Lite print the same UVM messages as a commercial reference simulator,
   and 32 of 35 UVM 1800.2-2017 example testbenches pass.
-- **Regression suite:** more than 4,500 tests, run in CI with and without the
-  JIT. Many are differential tests whose expected values were measured on a
+- **Regression suite:** 5,412 default tests and two JIT smoke tests run in CI. Many are differential tests whose expected values were measured on a
   commercial reference simulator; see [CONTRIBUTING.md](CONTRIBUTING.md#test-suites).
 
 ## Documentation
@@ -221,13 +220,8 @@ The project was previously developed under the name `sisSIM`.
 
 ## Contributors
 
-Thank you to everyone who has contributed code to xezim: Thomas Burg,
-Vrajesh Prakhya, Oscar Gustafsson, Chen Ben Haroosh, Jayaraman RP, Ganesh T S,
-eenky, Francesco Urbani, Taichi Ishitani and AaronKel.
-
-Detailed bug reports from AaronKel, bharathnaruto-spec, chenbhil, Dragon-Git,
-Ganesh-TNL, jjts, overcookedlobster, rharikrishna25, soronpo, taichi-ishitani,
-urbanij and vrajeshprakhya have driven much of xezim's conformance work.
+Thank you to everyone who contributes code, tests and bug reports to xezim
+and xezim-core.
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for what each person contributed, and
 [CONTRIBUTING.md](CONTRIBUTING.md) to get involved.
