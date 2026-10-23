@@ -4293,6 +4293,9 @@ impl Simulator {
                         v.is_signed = false;
                     }
                     v
+                } else if matches!(op, BinaryOp::Power) {
+                    // §11.6.1: the exponent keeps its own width as well as type.
+                    self.eval_expr_ctx(right, 0)
                 } else if is_shift_op {
                     let rw = self.infer_width(right);
                     self.eval_expr_ctx(right, rw)
