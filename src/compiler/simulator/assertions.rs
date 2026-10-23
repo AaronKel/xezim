@@ -712,7 +712,11 @@ impl Simulator {
     /// from a nonvacuous one; a failure must be judged from the node/state
     /// itself, because `not` of a vacuous success fails vacuously while a
     /// failing sequence or implication whose antecedent matched is nonvacuous.
-    fn sva_op_nonvacuous(resolved: &Option<SvaOutcome>, node: &SvaNode, st: &SvaState) -> bool {
+    pub(super) fn sva_op_nonvacuous(
+        resolved: &Option<SvaOutcome>,
+        node: &SvaNode,
+        st: &SvaState,
+    ) -> bool {
         match resolved {
             Some(SvaOutcome::Pass) => true,
             Some(SvaOutcome::Vacuous) => false,
@@ -736,20 +740,20 @@ impl Simulator {
                 SvaNode::Impl { .. } | SvaNode::Followed { .. },
                 SvaState::Impl { nonvacuous, .. } | SvaState::Followed { nonvacuous, .. },
             ) => *nonvacuous,
-            (SvaNode::Not(inner), SvaState::Not(ist)) => {
-                Self::sva_attempt_nonvacuous(inner, ist)
-            }
+            (SvaNode::Not(inner), SvaState::Not(ist)) => Self::sva_attempt_nonvacuous(inner, ist),
             (SvaNode::Or(na, nb), SvaState::Or { a, b, ra, rb }) => {
                 Self::sva_op_nonvacuous(ra, na, a) || Self::sva_op_nonvacuous(rb, nb, b)
             }
             (SvaNode::And(na, nb), SvaState::And { a, b, ra, rb }) => {
-                Self::sva_op_nonvacuous(ra, na, a) && Self::sva_op_nonvacuous(rb, nb, b)
+                Self::sva_op_nonvacuous(ra, na, a) || Self::sva_op_nonvacuous(rb, nb, b)
             }
-            // §16.14.8: `P iff Q` is nonvacuous iff P and Q have differing
-            // vacuity (one attempt vacuous, the other nonvacuous).
+            // §16.14.8: either operand makes `iff` nonvacuous.
             (SvaNode::Iff(na, nb), SvaState::And { a, b, ra, rb }) => {
-                Self::sva_op_nonvacuous(ra, na, a) != Self::sva_op_nonvacuous(rb, nb, b)
+                Self::sva_op_nonvacuous(ra, na, a) || Self::sva_op_nonvacuous(rb, nb, b)
             }
+            (SvaNode::Until { .. }, SvaState::Until { nonvacuous, .. }) => *nonvacuous,
+            (SvaNode::Eventually(_), SvaState::Leaf(_))
+            | (SvaNode::Always(_), SvaState::Leaf(_)) => true,
             _ => false,
         }
     }
@@ -1485,8 +1489,8 @@ impl Simulator {
                 match (*ra, *rb) {
                     (Some(_), Some(_)) => {
                         let fails = *ra == Some(SvaOutcome::Fail) && *rb == Some(SvaOutcome::Fail);
-                        let nonvacuous =
-                            Self::sva_op_nonvacuous(ra, na, a) || Self::sva_op_nonvacuous(rb, nb, b);
+                        let nonvacuous = Self::sva_op_nonvacuous(ra, na, a)
+                            || Self::sva_op_nonvacuous(rb, nb, b);
                         Some(if fails {
                             SvaOutcome::Fail
                         } else if nonvacuous {
@@ -1505,11 +1509,13 @@ impl Simulator {
                 if rb.is_none() {
                     *rb = self.sva_advance(nb, b);
                 }
+                let nonvacuous =
+                    Self::sva_op_nonvacuous(ra, na, a) || Self::sva_op_nonvacuous(rb, nb, b);
                 match (*ra, *rb) {
                     (Some(a), Some(b)) => {
                         Some(if (a == SvaOutcome::Fail) != (b == SvaOutcome::Fail) {
                             SvaOutcome::Fail
-                        } else if a == SvaOutcome::Vacuous && b == SvaOutcome::Vacuous {
+                        } else if !nonvacuous {
                             SvaOutcome::Vacuous
                         } else {
                             SvaOutcome::Pass
@@ -1518,9 +1524,15 @@ impl Simulator {
                     _ => None,
                 }
             }
-            (SvaNode::Until { left, right, .. }, SvaState::Until { env, ticks, nonvacuous, closed }) => {
-                self.sva_advance_until(left, right, env, nonvacuous, ticks, closed)
-            }
+            (
+                SvaNode::Until { left, right, .. },
+                SvaState::Until {
+                    env,
+                    ticks,
+                    nonvacuous,
+                    closed,
+                },
+            ) => self.sva_advance_until(left, right, env, nonvacuous, ticks, closed),
             (SvaNode::Eventually(e), SvaState::Leaf(env)) => {
                 if self.sva_eval_env(e, env).is_true() {
                     Some(SvaOutcome::Pass)
@@ -2423,7 +2435,7 @@ impl Simulator {
             ExprKind::Unary { operand, .. }
             | ExprKind::Paren(operand)
             | ExprKind::MemberAccess { expr: operand, .. } => {
-                self.sva_collect_action_sampled_expr(operand, out, sels) 
+                self.sva_collect_action_sampled_expr(operand, out, sels)
             }
             ExprKind::Conditional {
                 condition,

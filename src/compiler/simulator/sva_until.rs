@@ -49,11 +49,11 @@ impl Simulator {
                     Some(SvaOutcome::Fail),
                 )
             ) {
-                // A failing right operand is nonvacuous (a sequence attempt is
-                // always nonvacuous), so every foldable tick makes the
-                // attempt nonvacuous. Pop it from the front.
+                // A failed property can be vacuous (for example `not` of a
+                // vacuous implication). Retain its recursive nonvacuity.
+                *nonvacuous |= Self::sva_op_nonvacuous(&l, left, &front.left)
+                    || Self::sva_op_nonvacuous(&r, right, &front.right);
                 ticks.pop_front();
-                *nonvacuous = true;
                 continue;
             }
             break;
@@ -67,13 +67,12 @@ impl Simulator {
         for tick in ticks.iter() {
             // §16.14.8(v/w): either operand may make an eligible tick
             // nonvacuous; two vacuous implications remain vacuous.
-            acc_nonvacuous |= matches!(tick.left_result, Some(SvaOutcome::Pass | SvaOutcome::Fail))
-                || matches!(tick.right_result, Some(SvaOutcome::Pass | SvaOutcome::Fail))
-                || (tick.left_result.is_none() && matches!(left, SvaNode::Seq(..)))
-                || (tick.right_result.is_none() && matches!(right, SvaNode::Seq(..)));
+            acc_nonvacuous |= Self::sva_op_nonvacuous(&tick.left_result, left, &tick.left)
+                || Self::sva_op_nonvacuous(&tick.right_result, right, &tick.right);
             if tick.right_result != Some(SvaOutcome::Fail) {
                 possible = true;
                 if tick.right_result.is_some() && !prefix_pending {
+                    *nonvacuous = acc_nonvacuous;
                     return Some(if acc_nonvacuous {
                         SvaOutcome::Pass
                     } else {
