@@ -325,3 +325,5 @@ mod vif_defaults_469;
 
 #[path = "hierarchy/static_init_dependency_order.rs"]
 mod static_init_dependency_order;
+#[path = "hierarchy/review_static_init_dependencies.rs"]
+mod review_static_init_dependencies;

@@ -386,3 +386,9 @@ mod or_vacuity_508;
 
 #[path = "scheduling/until_folding_510.rs"]
 mod until_folding_510;
+
+#[path = "scheduling/review_assertion_vacuity.rs"]
+mod review_assertion_vacuity;
+
+#[path = "scheduling/review_action_sampling.rs"]
+mod review_action_sampling;

@@ -794,3 +794,9 @@ mod randomize_std_static_subroutine_locals;
 mod class_field_dependency_order;
 #[path = "classes/hier_class_member_access.rs"]
 mod hier_class_member_access;
+
+#[path = "classes/review_array_constants.rs"]
+mod review_array_constants;
+
+#[path = "classes/review_randomize_rollback.rs"]
+mod review_randomize_rollback;

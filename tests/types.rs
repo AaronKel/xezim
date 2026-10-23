@@ -534,5 +534,17 @@ mod child_param_packed_elem_width;
 #[path = "types/unsigned_context_501.rs"]
 mod unsigned_context_501;
 
+#[path = "types/review_qualified_enum_casts.rs"]
+mod review_qualified_enum_casts;
+
+#[path = "types/review_exponent_width.rs"]
+mod review_exponent_width;
+
+#[path = "types/review_local_query_widths.rs"]
+mod review_local_query_widths;
+
+#[path = "types/review_nested_struct_params.rs"]
+mod review_nested_struct_params;
+
 #[path = "types/struct_param_override.rs"]
 mod struct_param_override;
