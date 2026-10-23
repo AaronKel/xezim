@@ -4355,6 +4355,9 @@ impl Simulator {
                     Some(e) => {
                         let mut ids = Vec::new();
                         self.collect_sva_signal_ids(&e, &mut ids);
+                        ids.sort_unstable();
+                        ids.dedup();
+                        let index_saved = self.install_preponed(&ids);
                         // §16.5.1: an element of an unpacked array has no
                         // "signal id" through collect_sva_signal_ids, but its
                         // Preponed sample lives at the cell's id in
@@ -4368,6 +4371,7 @@ impl Simulator {
                         let saved = self.install_preponed(&ids);
                         let v = self.eval_expr(&e);
                         self.restore_preponed(saved);
+                        self.restore_preponed(index_saved);
                         v
                     }
                     None => Value::zero(32),
