@@ -533,3 +533,6 @@ mod child_param_packed_elem_width;
 
 #[path = "types/unsigned_context_501.rs"]
 mod unsigned_context_501;
+
+#[path = "types/struct_param_override.rs"]
+mod struct_param_override;
