@@ -650,10 +650,27 @@ module top; import p::*;
 endmodule
 "#;
     // Expected values from the reference simulator.
-    let expected = [
-        "T|mt x hits=1 t=8",
-        "T|run x hits=1 t=8",
-        "T|init back t=8",
-    ];
+    let expected = ["T|mt x hits=1 t=8", "T|run x hits=1 t=8", "T|init back t=8"];
     assert_eq!(t_lines(src), expected);
+}
+
+/// §23.8: a process in a descendant instance cannot change the object's home.
+#[test]
+fn module_class_task_does_not_bind_a_descendant_callers_task() {
+    let source = r#"package p;
+ virtual class fw_if; pure virtual task run(); endclass
+endpackage
+module caller; import p::*; fw_if peer; int wrong;
+ task automatic mt(); #1; wrong++; endtask
+ initial begin #3; peer.run(); end
+endmodule
+module owner; import p::*; int hits;
+ task automatic mt(); #5; hits++; $display("T|owner hits=%0d t=%0t",hits,$time); endtask
+ class C extends fw_if; virtual task run(); mt(); endtask endclass
+ fw_if obj; caller sub();
+ initial begin C created=new; obj=created; sub.peer=obj; end
+endmodule
+module top; owner u(); initial begin #20;
+ $display("T|final %0d %0d",u.hits,u.sub.wrong); $finish; end endmodule"#;
+    assert_eq!(t_lines(source), ["T|owner hits=1 t=8", "T|final 1 0"]);
 }

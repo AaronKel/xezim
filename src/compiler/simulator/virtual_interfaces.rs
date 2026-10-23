@@ -1800,7 +1800,7 @@ impl Simulator {
 
     /// The instance subroutine key a BARE `name` called from a method of a
     /// class declared inside a (non-top) module names: `name` under the
-    /// object's instance (or the resolve hint inside it) or its nearest
+    /// object's instance or its nearest
     /// ancestor scope that declares it (§23.8). None outside such a method,
     /// so other bare calls are unchanged.
     pub(super) fn class_module_subroutine_key(&self, name: &str) -> Option<String> {
@@ -1822,15 +1822,9 @@ impl Simulator {
             .copied()
             .flatten()
             .and_then(|h| self.modclass_instance(h));
-        let start = match (inst, hint) {
-            (Some(i), Some(h))
-                if h == i || h.strip_prefix(i.as_str()).is_some_and(|r| r.starts_with('.')) =>
-            {
-                h
-            }
-            (Some(i), _) => i,
-            (None, h) => h?,
-        };
+        // A descendant caller still belongs to another lexical module scope.
+        // Its same-named task cannot override the object's declaring module.
+        let start = inst.or(hint)?;
         let mut scope = start.as_str();
         loop {
             let cand = format!("{}.{}", scope, name);

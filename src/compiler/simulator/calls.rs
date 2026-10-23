@@ -3448,7 +3448,10 @@ impl Simulator {
             // it silently.
             if hier.path.len() == 1
                 && self.module_class_method_active()
-                && self.class_member_names().subroutine_suffixes.contains(name.as_str())
+                && self
+                    .class_member_names()
+                    .subroutine_suffixes
+                    .contains(name.as_str())
             {
                 self.warn_system_task_once(
                     &format!("call:{}", name),
