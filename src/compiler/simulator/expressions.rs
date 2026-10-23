@@ -4242,8 +4242,10 @@ impl Simulator {
                 );
                 let left_unsigned =
                     joint_unsigned && !(literal_comparison && Self::expr_is_signed_literal(left));
-                let right_unsigned =
-                    joint_unsigned && !(literal_comparison && Self::expr_is_signed_literal(right));
+                // §11.6.1: an exponent is self-determined and keeps its type.
+                let right_unsigned = joint_unsigned
+                    && !matches!(op, BinaryOp::Power)
+                    && !(literal_comparison && Self::expr_is_signed_literal(right));
                 let mut l = match pre_l.take() {
                     Some(mut v) => {
                         if left_unsigned && !v.is_real {
