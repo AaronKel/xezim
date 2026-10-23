@@ -4,6 +4,13 @@ use super::*;
 #[allow(unused_imports)]
 use crate::{log_eprintln as eprintln, log_println as println};
 
+/// Values and shape owned by one scope-randomize target before a trial.
+struct StdArraySnapshot {
+    name: String,
+    size: Option<u64>,
+    elems: Vec<(i64, Value)>,
+}
+
 impl Simulator {
     /// Declared element width of an associative array, when the elaborator
     /// recorded one.
@@ -3852,6 +3859,29 @@ impl Simulator {
         )
     }
 
+    /// §18.12: failure restores values and collection sizes, including empty arrays.
+    fn restore_std_randomize_targets(
+        &mut self,
+        scalars: &[(Expression, Value)],
+        arrays: &[StdArraySnapshot],
+    ) {
+        for array in arrays {
+            if let Some(size) = array.size {
+                // Discard trial elements too: a later growth must not expose them.
+                for key in self.signals.elem_keys(&array.name) {
+                    self.signals.remove(&key);
+                }
+                self.set_queue_size(&array.name, size);
+            }
+            for (i, value) in &array.elems {
+                self.set_signal_value_by_name(&format!("{}[{}]", array.name, i), value.clone());
+            }
+        }
+        for (target, value) in scalars {
+            self.assign_value(target, value);
+        }
+    }
+
     /// `<call> with { constraints }`. For `std::randomize(vars) with {...}` the
     /// listed vars are randomized then narrowed by the inline constraints
     /// (crucially `inside` — riscv-dv selects instructions this way). For
@@ -3887,40 +3917,39 @@ impl Simulator {
                             // draws, and the solver commits an array element by
                             // element, so a failed call used to leave the
                             // rejected draw behind. Keep every element too.
-                            let mut array_snapshot: Vec<(String, i64, Value)> = Vec::new();
+                            let mut array_snapshot = Vec::new();
                             for a in args {
                                 if let Some(nm) = self.array_operand_name(a) {
-                                    let idx: Vec<i64> = if self
-                                        .module
-                                        .dynamic_arrays
-                                        .contains(&nm)
+                                    let size = (self.module.dynamic_arrays.contains(&nm)
                                         || self
                                             .signals
-                                            .contains_key(&Self::name_with_suffix(&nm, ".size"))
-                                    {
-                                        (0..self.get_queue_size(&nm) as i64).collect()
-                                    } else if let Some(&(lo, hi, _)) =
-                                        self.module.arrays.get(&nm)
-                                    {
-                                        (lo.min(hi)..=lo.max(hi)).collect()
+                                            .contains_key(&Self::name_with_suffix(&nm, ".size")))
+                                    .then(|| self.get_queue_size(&nm));
+                                    let (lo, hi) = if let Some(n) = size {
+                                        (0, n as i64 - 1)
+                                    } else if let Some(&(lo, hi, _)) = self.module.arrays.get(&nm) {
+                                        (lo.min(hi), lo.max(hi))
                                     } else {
                                         continue;
                                     };
-                                    for i in idx {
-                                        if let Some(v) =
+                                    let elems = (lo..=hi)
+                                        .filter_map(|i| {
                                             self.get_signal_value_by_name(&format!("{nm}[{i}]"))
-                                        {
-                                            array_snapshot.push((nm.clone(), i, v));
-                                        }
+                                                .map(|v| (i, v))
+                                        })
+                                        .collect();
+                                    array_snapshot.push(StdArraySnapshot {
+                                        name: nm,
+                                        size,
+                                        elems,
+                                    });
+                                } else if let Some(fields) = self.expand_struct_target(a) {
+                                    for (_, field) in fields {
+                                        let value = self.eval_expr(&field);
+                                        snapshot.push((field, value));
                                     }
-                                    continue;
-                                }
-                                if matches!(a.kind, ExprKind::Ident(_))
-                                    && self.array_operand_name(a).is_none()
-                                    && self.lrm_self_width(a).is_some_and(|w| w <= 64)
-                                {
-                                    let v = self.eval_expr(a);
-                                    snapshot.push((a.clone(), v));
+                                } else {
+                                    snapshot.push((a.clone(), self.eval_expr(a)));
                                 }
                             }
                             self.exec_std_randomize(args);
@@ -3968,9 +3997,7 @@ impl Simulator {
                             if let Some(ok) = self.std_randomize_sized(constraints, &targets) {
                                 if !ok {
                                     self.rand_fail_warn_std(constraints);
-                                    for (lv, v) in &snapshot {
-                                        self.assign_value(lv, v);
-                                    }
+                                    self.restore_std_randomize_targets(&snapshot, &array_snapshot);
                                 }
                                 return Value::from_u64(ok as u64, 32);
                             }
@@ -4148,18 +4175,7 @@ impl Simulator {
                             // narrow band the i64 interval solver cannot reach.
                             if !satisfied {
                                 self.rand_fail_warn_std(constraints);
-                                for (lv, v) in &snapshot {
-                                    self.assign_value(lv, v);
-                                }
-                                // §18.12: the array targets are put back too.
-                                // A failed call leaves every variable exactly
-                                // as it was, arrays included.
-                                for (nm, i, v) in &array_snapshot {
-                                    self.set_signal_value_by_name(
-                                        &format!("{nm}[{i}]"),
-                                        v.clone(),
-                                    );
-                                }
+                                self.restore_std_randomize_targets(&snapshot, &array_snapshot);
                             }
                             return Value::from_u64(if satisfied { 1 } else { 0 }, 32);
                         }
