@@ -424,6 +424,42 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   elaborated dimensions, including typedef element widths and hierarchical
   reads (§7.4.1/§23.10; #507, contributed by chenbhil).
 
+* An exponent keeps its own signedness and width when a surrounding
+  expression is unsigned (§11.6.1). Continuous and procedural results agree
+  (#502, contributed by akashlevy).
+* Enum casts retain their declaring type through package and class names,
+  including same-named classes in different packages (§6.19.3). Assigning a
+  cast of a different enum is diagnosed (#511, contributed by Thomasb81).
+* Assertion `or`, `and`, `iff` and `until` preserve recursive nonvacuity
+  (§16.14.8). Completed `until` ticks are folded so long attempts retain only
+  pending evaluations (#512, contributed by Thomasb81).
+* `$sampled` in assertion actions reads unpacked-array cells and variable
+  indices from the same sampled edge (§16.5.1), including indices changed by
+  an NBA (#514, contributed by Thomasb81).
+* Whole references to class and package array constants retain specialized
+  bounds, query direction and declared element order when copied (§7.6,
+  §20.7), including automatic destinations (#516, contributed by Ganesh-TNL).
+* Static initializers that depend on deferred values run in declaration
+  order, with function calls executed once (§6.21). Package ownership and
+  dependencies in casts, slices and replications are preserved (#517,
+  contributed by Ganesh-TNL).
+* Failed `std::randomize` calls restore scalar values, array elements and
+  dynamic collection sizes, including early unsatisfiable size constraints
+  (§18.12). Static subroutine locals participate in joint constraints
+  (#518 and #520, contributed by Ganesh-TNL).
+* Array queries in procedural packed ranges use the current instance or
+  shadowing local array (§20.7), including generated scopes and static tasks.
+  Width lookup visits only queried arrays (#524, contributed by davekeeshan).
+* Forwarded packed-struct parameters retain their field layout before later
+  header localparams are evaluated (§6.20, §23.10), including type bindings
+  and `defparam` overrides (#525 and xezim-core #85, contributed by davekeeshan).
+* Constant nested member selects of packed structs in unpacked parameter
+  arrays retain their values and `$bits` widths (§7.2.2), including qualified
+  package arrays and compilation-unit typedefs (xezim-core #83, contributed
+  by davekeeshan). Saved compiled designs affected by this constant-folding
+  bug, the struct-parameter override bug or the static-initializer bug above
+  require recompilation.
+
 **Performance**
 
 * Dense `case` statements with four to seven labels use jump tables, and
