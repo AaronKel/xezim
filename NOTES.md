@@ -459,6 +459,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   by davekeeshan). Saved compiled designs affected by this constant-folding
   bug, the struct-parameter override bug or the static-initializer bug above
   require recompilation.
+* Class methods declared inside modules call tasks in the object's declaring
+  instance (§23.8), including blocking calls through sibling and descendant
+  instances. Package events keep their own identity through scoped and imported
+  names, aliases and same-named declarations (§15.5, §26.3), including triggers
+  from package tasks (#526, contributed by aionhw). Saved compiled designs
+  affected by package event name collisions require recompilation.
 
 **Performance**
 
