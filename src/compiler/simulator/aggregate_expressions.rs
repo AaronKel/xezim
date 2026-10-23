@@ -1903,13 +1903,7 @@ impl Simulator {
             };
             // A local wider than 64 bits joins as segments (`csp_scope`).
             let ev = enum_vals(self, name);
-            scalars.push((
-                written,
-                lv.clone(),
-                cur.width.max(1),
-                cur.is_signed,
-                ev,
-            ));
+            scalars.push((written, lv.clone(), cur.width.max(1), cur.is_signed, ev));
         }
         Ok((scalars, arrays))
     }
@@ -3844,7 +3838,7 @@ impl Simulator {
                             let size = (c.hi - c.lo + 1).max(0) as u64;
                             // Declared bounds in source order: a descending
                             // `[5:4]` constant reports `$left` 5 / `$right` 4
-                            // and `$increment` -1 (§20.7); the normalized
+                            // and `$increment` 1 (§20.7); the normalized
                             // (lo, hi) pair covers `$low`/`$high`/`$size`.
                             // Falls back to the normalized pair (ascending)
                             // when no declared-dimension row was recorded.
@@ -3855,10 +3849,10 @@ impl Simulator {
                                 "$low" => c.lo as u64,
                                 "$size" => size,
                                 "$increment" => {
-                                    if c.left > c.right {
-                                        0u64.wrapping_sub(1)
-                                    } else {
+                                    if c.left >= c.right {
                                         1
+                                    } else {
+                                        0u64.wrapping_sub(1)
                                     }
                                 }
                                 _ => 0,

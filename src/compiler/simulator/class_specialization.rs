@@ -2848,6 +2848,20 @@ impl Simulator {
         &mut self,
         expr: &Expression,
     ) -> Option<ClassScopeArrayConst> {
+        let mut expr = expr;
+        while let ExprKind::Paren(inner) = &expr.kind {
+            expr = inner;
+        }
+        let Some(leaf) = Self::receiver_prop_name(expr) else {
+            return None;
+        };
+        if !self.class_member_names().constant_arrays.contains(leaf) {
+            // Qualified package arrays also use this path inside methods.
+            // Ordinary literals, ranges, and bare scalar names return here.
+            let ExprKind::MemberAccess { .. } = &expr.kind else {
+                return None;
+            };
+        }
         // Peel a `C#(args)` wrapper first, exactly as the element-read arm
         // does, so a qualified `C#(..)::TBL` binds the specialization's cell.
         let (spec, stripped) = if Self::expr_has_specialization(expr) {
@@ -2883,8 +2897,7 @@ impl Simulator {
             // specialization set it) or class context names the scope. A
             // bare name that resolves to a module-scope array or signal is
             // not class-scope — leave it to the ordinary arms.
-            if self.module.arrays.contains_key(&leaf)
-                || self.signal_name_to_id.contains_key(&leaf)
+            if self.module.arrays.contains_key(&leaf) || self.signal_name_to_id.contains_key(&leaf)
             {
                 return None;
             }
@@ -2939,7 +2952,7 @@ impl Simulator {
             if guard > 64 {
                 return None;
             }
-            let (param_arr, static_fixed, extends, reg_name, decl_dims) = {
+            let (param_arr, static_fixed, extends, reg_name) = {
                 let Some(cd) = self.module.classes.get(&cn) else {
                     return None;
                 };
@@ -2950,20 +2963,18 @@ impl Simulator {
                     cd.static_fixed_arrays.iter().any(|(nm, ..)| *nm == leaf),
                     cd.extends.clone(),
                     cd.name.clone(),
-                    cd.array_prop_decl_dims
-                        .get(&leaf)
-                        .and_then(|d| d.first())
-                        .copied(),
                 )
             };
             if param_arr {
                 let key = self.materialize_class_param_array(&cn, &leaf, spec.as_ref())?;
-                let (lo, hi) = self
+                let (lo, hi, descending) = self
                     .class_param_arrays
                     .get(&key)
-                    .map(|arr| (arr.lo, arr.hi))
-                    .unwrap_or((0, -1));
-                let (left, right) = decl_dims.unwrap_or((lo, hi));
+                    .map(|arr| (arr.lo, arr.hi, arr.descending))
+                    .unwrap_or((0, -1, false));
+                // The materialized cell has this specialization's bounds;
+                // the declaration metadata can still carry default parameters.
+                let (left, right) = if descending { (hi, lo) } else { (lo, hi) };
                 return Some(ClassScopeArrayConst {
                     key,
                     lo,
@@ -2982,11 +2993,7 @@ impl Simulator {
                 // (see the registration in compilation.rs) is keyed by the
                 // bare `cd.name`, so building the key from `cn` would miss.
                 let key = format!("{}::{}", reg_name, leaf);
-                let (lo, hi) = self
-                    .module
-                    .arrays
-                    .get(&key)
-                    .map(|&(lo, hi, _)| (lo, hi))?;
+                let (lo, hi) = self.module.arrays.get(&key).map(|&(lo, hi, _)| (lo, hi))?;
                 let (left, right) = self
                     .module
                     .unpacked_decl_dims

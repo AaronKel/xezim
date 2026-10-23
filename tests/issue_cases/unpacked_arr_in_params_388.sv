@@ -177,6 +177,3 @@ module c99_tb;
     $finish;
   end
 endmodule
-
-
-
