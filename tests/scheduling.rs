@@ -392,3 +392,6 @@ mod review_assertion_vacuity;
 
 #[path = "scheduling/review_action_sampling.rs"]
 mod review_action_sampling;
+
+#[path = "scheduling/review_package_event_scopes.rs"]
+mod review_package_event_scopes;

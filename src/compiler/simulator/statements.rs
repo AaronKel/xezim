@@ -5835,7 +5835,7 @@ impl Simulator {
                         let key = target
                             .as_ref()
                             .and_then(|t| self.event_ref_key(t))
-                            .unwrap_or_else(|| name.name.clone());
+                            .unwrap_or_else(|| self.lexical_event_name(&name.name));
                         self.pending_nba_triggers.push(key);
                     }
                     return;
