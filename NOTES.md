@@ -525,9 +525,9 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Validation**
 
-* The integrated fixes at `290911d5`, pinned to xezim-core `247ee9e`, pass
-  5,412 default debug tests in CI, with one existing ignored test, plus two
-  JIT smoke tests. Core and parser CI pass 98 and 142 tests respectively.
+* The release passes 5,412 default debug tests in CI, with one existing
+  ignored test, plus two JIT smoke tests. Core and parser CI pass 98 and
+  142 tests respectively.
   The 32 DPI tests pass on Linux's nested-scheduler fallback and on macOS
   with both fibers and the fallback. Both repositories pass their minimum
   supported Rust version checks.
@@ -536,6 +536,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   checks across 24 fixtures, six AVIP workloads, and C906 hello with output
   identical to the saved reference. The C906 CoreMark comparison also
   preserves the full program output and 295,294 guest cycles.
+* Fresh 0.11.3 measurements cover C906 CoreMark, C910 memcpy with 200
+  iterations and five AXI4 runs. C910 completes the 1,024-byte copy in 216
+  guest CPU cycles. The README reports the measured elapsed times and
+  distinguishes the historical reference timings from the new xezim runs.
 
 ### 0.11.2 — class, collection and DPI parity fixes, `-uvm`, crash-safe FST dumps (October 2026)
 
