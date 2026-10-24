@@ -553,3 +553,5 @@ mod struct_param_override;
 
 #[path = "types/const_fn_type_cast_localparam.rs"]
 mod const_fn_type_cast_localparam;
+#[path = "types/param_array_pattern_forms.rs"]
+mod param_array_pattern_forms;
