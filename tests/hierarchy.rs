@@ -331,3 +331,6 @@ mod static_init_dependency_order;
 mod review_static_init_dependencies;
 #[path = "hierarchy/descending_array_port_inside_instance_keeps_index.rs"]
 mod descending_array_port_inside_instance_keeps_index;
+
+#[path = "hierarchy/port_fill_literal_width.rs"]
+mod port_fill_literal_width;
