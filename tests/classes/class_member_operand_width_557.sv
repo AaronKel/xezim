@@ -12,16 +12,16 @@
 // the declaration-based width resolution in
 // `Simulator::declared_select_width` (src/compiler/simulator/jit_runtime.rs)
 // brings into line with the reference simulators.  The shapes that still fall
-// through are isolated in `class_handle_operand_width.sv`; the wider-formal
+// through are isolated in a separate test (not part of this change); the wider-formal
 // call-actual shape and its bytecode-compiled variant are in
 // `call_actual_formal_width.sv` and `bytecode_wider_formal_width.sv`, and the
-// owner-qualified shape in `owner_qualified_operand_width.sv`.
+// owner-qualified shape likewise (not part of this change).
 //
-// Reference behaviour: xrun prints `TAG_PASS` (0 failures).
+// Reference behaviour: the reference simulator prints `TAG_PASS` (0 failures).
 //
 // Build note: keep every class-member reference inside procedural code --
-// xrun rejects assigning class members outside a procedural block
-// (xmvlog *E,DYNNPC).
+// The reference simulator rejects assigning class members outside a
+// procedural block.
 // =====================================================================
 
 package p528_pkg;

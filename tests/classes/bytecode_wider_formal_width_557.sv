@@ -29,8 +29,8 @@
 //
 // every `E.probe*` scope must read `runs-compiled`, never `compile-fail`.
 //
-// Reference behaviour: xrun prints `TAG_PASS` (0 failures).
-// xezim prints `TAG_FAIL`: the wider-call-formal shape is evaluated at the
+// Reference behaviour: the reference simulator prints `TAG_PASS` (0 failures).
+// Before this change xezim printed `TAG_FAIL`: the wider-call-formal shape is evaluated at the
 // 8-bit SELF width of `a + b` (44, so `wide9` sees 44 !== 300) instead of
 // the 9-bit width of `wide9`'s formal.  Every other shape here already
 // agrees with the reference on both tiers.

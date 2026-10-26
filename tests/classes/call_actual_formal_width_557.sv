@@ -63,7 +63,7 @@
 // one level down and uncontroversially, by check 9 (`narrow8(a + b) == 44`) and
 // check 16 (`e.narrow8(x + y) == 44`) -- an 8-bit formal does not get widened.
 //
-// Reference behaviour: xrun prints `TAG_PASS` (0 failures).
+// Reference behaviour: the reference simulator prints `TAG_PASS` (0 failures).
 // =====================================================================
 
 class E;
@@ -154,7 +154,7 @@ class E;
   //
   // (The direct comparison `s === c.a + c.b` in the same method is ALSO wrong,
   // but it is wrong identically on main and on every branch here -- a separate
-  // defect, so it lives in `class_handle_operand_width` instead of hiding a
+  // defect, so it is left to a separate test instead of hiding a
   // red check inside this MWE.)
   function void run_formal_handle(logic [8:0] s, E c, ref int fails);
     one(17, wide9(c.a + c.b), "formal-handle wide9(c.a+c.b)", fails);
