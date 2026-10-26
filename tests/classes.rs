@@ -831,3 +831,6 @@ mod local_shadows_class_array_const_534;
 
 #[path = "classes/class_lparam_chain_76.rs"]
 mod class_lparam_chain_76;
+
+#[path = "classes/extern_unsigned_method_scope_541.rs"]
+mod extern_unsigned_method_scope_541;
