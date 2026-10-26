@@ -334,3 +334,6 @@ mod descending_array_port_inside_instance_keeps_index;
 
 #[path = "hierarchy/port_fill_literal_width.rs"]
 mod port_fill_literal_width;
+
+#[path = "hierarchy/upward_module_name_actual_561.rs"]
+mod upward_module_name_actual_561;
