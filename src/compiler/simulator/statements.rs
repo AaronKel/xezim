@@ -725,6 +725,29 @@ impl Simulator {
         // that end in a collection (`int a[3][3][$]`, `int a[2][2][int]`,
         // a class property too): the last variable walks each element's
         // own size or keys, not the element's packed bits.
+        // §12.7.3: an omitted variable skips that dimension. Before a
+        // collection dimension that leaves the element's size undefined
+        // (every row has its own), so the loop is rejected rather than
+        // walking the element's packed bits (it iterated 32 times over an
+        // `int` row).
+        if vars.len() >= 2
+            && self.indexed_colls_live()
+            && let Some((an, dims)) = self.fixed_dims_of_colls(array)
+            && vars.len() == dims.len() + 1
+            && vars[..dims.len()].iter().any(|v| v.is_none())
+            && vars.last().is_some_and(Option::is_some)
+        {
+            let m = format!(
+                "[xezim][error] foreach ({}[...]): a loop variable before a queue, dynamic or \
+                 associative dimension cannot be omitted (§12.7.3: the collection's size \
+                 depends on that index)",
+                an
+            );
+            self.record_output(m.clone());
+            self.stdout_writeln(&m);
+            self.abort_run();
+            return;
+        }
         if vars.len() >= 2
             && self.indexed_colls_live()
             && let Some((an, dims)) = self.fixed_dims_of_colls(array)
