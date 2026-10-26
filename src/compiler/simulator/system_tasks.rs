@@ -1540,15 +1540,26 @@ impl Simulator {
                 // a property of the current instance's class (and no local
                 // formal shadows it), the class-aware probes below decide.
                 if h.path.len() == 1
-                    && self.class_context_stack.last().is_some()
+                    && matches!(self.class_context_stack.last(), Some(Some(_)))
                     && self.string_signals.contains(&*self.resolve_hier_name(h))
                 {
                     let name = h.path[0].name.name.as_str();
+                    // Only the CURRENT method's frames shadow (§6.21): the
+                    // callers' frames below `method_local_base` are not in
+                    // scope here, and a same-named caller local (`val` in
+                    // `uvm_resource_db#(T)::set` calling `rsrc.write(val, …)`)
+                    // forced the flat-set fallback this branch exists to avoid.
                     let local_shadows = self
-                        .local_stack
-                        .iter()
-                        .rev()
-                        .any(|m| m.contains_key(name));
+                        .method_local_base
+                        .last()
+                        .map(|&base| {
+                            self.local_stack
+                                .get(base..)
+                                .unwrap_or(&[])
+                                .iter()
+                                .any(|m| m.contains_key(name))
+                        })
+                        .unwrap_or_else(|| self.local_stack.iter().any(|m| m.contains_key(name)));
                     let is_class_prop = !local_shadows
                         && self
                             .this_stack
