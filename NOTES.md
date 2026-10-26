@@ -19,6 +19,75 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   parse; and a failed internal consistency check. Each printed its error and
   stopped the run, but the exit status was 0, so a script or harness that
   checks it took the run for a pass.
+  (#529, contributed by akashlevy)
+* A time-zero port handshake between two instances completes: the
+  continuous-assign and port-connection updates a compile-time start
+  writes are held until every start of the time-0 batch has run, as the
+  reference simulator's active-region FIFO orders them, so an
+  `always @(port iff ...)` in another instance is armed before the X→0
+  settle fires (§4.4.2, §9.7.4). An output port an `initial` of the child
+  writes is no longer aliased to the parent net. The hold is released when
+  time leaves zero whichever loop popped the batch. (#550 and #551,
+  contributed by Ganesh-TNL)
+* A call actual takes the context width of the callee's declared scalar
+  formal (§13.5.1, §11.6.1): `wide9(a + b)` against `logic [8:0] v`
+  evaluates the sum at 9 bits in the interpreter and, on the compiled tier,
+  for bare, `super.` and free-function calls. A class static operand of a
+  comparison (`E::ta + E::tb`) is sized from its declaration (§11.8.2).
+  (#553, #555, #557 and #559, contributed by Ganesh-TNL)
+* Class specializations are keyed by argument type, however the argument
+  is spelled: an import-bare, package-qualified or typedef'd class name
+  denotes one specialization (§8.25, §6.18). A static method called through
+  a null handle declared as a specialization runs in that specialization;
+  a self-referential member typedef follows it inside the class's own
+  declaration only. The string-valued probe behind a comparison reads the
+  current class's property, not a same-named string elsewhere, and is
+  shadowed by the current method's locals alone (§8.22, §6.21). (#542, #544
+  and #546, contributed by Ganesh-TNL)
+* An assertion `or` succeeds as soon as one operand holds while the other
+  is pending with its nonvacuity established (§16.12.8, §16.14.8); such an
+  attempt reported nothing and stayed live for the rest of the run.
+  (#533, contributed by akashlevy)
+* Reading an inactive member of a tagged union is an error (§11.9, §7.3.2);
+  it read X silently. A whole-union copy carries the source's active tag,
+  so the copy's active member reads without a spurious error. (#470,
+  contributed by opensource-elearning)
+* A name two packages declare resolves in a compiled block through the
+  module's own imports (§26.3): CVA6's ALU compared `operation == ADD`
+  against another package's `ADD` and never fired its arm.
+* A part-select whose bounds are members of a struct-typed parameter
+  (`q[Cfg.LW/Cfg.AW-1:1]`) is a constant select and picks the element, not
+  a flat bit (§6.20.2, §11.5.1). A function formal is not in the enclosing
+  block's sensitivity.
+* An `always_comb` is not sensitive to the packed-struct members it writes
+  itself, at member granularity (§9.2.2.2.1); CVA6's decoder, which writes
+  `instruction_o.op` and reads it back in the same block, re-ran forever.
+* A typedef declared inside a module is a different type in every instance
+  (§6.18, §23.10): an inlined declaration kept the bare name and resolved to
+  the first instance's type, so a member write into a wide struct array
+  element landed at the wrong bit.
+* `$display`, `$write` and `$sformatf` print an unescaped `%` and an
+  unknown conversion specifier literally (§21.2.1); they dropped the `%`
+  and the character after it, and an unknown specifier no longer evaluates
+  the next argument. (#548, contributed by rpjayaraman)
+* Port connections keep the formal's own width and labels when the actual
+  is a part-select, a constant range, a whole net with a different declared
+  range, or a fill literal (`'0`, `'1`): `input [11:2] p` reads `p[5:2]` by
+  its labels and `$bits` of a port tied to `'0` is the formal's width
+  (§7.4.1, §23.3.3, §5.7.1). (#540, #563 and xezim-core #94, contributed by
+  davekeeshan and chenbhil)
+* An unpacked array declared in an instance keeps its declared index order
+  through a port (§7.6), and a variable of a typedef'd packed array
+  declared in an instance keeps its element dimensions (§7.4.1).
+  (xezim-core #88 and #92, contributed by davekeeshan)
+* A typed assignment pattern may name its type through a package scope,
+  `pkg::t'{...}` (§10.9.2); only a scoped name is taken as the type.
+  (xezim-core #96 and #77, contributed by davekeeshan)
+* Casts to typedefs, enums and an instance's own types fold inside constant
+  functions (§13.4.3, §6.24.1); array parameters take replication, keyed
+  and `default:` patterns, including a struct literal as the default of a
+  nested array (§10.9.1, §6.20.2). (xezim-core #90 and #91, contributed by
+  chenbhil)
 
 ### 0.11.3 — hierarchy, interfaces, assertions and collection correctness (October 2026)
 
