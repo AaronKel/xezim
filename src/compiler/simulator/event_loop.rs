@@ -2268,6 +2268,20 @@ impl Simulator {
                 }
                 break;
             }
+            // #t0-comb-defer: leaving time 0 ends the start batch however
+            // its entries were popped. The main loop counts its own pops,
+            // but a nested loop (`run_events_until` for a `#delay` inside a
+            // statement), the condition-waiter drain and the post-NBA
+            // assertion pass pop the same slot without counting, and a
+            // counter left above zero would hold every deferred
+            // cont-assign propagation for the rest of the run. Release the
+            // deferrals before the slot closes; their settle may schedule
+            // same-time work, so look again.
+            if next_time > self.time && self.t0_starts_remaining > 0 {
+                self.t0_starts_remaining = 0;
+                self.drain_deferred_proc_settle();
+                continue;
+            }
             // §16.4: the time slot is over — deferred assertion reports
             // mature. Their actions may schedule same-time work, so look
             // again before advancing.

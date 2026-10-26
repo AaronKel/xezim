@@ -568,6 +568,14 @@ impl Simulator {
             };
             let mut vpi_fired = false;
             if nt > self.time {
+                // #t0-comb-defer: this loop pops time-0 entries without
+                // counting them as starts; close the batch before leaving
+                // the slot (see the main loop's release).
+                if self.t0_starts_remaining > 0 {
+                    self.t0_starts_remaining = 0;
+                    self.drain_deferred_proc_settle();
+                    continue;
+                }
                 // §38.36.2: the slot's cbAtEndOfSimTime / cbReadOnlySynch run
                 // before time moves; look again if any did.
                 if self.vpi_cb_mask != 0 && self.vpi_slot_end() {
@@ -1291,7 +1299,7 @@ impl Simulator {
         // edge while later starts have not run yet and silently lose it.
         if !self.deferred_proc_entries.is_empty()
             && !self.proc_settle_defer
-            && self.t0_starts_remaining == 0
+            && (self.time != 0 || self.t0_starts_remaining == 0)
         {
             self.drain_deferred_proc_settle();
         }

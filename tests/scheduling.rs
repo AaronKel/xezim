@@ -404,3 +404,6 @@ mod review_action_sampling;
 mod review_package_event_scopes;
 #[path = "scheduling/function_formal_not_in_sensitivity.rs"]
 mod function_formal_not_in_sensitivity;
+
+#[path = "scheduling/port_handshake_t0_550.rs"]
+mod port_handshake_t0_550;

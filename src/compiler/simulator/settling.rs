@@ -1376,7 +1376,7 @@ impl Simulator {
         // held — a settle triggered by something else (clock generator,
         // tick top) must not consume them before the last start has run.
         if !self.proc_settle_defer
-            && self.t0_starts_remaining == 0
+            && (self.time != 0 || self.t0_starts_remaining == 0)
             && !self.deferred_proc_entries.is_empty()
         {
             let deferred = std::mem::take(&mut self.deferred_proc_entries);
