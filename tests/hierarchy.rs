@@ -327,3 +327,5 @@ mod vif_defaults_469;
 mod static_init_dependency_order;
 #[path = "hierarchy/review_static_init_dependencies.rs"]
 mod review_static_init_dependencies;
+#[path = "hierarchy/descending_array_port_inside_instance_keeps_index.rs"]
+mod descending_array_port_inside_instance_keeps_index;

@@ -555,3 +555,7 @@ mod struct_param_override;
 mod const_fn_type_cast_localparam;
 #[path = "types/param_array_pattern_forms.rs"]
 mod param_array_pattern_forms;
+#[path = "types/tagged_union_whole_copy_keeps_tag.rs"]
+mod tagged_union_whole_copy_keeps_tag;
+#[path = "types/inlined_typedef_packed_array_dims.rs"]
+mod inlined_typedef_packed_array_dims;
