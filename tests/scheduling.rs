@@ -407,3 +407,5 @@ mod function_formal_not_in_sensitivity;
 
 #[path = "scheduling/port_handshake_t0_550.rs"]
 mod port_handshake_t0_550;
+#[path = "scheduling/armed_edge_dynamic_offset_read.rs"]
+mod armed_edge_dynamic_offset_read;
