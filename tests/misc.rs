@@ -529,3 +529,6 @@ mod undefined_macro_recovery;
 mod constant_scopes_488;
 #[path = "misc/imported_enum_name_collision.rs"]
 mod imported_enum_name_collision;
+
+#[path = "misc/named_block_struct_member.rs"]
+mod named_block_struct_member;
