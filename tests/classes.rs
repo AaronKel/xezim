@@ -816,3 +816,6 @@ mod review_array_constants;
 mod review_randomize_rollback;
 #[path = "classes/bare_self_reference_typedef_spec.rs"]
 mod bare_self_reference_typedef_spec;
+
+#[path = "classes/compiled_call_actual_width.rs"]
+mod compiled_call_actual_width;

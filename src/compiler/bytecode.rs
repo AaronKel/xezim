@@ -15520,12 +15520,22 @@ impl<'a> BytecodeCompiler<'a> {
                         self.bail("super_no_parent");
                         return None;
                     };
+                    // §13.5.1: the actual is context-determined by the
+                    // parent's declared formal, as for the bare call below.
+                    // `method_formal_widths` walks the defining class's
+                    // chain, which includes the parent's prototypes.
+                    let callee_widths: Option<Vec<u32>> =
+                        self.method_formal_widths.get(member.name.as_str()).cloned();
                     let call_start = self.insns.len();
                     let call_next = self.next_reg;
                     let mut ok = true;
                     let mut arg_values: Vec<RegId> = Vec::with_capacity(args.len());
-                    for a in args {
-                        match self.compile_expr(a, 0) {
+                    for (ai, a) in args.iter().enumerate() {
+                        let ctx = callee_widths
+                            .as_ref()
+                            .and_then(|w| w.get(ai).copied())
+                            .unwrap_or(0);
+                        match self.compile_expr(a, ctx) {
                             Some(r) => arg_values.push(r),
                             None => {
                                 ok = false;
@@ -15837,8 +15847,17 @@ impl<'a> BytecodeCompiler<'a> {
                     let call_next = self.next_reg;
                     let mut ok = true;
                     let mut arg_values: Vec<RegId> = Vec::with_capacity(args.len());
-                    for a in args {
-                        match self.compile_expr(a, 0) {
+                    // §13.5.1: a scalar input formal is the actual's context
+                    // width (the inline path binds the same way); unpacked
+                    // formals keep the self-determined compile.
+                    let fn_scope = name.rsplit_once('.').map(|(s, _)| s.to_string());
+                    for (ai, a) in args.iter().enumerate() {
+                        let ctx = if fd.ports[ai].dimensions.is_empty() {
+                            self.port_effective_width(&fd.ports, ai, fn_scope.as_deref())
+                        } else {
+                            0
+                        };
+                        match self.compile_expr(a, ctx) {
                             Some(r) => arg_values.push(r),
                             None => {
                                 ok = false;
