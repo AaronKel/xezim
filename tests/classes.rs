@@ -812,3 +812,5 @@ mod review_array_constants;
 
 #[path = "classes/review_randomize_rollback.rs"]
 mod review_randomize_rollback;
+#[path = "classes/bare_self_reference_typedef_spec.rs"]
+mod bare_self_reference_typedef_spec;

@@ -1333,8 +1333,14 @@ impl Simulator {
                     // `C`, so the factory created default-specialized objects
                     // and the `$cast` in `uvm_create_on` correctly rejected
                     // them.
+                    //
+                    // Only inside that class's own declaration (or a derived
+                    // one): elsewhere the bare name IS the default
+                    // specialization — a non-parameterized class whose typedef
+                    // names `C` must not read `C#(sig)` just because its method
+                    // happens to run under an active `C#(sig)` context.
                     if let Some((b, s)) = &self.current_spec {
-                        if frag == *b {
+                        if frag == *b && self.inside_class_decl_of(b) {
                             return Some(format!("{}#({})", b, s));
                         }
                     }
