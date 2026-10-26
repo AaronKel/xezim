@@ -559,3 +559,5 @@ mod param_array_pattern_forms;
 mod tagged_union_whole_copy_keeps_tag;
 #[path = "types/inlined_typedef_packed_array_dims.rs"]
 mod inlined_typedef_packed_array_dims;
+#[path = "types/struct_param_member_select_bounds.rs"]
+mod struct_param_member_select_bounds;

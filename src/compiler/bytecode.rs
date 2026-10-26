@@ -8709,7 +8709,8 @@ impl<'a> BytecodeCompiler<'a> {
                         self.lookup_param_value(h)?
                     }
                 } else {
-                    self.lookup_param_value(h)?
+                    self.lookup_param_value(h)
+                        .or_else(|| self.const_param_member_path(h))?
                 }
             }
             ExprKind::Unary { op, operand } => {
@@ -8752,9 +8753,58 @@ impl<'a> BytecodeCompiler<'a> {
                     _ => return None,
                 }
             }
+            ExprKind::MemberAccess { expr, member } => self.const_param_member(expr, &member.name)?,
             _ => return None,
         };
         (!v.has_xz() && !v.is_real).then_some(v)
+    }
+
+    /// §6.20.2, §7.2.1: a member of a struct-typed parameter (`Cfg.LW`) is a
+    /// constant — the parameter's value sliced by its registered layout. None
+    /// of the constant folders had a MemberAccess arm, so a part-select bound
+    /// written through one (`q[Cfg.LW/Cfg.AW-1:1]` on a `[1:0][63:0]` array)
+    /// counted as dynamic and took the flat BIT-range path: CVA6's AXI adapter
+    /// returned its cache line shifted by 63 bits and the core never fetched a
+    /// second instruction.
+    fn const_param_member(&self, base: &Expression, member: &str) -> Option<Value> {
+        let mut base = base;
+        while let ExprKind::Paren(inner) = &base.kind {
+            base = inner;
+        }
+        let ExprKind::Ident(h) = &base.kind else {
+            return None;
+        };
+        self.const_param_member_hier(h, member)
+    }
+
+    /// The inliner spells an instance's `Cfg.LW` as ONE hierarchical
+    /// identifier whose last segment is the member (`u1.Cfg` . `LW`).
+    fn const_param_member_path(&self, h: &HierarchicalIdentifier) -> Option<Value> {
+        if h.path.len() < 2 {
+            return None;
+        }
+        let member = h.path.last()?.name.name.as_str();
+        let base = HierarchicalIdentifier {
+            root: h.root.clone(),
+            path: h.path[..h.path.len() - 1].to_vec(),
+            span: h.span,
+            cached_signal_id: std::cell::Cell::new(None),
+            cached_resolved_name: std::cell::OnceCell::new(),
+        };
+        self.const_param_member_hier(&base, member)
+    }
+
+    fn const_param_member_hier(&self, h: &HierarchicalIdentifier, member: &str) -> Option<Value> {
+        if h.root.is_some() || h.path.iter().any(|s| !s.selects.is_empty()) {
+            return None;
+        }
+        let pv = self.lookup_param_value(h)?;
+        let (_, fields) = self.packed_struct_layout_for_hier(h)?;
+        let &(_, off, w) = fields.iter().find(|(n, _, _)| n == member)?;
+        if w == 0 || off.checked_add(w)? > pv.width {
+            return None;
+        }
+        Some(pv.range_select((off + w - 1) as usize, off as usize))
     }
 
     /// Detect the ROM `case` shape: every arm `L = <const>` with constant
@@ -18296,8 +18346,15 @@ impl<'a> BytecodeCompiler<'a> {
                         return Some(v as u32);
                     }
                 }
-                self.lookup_param_value(hier)?.to_u64().map(|u| u as u32)
+                self.lookup_param_value(hier)
+                    .or_else(|| self.const_param_member_path(hier))?
+                    .to_u64()
+                    .map(|u| u as u32)
             }
+            ExprKind::MemberAccess { expr, member } => self
+                .const_param_member(expr, &member.name)?
+                .to_u64()
+                .map(|u| u as u32),
             // Fold simple parameter arithmetic so slice bounds like
             // `[ENTRY_NUM-1:0]` resolve. Without this, expr_max_width on a
             // sliced range returned 1 (unwrap_or(0)), which then clobbered

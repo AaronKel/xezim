@@ -304,6 +304,27 @@ impl Simulator {
         for item in &fdecl.items {
             Self::collect_stmt_reads(item, module, &mut body_reads, &mut scratch_writes);
         }
+        // §13.4: the formals, the return variable and the block locals are
+        // frame state, not module signals the caller can be sensitive to. A
+        // formal named like a design net (`uj_imm(logic [31:0] instruction_i)`
+        // beside a decoder port `instruction_i`) made the calling assign
+        // depend on that unrelated net — and trip the elided-port report.
+        let leaf = name.rsplit('.').next().unwrap_or(name);
+        let mut frame: HashSet<&str> = fdecl.ports.iter().map(|p| p.name.name.as_str()).collect();
+        frame.insert(leaf);
+        fn local_names<'a>(items: &'a [Statement], out: &mut HashSet<&'a str>) {
+            for st in items {
+                match &st.kind {
+                    StatementKind::VarDecl { declarators, .. } => {
+                        out.extend(declarators.iter().map(|d| d.name.name.as_str()));
+                    }
+                    StatementKind::SeqBlock { stmts, .. } => local_names(stmts, out),
+                    _ => {}
+                }
+            }
+        }
+        local_names(&fdecl.items, &mut frame);
+        body_reads.retain(|r| !frame.contains(r.as_str()));
         // A bare read in the body of an INSTANCE's function names that
         // instance's variable (`internal_func_dep` inside
         // `dut.eval_with_hidden_dep` is `dut.internal_func_dep`) — the bare
