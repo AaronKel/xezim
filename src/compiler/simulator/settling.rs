@@ -1634,6 +1634,32 @@ impl Simulator {
                             continue;
                         }
                         let __dep = __e.entry as usize;
+                        // §9.2.2.2.1(b): an `always_comb` is never re-armed
+                        // by its OWN write. One that writes a member of a
+                        // packed struct and reads ANOTHER member depends on
+                        // the whole signal here (CVA6's decoder exception
+                        // block: `instruction_o.ex = ex_i; … .ex.valid = 1;`
+                        // beside a read of `instruction_o.pc`), so its own
+                        // two-step member write re-queued it every pass to
+                        // the settle limit and the core never left its first
+                        // fetch. Only always_comb/always_latch: an explicit
+                        // `always @(a)` and a continuous assign DO re-fire on
+                        // their own writes (the zero-delay loop the limit is
+                        // there to report).
+                        if __dep == $eidx
+                            && matches!(
+                                entries[__dep].item,
+                                CombItem::AlwaysBlock {
+                                    is_always_comb: true,
+                                    ..
+                                } | CombItem::CompiledAlwaysBlock {
+                                    is_always_comb: true,
+                                    ..
+                                }
+                            )
+                        {
+                            continue;
+                        }
                         if __tree_clk && tree_entry.get(__dep).copied().unwrap_or(false) {
                             continue;
                         }

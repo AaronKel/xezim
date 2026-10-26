@@ -1334,22 +1334,11 @@ impl Simulator {
                 // block re-queue itself every settle pass (the pass-through write
                 // then the field write commit two different values per eval), which
                 // churns to the settle limit. Strip a read whose '.'-base prefix is
-                // in the write set.
+                // in the write set — and a bare base that is read only through
+                // members this block writes (`self_written_read`).
                 let sens_reads: HashSet<String> = reads
                     .iter()
-                    .filter(|r| {
-                        if writes.contains(*r) {
-                            return false;
-                        }
-                        let mut base: &str = r.as_str();
-                        while let Some(pos) = base.rfind('.') {
-                            base = &base[..pos];
-                            if writes.contains(base) {
-                                return false;
-                            }
-                        }
-                        true
-                    })
+                    .filter(|r| !Self::self_written_read(r, &reads, &writes))
                     .cloned()
                     .collect();
                 // A bare read may resolve BOTH to a top-level signal and to

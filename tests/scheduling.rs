@@ -73,6 +73,8 @@ mod clocking_iff_samples_this_edge;
 mod clocking_task_context;
 #[path = "scheduling/comb_collection_element_sensitivity.rs"]
 mod comb_collection_element_sensitivity;
+#[path = "scheduling/comb_member_write_sensitivity.rs"]
+mod comb_member_write_sensitivity;
 #[path = "scheduling/comb_result_clobbered_by_process.rs"]
 mod comb_result_clobbered_by_process;
 #[path = "scheduling/computed_edge_expressions.rs"]
