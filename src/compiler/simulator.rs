@@ -6771,6 +6771,9 @@ pub struct Simulator {
     /// deferred-entry drain is held; it releases once, when the last start
     /// of the batch has run.
     t0_starts_remaining: usize,
+    /// §8.4: method names already reported as called through a null handle
+    /// from inside class code (one report per method, not per call).
+    null_call_reported: HashSet<String>,
     /// Maximum snapshot→apply_nba→settle→check_edges rounds per event-loop
     /// iter (see drain_edge_cascade). Cached at sim init; override via
     /// XEZIM_CASCADE_LIMIT env var.

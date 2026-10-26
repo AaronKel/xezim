@@ -3301,6 +3301,24 @@ impl Simulator {
                         let mname = hier.path.last().unwrap().name.name.clone();
                         return self.exec_method_call(h, &mname, args);
                     }
+                    // §8.4: `c.m()` on a class variable that holds null. The
+                    // remaining fallbacks (static call, constructor, DPI,
+                    // builtin) cannot take it, so it returned a silent 0 and
+                    // ran nothing; the reference simulator reports the null
+                    // dereference. A static method never needs the object.
+                    if h == 0
+                        && hier.path.len() == 2
+                        && let Some(decl) = self.class_of_var(&hier.path[0].name.name)
+                    {
+                        let base = decl.split('#').next().unwrap_or(&decl).to_string();
+                        let mname = hier.path[1].name.name.clone();
+                        if self.class_has_method(&base, &mname)
+                            && !self.is_static_method(&base, &mname)
+                        {
+                            self.report_null_handle_call(&mname);
+                            return Value::zero(32);
+                        }
+                    }
                     // A covergroup of another instance (`u0.cg.sample()`).
                     if let Some(idx) = self.cg_index(h) {
                         let mname = hier.path.last().unwrap().name.name.clone();

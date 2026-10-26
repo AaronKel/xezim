@@ -2956,6 +2956,35 @@ impl Simulator {
         Value::from_u64(handle as u64, 32)
     }
 
+    /// §8.4: a method call on a null handle. At the top level (a module or
+    /// testbench process body) the run aborts, like the reference simulator;
+    /// inside class code (deep library code, where an emulation gap can leave
+    /// a handle null) the call is reported once per site and skipped, the
+    /// policy `blocking_call_on_null_receiver` and the property-read path
+    /// apply.
+    pub(super) fn report_null_handle_call(&mut self, method_name: &str) {
+        let in_method = self.this_stack.last().copied().flatten().is_some()
+            || self.class_context_stack.last().cloned().flatten().is_some()
+            || !self.local_stack.is_empty();
+        let m = format!(
+            "[xezim][error] null handle at time {} — method `{}` called on a null \
+             class handle (§8.4); the call runs nothing{}",
+            self.time,
+            method_name,
+            if in_method { "" } else { ", aborting" }
+        );
+        if in_method {
+            if self.null_call_reported.insert(method_name.to_string()) {
+                self.record_output(m.clone());
+                self.stdout_writeln(&m);
+            }
+            return;
+        }
+        self.record_output(m.clone());
+        self.stdout_writeln(&m);
+        self.abort_run();
+    }
+
     pub(super) fn exec_method_call(
         &mut self,
         handle: usize,
@@ -3202,6 +3231,21 @@ impl Simulator {
         let class_name = if let Some(Some(inst)) = self.heap.get(handle) {
             inst.class_name.clone()
         } else {
+            // §8.4: calling a method through a null handle dereferences
+            // null; the reference simulator reports it and aborts. This
+            // ran nothing and returned 0 silently, so a test whose handle
+            // was never constructed printed no trace at all. A static
+            // method needs no object (§8.7) — the receiver's declared
+            // class dispatches it earlier; any static method of that name
+            // keeps the silent path for the shapes that still reach here.
+            if !self
+                .module
+                .classes
+                .values()
+                .any(|cd| cd.static_methods.contains(method_name))
+            {
+                self.report_null_handle_call(method_name);
+            }
             return Value::zero(32);
         };
         // LRM §8.7/§8.23: a STATIC method is resolved/stored separately from

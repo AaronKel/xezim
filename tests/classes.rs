@@ -819,3 +819,6 @@ mod bare_self_reference_typedef_spec;
 
 #[path = "classes/compiled_call_actual_width.rs"]
 mod compiled_call_actual_width;
+
+#[path = "classes/null_handle_method_call_532.rs"]
+mod null_handle_method_call_532;
