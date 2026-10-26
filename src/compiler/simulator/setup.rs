@@ -2282,6 +2282,7 @@ impl Simulator {
         // and only because the body has no process locals for the
         // interpreter to miss (LoadProcessLocal is rejected there).
         compiler.allow_ast_fallback = true;
+        compiler.set_pkg_enum_consts(&self.pkg_enum_consts);
         compiler.set_scope_hint(scope_hint);
         compiler.set_tasks(&self.module.tasks);
         compiler.set_functions(&self.module.functions);

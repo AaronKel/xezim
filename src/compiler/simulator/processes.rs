@@ -2256,6 +2256,7 @@ impl Simulator {
                 &self.widths,
             );
             compiler.set_ast_fallback(false);
+            compiler.set_pkg_enum_consts(&self.pkg_enum_consts);
             compiler.set_scope_hint(scope_hint);
             compiler.set_tasks(&self.module.tasks);
             compiler.set_functions(&self.module.functions);
@@ -2494,6 +2495,7 @@ impl Simulator {
                 &self.widths,
             );
             compiler.set_ast_fallback(false);
+            compiler.set_pkg_enum_consts(&self.pkg_enum_consts);
             compiler.set_scope_hint(scope_hint);
             compiler.set_tasks(&self.module.tasks);
             compiler.set_functions(&self.module.functions);

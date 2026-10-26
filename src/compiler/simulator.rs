@@ -7394,6 +7394,13 @@ pub struct Simulator {
     /// only ones whose bare hoisted entry is ambiguous. Empty for a design
     /// without such a collision, which short-circuits the qualified lookup.
     pkg_ambiguous_names: HashSet<String>,
+    /// §26.3: every package enum member as `pkg::member` -> (value, width),
+    /// for the bytecode compiler. The inliner spells a member two packages
+    /// both declare as `pkg.member`; compiled blocks used to resolve that to
+    /// the bare signal twin (last package registered wins), so CVA6's `alu`
+    /// compared against `fpnew_pkg::ADD` (2) instead of `ariane_pkg::ADD` (0)
+    /// and never took the ADD arm.
+    pkg_enum_consts: HashMap<String, (u64, u32)>,
     /// §26.3: the package VARIABLE names among `pkg_ambiguous_names` (see
     /// `split_contested_package_vars`): only these resolve through a design
     /// unit's imports or a package class's package.

@@ -527,3 +527,5 @@ mod undefined_macro_recovery;
 
 #[path = "misc/constant_scopes_488.rs"]
 mod constant_scopes_488;
+#[path = "misc/imported_enum_name_collision.rs"]
+mod imported_enum_name_collision;

@@ -1641,6 +1641,12 @@ pub struct BytecodeCompiler<'a> {
     /// with a bare local name (`mem_valid`) is first tried verbatim, then
     /// with this prefix applied (`testbench.mem_valid`).
     pub scope_hint: Option<String>,
+    /// §26.3: `pkg::member` -> (value, width) of every package enum member,
+    /// shared by the module-code compilers (`pkg_enum_consts` is the
+    /// method-mode snapshot). A member two packages both declare reaches
+    /// the compiler as the two-segment `pkg.member` the inliner spells it
+    /// with; resolving that by name landed on the bare signal twin.
+    pkg_enum_consts_ref: Option<&'a HashMap<String, (u64, u32)>>,
     /// Process-FSM mode (roadmap 11-12): statement-level `#delay` and
     /// `@(event)` compile to WaitDelayReg / WaitEdge instead of bailing.
     /// Never set for edge or comb blocks.
@@ -2129,6 +2135,7 @@ impl<'a> BytecodeCompiler<'a> {
             allow_ast_fallback: false,
             m_labels: Vec::new(),
             scope_hint: None,
+            pkg_enum_consts_ref: None,
             allow_waits: false,
             wait_specs: Vec::new(),
             for_loop_var_ids: std::collections::HashMap::default(),
@@ -2796,6 +2803,26 @@ impl<'a> BytecodeCompiler<'a> {
 
     pub fn set_scope_hint(&mut self, scope: Option<String>) {
         self.scope_hint = scope;
+    }
+
+    pub fn set_pkg_enum_consts(&mut self, m: &'a HashMap<String, (u64, u32)>) {
+        self.pkg_enum_consts_ref = Some(m);
+    }
+
+    /// `pkg::member` of a two-segment identifier naming a package enum
+    /// member, from either enum table.
+    fn pkg_enum_const_of(&self, hier: &HierarchicalIdentifier) -> Option<Value> {
+        if hier.root.is_some()
+            || hier.path.len() != 2
+            || hier.path.iter().any(|seg| !seg.selects.is_empty())
+        {
+            return None;
+        }
+        let key = format!("{}::{}", hier.path[0].name.name, hier.path[1].name.name);
+        self.pkg_enum_consts
+            .get(&key)
+            .or_else(|| self.pkg_enum_consts_ref.and_then(|m| m.get(&key)))
+            .map(|&(val, width)| Value::from_u64(val, width.max(1)))
     }
 
     pub fn set_cast_widths(&mut self, m: &'a HashMap<String, (u32, bool)>) {
@@ -9816,6 +9843,12 @@ impl<'a> BytecodeCompiler<'a> {
             if let Some(v) = params.get(q.as_str()) {
                 return Some(v.clone());
             }
+            // §26.3: a package ENUM member has no parameter entry under its
+            // qualified spelling; take it from the enum table before any
+            // bare fallback can pick another package's member.
+            if let Some(v) = self.pkg_enum_const_of(hier) {
+                return Some(v);
+            }
         }
         if let Some(scope) = &self.scope_hint {
             if let Some(v) = with_dotted(scope, raw, |k| params.get(k).cloned()) {
@@ -13260,6 +13293,19 @@ impl<'a> BytecodeCompiler<'a> {
                         self.emit(Insn::LoadConst(r, Box::new(v)));
                         return Some(r);
                     }
+                }
+                // §26.3: a package constant two packages both declare has a
+                // shared bare signal twin (last package registered wins);
+                // the compiled unit's import decides which one it names.
+                // §26.3: `pkg.member` — the inliner's spelling of an enum
+                // member two packages both declare — is a constant of THAT
+                // package; resolved by name it landed on the bare signal twin.
+                if hier.path.len() == 2
+                    && let Some(v) = self.pkg_enum_const_of(hier)
+                {
+                    let r = self.alloc_reg();
+                    self.emit(Insn::LoadConst(r, Box::new(v)));
+                    return Some(r);
                 }
                 // A register-backed block local (a for-loop variable) shadows
                 // any same-named signal for the duration of its loop.
