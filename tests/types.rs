@@ -69,6 +69,8 @@ mod class_module_same_name;
 mod conditional_real_x_select;
 #[path = "types/const_function_params.rs"]
 mod const_function_params;
+#[path = "types/const_fn_struct_config.rs"]
+mod const_fn_struct_config;
 #[path = "types/constructor_new_not_static.rs"]
 mod constructor_new_not_static;
 #[path = "types/constructor_new_property_type.rs"]
