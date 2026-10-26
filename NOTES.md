@@ -20,6 +20,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   stopped the run, but the exit status was 0, so a script or harness that
   checks it took the run for a pass.
   (#529, contributed by akashlevy)
+* A task or function call through a null class handle is reported (§8.4):
+  the run aborts at the top level, as the reference simulator does; inside
+  class code the call is reported once and skipped. It ran nothing and
+  printed nothing, so a test whose handle was never constructed left no
+  trace. (#532)
 * A time-zero port handshake between two instances completes: the
   continuous-assign and port-connection updates a compile-time start
   writes are held until every start of the time-0 batch has run, as the
@@ -35,6 +40,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   for bare, `super.` and free-function calls. A class static operand of a
   comparison (`E::ta + E::tb`) is sized from its declaration (§11.8.2).
   (#553, #555, #557 and #559, contributed by Ganesh-TNL)
+* A bare call inside a class method takes its return type from the
+  enclosing class chain before any same-named module function or `extern`
+  method of another class, so `index >= size()` compares signed (§8.20,
+  §23.9). (#541, reported by urbanij)
 * Class specializations are keyed by argument type, however the argument
   is spelled: an import-bare, package-qualified or typedef'd class name
   denotes one specialization (§8.25, §6.18). A static method called through
@@ -44,6 +53,13 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   current class's property, not a same-named string elsewhere, and is
   shadowed by the current method's locals alone (§8.22, §6.21). (#542, #544
   and #546, contributed by Ganesh-TNL)
+* `$size`, `foreach` and a whole-array copy of a class array constant
+  through a typedef of a specialization use that specialization's
+  arguments (§8.25), and a method local or formal of the same name shadows
+  the class constant (§23.9). (#534 and #535, reported by akashlevy)
+* A class constant inherited through `extends Base#(...)` takes the derived
+  specialization's arguments, through a chain of parameterized bases
+  (§8.25, §6.20). (xezim-core #76, reported by opensource-elearning)
 * An assertion `or` succeeds as soon as one operand holds while the other
   is pending with its nonvacuity established (§16.12.8, §16.14.8); such an
   attempt reported nothing and stayed live for the rest of the run.
@@ -70,6 +86,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   unknown conversion specifier literally (§21.2.1); they dropped the `%`
   and the character after it, and an unknown specifier no longer evaluates
   the next argument. (#548, contributed by rpjayaraman)
+* An omitted `foreach` variable before a queue, dynamic or associative
+  dimension is rejected (§12.7.3); the loop walked the element's packed bits.
+  (#536, reported by chenbhil)
+* A dotted name is a member select from the first segment that names a data
+  object, so `resp.exception.valid` beside a `begin : exception` block is
+  accepted (§23.6, §7.2). (#527, reported by davekeeshan)
 * Port connections keep the formal's own width and labels when the actual
   is a part-select, a constant range, a whole net with a different declared
   range, or a fill literal (`'0`, `'1`): `input [11:2] p` reads `p[5:2]` by
@@ -83,6 +105,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * A typed assignment pattern may name its type through a package scope,
   `pkg::t'{...}` (§10.9.2); only a scoped name is taken as the type.
   (xezim-core #96 and #77, contributed by davekeeshan)
+* A port actual whose first segment is the definition name of an enclosing
+  instance resolves upward to that instance (§23.8), as a statement already
+  did; a module bound into `dut` can write `dut.clk`. (#561, reported by
+  Ganesh-TNL)
 * Casts to typedefs, enums and an instance's own types fold inside constant
   functions (§13.4.3, §6.24.1); array parameters take replication, keyed
   and `default:` patterns, including a struct literal as the default of a
