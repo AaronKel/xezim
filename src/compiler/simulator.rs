@@ -12671,6 +12671,26 @@ fn vm_hdr(v: &Value) -> Option<(u64, u64, u32, bool)> {
 /// old construct/move/drop, and that path also frees the heap buffer.
 #[inline(always)]
 fn vm_store(dst: &mut Value, val: u64, xz: u64, width: u32, signed: bool) {
+    if width > 64 {
+        // Inline storage holds 64 bits by invariant. An element wider than
+        // that reached here through the x/z-index arm of LoadArrayElem (the
+        // 140-bit store-buffer entry read through an x pointer at time 0):
+        // the inline form then read past its planes, and in release the
+        // shift wrapped and returned bit-pattern garbage instead of x.
+        let mut v = Value::new(width);
+        for i in 0..64usize {
+            let b = match ((val >> i) & 1, (xz >> i) & 1) {
+                (0, 0) => LogicBit::Zero,
+                (1, 0) => LogicBit::One,
+                (0, 1) => LogicBit::X,
+                _ => LogicBit::Z,
+            };
+            v.set_bit(i, b);
+        }
+        v.is_signed = signed;
+        *dst = v;
+        return;
+    }
     if dst.set_inline_bits(val, xz) {
         dst.width = width;
         dst.is_signed = signed;
