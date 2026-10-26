@@ -152,3 +152,6 @@ mod next_twelve_literal_order_360;
 
 #[path = "strings/format_unknown_spec_no_eval.rs"]
 mod format_unknown_spec_no_eval;
+
+#[path = "strings/p_format_aggregates_566.rs"]
+mod p_format_aggregates_566;

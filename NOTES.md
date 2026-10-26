@@ -92,6 +92,13 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * A dotted name is a member select from the first segment that names a data
   object, so `resp.exception.valid` beside a `begin : exception` block is
   accepted (§23.6, §7.2). (#527, reported by davekeeshan)
+* `%p` prints the `'{...}` form of a packed struct in every context
+  (§21.2.1.7): a class property through a handle, `this` or bare, a static
+  or specialized-class property, an interface or virtual-interface member,
+  an element of a queue, array or associative array of structs, a queue
+  slice, a function result and a task formal or local each printed one flat
+  decimal. An enum member prints its label, also for an enum declared in a
+  package. (#566, reported by Ganesh-TNL)
 * Port connections keep the formal's own width and labels when the actual
   is a part-select, a constant range, a whole net with a different declared
   range, or a fill literal (`'0`, `'1`): `input [11:2] p` reads `p[5:2]` by

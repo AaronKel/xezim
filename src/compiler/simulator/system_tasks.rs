@@ -2670,6 +2670,21 @@ impl Simulator {
                                         if is_local && !self.local_ident_is_collection(nm) {
                                             let is_str = self.p_local_is_string(nm);
                                             let v = self.eval_expr(arg);
+                                            // A packed-struct or enum formal or
+                                            // local renders from its declared type.
+                                            if let Some(dt) = self.p_decl_type(arg)
+                                                && (matches!(self.resolve_dt(&dt), DataType::Struct(su) if su.packed)
+                                                    || self.p_enum_label(&Value::zero(1), &dt).is_some())
+                                                && super::elaborate::resolve_type_width(
+                                                    &dt,
+                                                    Some(&self.module.parameters),
+                                                    Some(&self.module.typedefs),
+                                                ) == v.width
+                                            {
+                                                let core = self.render_p_value_typed(&v, &dt);
+                                                result.push_str(&core);
+                                                continue;
+                                            }
                                             let core = Self::render_p_value(&v, is_str);
                                             result.push_str(&core);
                                             continue;
@@ -2899,6 +2914,48 @@ impl Simulator {
                                     {
                                         let elem = format!("{}{}", storage, &flat[cut..]);
                                         let s = self.render_p_typed(&elem, &DataType::Struct(su));
+                                        result.push_str(&s);
+                                        continue;
+                                    }
+                                }
+                                // §21.2.1.7: a PACKED struct, union or enum
+                                // operand the name-based paths do not type —
+                                // a class property (handle, `this`, bare,
+                                // static, specialized), an interface or
+                                // virtual-interface member, an element of a
+                                // collection of them, a queue slice, a
+                                // function result or a subroutine formal —
+                                // renders from its declared type. Each printed
+                                // one flat decimal.
+                                if !self.p_operand_is_collection(arg)
+                                    && let Some(dt) = self.p_decl_type(arg)
+                                    && let resolved = self.resolve_dt(&dt)
+                                    && (matches!(&resolved, DataType::Struct(su) if su.packed)
+                                        || self.p_enum_label(&Value::zero(1), &dt).is_some()
+                                        || matches!(&dt, DataType::TypeReference { name, .. }
+                                            if self.module.enum_members.contains_key(&name.qualified())
+                                                || self.module.enum_members.contains_key(&name.name.name)))
+                                {
+                                    let w = super::elaborate::resolve_type_width(
+                                        &dt,
+                                        Some(&self.module.parameters),
+                                        Some(&self.module.typedefs),
+                                    );
+                                    if let ExprKind::RangeSelect { expr, left, right, .. } = &arg.kind
+                                        && let Some(flat) = self.flat_member_name(expr)
+                                    {
+                                        let l = self.eval_expr(left).to_u64().unwrap_or(0) as i64;
+                                        let r = self.eval_expr(right).to_u64().unwrap_or(0) as i64;
+                                        let (lo, hi) = (l.min(r), l.max(r));
+                                        let parts: Vec<String> = (lo..=hi)
+                                            .map(|i| self.render_p_typed(&format!("{flat}[{i}]"), &dt))
+                                            .collect();
+                                        result.push_str(&format!("'{{{}}}", parts.join(", ")));
+                                        continue;
+                                    }
+                                    let v = self.eval_expr(arg);
+                                    if v.width == w || w == 0 {
+                                        let s = self.render_p_value_typed(&v, &dt);
                                         result.push_str(&s);
                                         continue;
                                     }
