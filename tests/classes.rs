@@ -822,3 +822,12 @@ mod compiled_call_actual_width;
 
 #[path = "classes/null_handle_method_call_532.rs"]
 mod null_handle_method_call_532;
+
+#[path = "classes/alias_spec_array_const_535.rs"]
+mod alias_spec_array_const_535;
+
+#[path = "classes/local_shadows_class_array_const_534.rs"]
+mod local_shadows_class_array_const_534;
+
+#[path = "classes/class_lparam_chain_76.rs"]
+mod class_lparam_chain_76;

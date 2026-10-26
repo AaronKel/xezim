@@ -2979,8 +2979,18 @@ impl Simulator {
             // Bare `T`: the enclosing specialization (a method of the
             // specialization set it) or class context names the scope. A
             // bare name that resolves to a module-scope array or signal is
-            // not class-scope — leave it to the ordinary arms.
+            // not class-scope — leave it to the ordinary arms. §23.9: a
+            // method local or formal of the same name shadows the class
+            // constant (the element arm applies the same rule), so `$size`,
+            // `foreach` and a whole-array copy read the local.
             if self.module.arrays.contains_key(&leaf) || self.signal_name_to_id.contains_key(&leaf)
+            {
+                return None;
+            }
+            if self.dyn_name_lookup(&leaf).is_some()
+                || self.local_stack.last().is_some_and(|f| {
+                    f.contains_key(&leaf) || f.contains_key(&format!("\u{1}array_formal:{leaf}"))
+                })
             {
                 return None;
             }
@@ -3023,10 +3033,14 @@ impl Simulator {
                 }
             }
         }
-        let (start_class, _) = start?;
+        let (start_class, resolved_sig) = start?;
         // The active spec: the peeled `#(...)` wrapper wins; else the
-        // enclosing one when it denotes the same class.
-        let spec = spec.or_else(|| self.current_spec.clone().filter(|(b, _)| *b == start_class));
+        // arguments a typedef of a specialization carries (§8.25,
+        // `typedef C#(5) Alias; Alias::T` — the element arm keeps them the
+        // same way); else the enclosing one when it denotes the same class.
+        let spec = spec
+            .or_else(|| resolved_sig.map(|s| (start_class.clone(), s)))
+            .or_else(|| self.current_spec.clone().filter(|(b, _)| *b == start_class));
         // Walk the chain for the DECLARING class.
         let mut cur: Option<String> = Some(start_class);
         let mut guard = 0;
@@ -3198,6 +3212,30 @@ impl Simulator {
                     let v = self.resolve_value_param_in_current(prop);
                     self.this_stack.pop();
                     self.class_context_stack.pop();
+                    v
+                } else if pd_expr.is_some()
+                    && let Some((b, sig)) = self.current_spec.clone()
+                    && let origin = self.class_origin(&b)
+                    && origin != decl_class
+                    && self.class_is_a(&origin, decl_class)
+                    && let Some(asig) = self.ancestor_spec(&origin, &sig, decl_class)
+                {
+                    // §8.25 / §8.13: a constant declared by an ANCESTOR of
+                    // the active specialization (`Derived#(10)::LP` with
+                    // `LP = P + 1` in `Base`, reached through `extends
+                    // Base#(Q)`) is evaluated in the ancestor's own
+                    // specialization, mapped through the extends arguments;
+                    // the elaborated default (`Base`'s `P = 42`) is not it.
+                    let saved = std::mem::replace(
+                        &mut self.current_spec,
+                        Some((decl_class.to_string(), asig)),
+                    );
+                    self.class_context_stack.push(Some(decl_class.to_string()));
+                    self.this_stack.push(None);
+                    let v = self.resolve_value_param_in_current(prop);
+                    self.this_stack.pop();
+                    self.class_context_stack.pop();
+                    self.current_spec = saved;
                     v
                 } else {
                     None
