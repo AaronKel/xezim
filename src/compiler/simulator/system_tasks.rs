@@ -3156,7 +3156,30 @@ impl Simulator {
                             result.push_str(&self.m_path());
                         }
                         _ => {
-                            if ai < args.len() {
+                            // §21.2.1: only a known specifier consumes an
+                            // argument. Deciding that first keeps an unknown
+                            // `%q` from evaluating the next actual (and its
+                            // side effects, `f()` / `i++`) and then handing
+                            // it back to the following specifier.
+                            let consumes = matches!(
+                                spec,
+                                'd' | 'D'
+                                    | 'b' | 'B'
+                                    | 'o' | 'O'
+                                    | 'h' | 'H'
+                                    | 'x' | 'X'
+                                    | 'f' | 'F'
+                                    | 'e' | 'E'
+                                    | 'g' | 'G'
+                                    | 's' | 'S'
+                                    | 'c' | 'C'
+                                    | 'u' | 'U'
+                                    | 'z' | 'Z'
+                                    | 'v' | 'V'
+                            );
+                            if !consumes {
+                                push_raw_spec(&mut result, Some(spec));
+                            } else if ai < args.len() {
                                 let v = self.eval_expr(&args[ai]);
                                 ai += 1;
                                 match spec {
@@ -3360,10 +3383,7 @@ impl Simulator {
                                         let s = self.strength_field(&args[ai - 1], &v);
                                         result.push_str(&field(s, 0));
                                     }
-                                    _ => {
-                                        push_raw_spec(&mut result, Some(spec));
-                                        ai -= 1;
-                                    }
+                                    _ => unreachable!("specifier admitted above"),
                                 }
                             } else {
                                 push_raw_spec(&mut result, Some(spec));
