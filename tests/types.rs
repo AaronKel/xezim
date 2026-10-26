@@ -561,3 +561,5 @@ mod tagged_union_whole_copy_keeps_tag;
 mod inlined_typedef_packed_array_dims;
 #[path = "types/struct_param_member_select_bounds.rs"]
 mod struct_param_member_select_bounds;
+#[path = "types/instance_local_typedef_struct_array.rs"]
+mod instance_local_typedef_struct_array;
