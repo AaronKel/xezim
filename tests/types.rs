@@ -569,3 +569,9 @@ mod scoped_typed_assignment_pattern;
 
 #[path = "types/param_array_struct_default.rs"]
 mod param_array_struct_default;
+#[path = "types/wide_array_elem_x_index.rs"]
+mod wide_array_elem_x_index;
+#[path = "types/packed_elem_const_index_out_of_range.rs"]
+mod packed_elem_const_index_out_of_range;
+#[path = "types/fn_return_width_struct_param_member.rs"]
+mod fn_return_width_struct_param_member;

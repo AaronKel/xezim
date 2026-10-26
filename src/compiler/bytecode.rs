@@ -6497,6 +6497,13 @@ impl<'a> BytecodeCompiler<'a> {
             match &e.kind {
                 ExprKind::Ident(h) => {
                     if h.path.len() != 1 {
+                        // `Cfg.VLEN`: a member of a packed-struct parameter
+                        // is a constant (§6.20.2), not module state.
+                        if h.path.iter().all(|seg| seg.selects.is_empty())
+                            && me.lookup_param_value(h).is_some()
+                        {
+                            return true;
+                        }
                         // `fname.member` may arrive as TWO segments; it is
                         // function-local when the head is bound (the return
                         // variable or a formal).
@@ -14298,12 +14305,21 @@ impl<'a> BytecodeCompiler<'a> {
                         // index came out X.)
                         if let Some(idx) = self.eval_const_expr(index) {
                             let base = self.compile_expr(expr, 0)?;
-                            let lo = Self::packed_elem_lsb(
-                                self.packed_outer_dim(hier),
-                                idx as i64,
-                                elem_w,
-                            )
-                            .max(0) as u32;
+                            // §11.5.1: a constant index outside the declared
+                            // range reads x. `eval_const_expr` folds in u32, so
+                            // a `-1` (`conf_addr_i[i-1]` at genvar 0) arrived as
+                            // 4294967295 and `lo + elem_w` overflowed.
+                            let dim = self.packed_outer_dim(hier);
+                            let in_range = match dim {
+                                Some((l, r)) => (idx as i64) >= l.min(r) && (idx as i64) <= l.max(r),
+                                None => (idx as u64).saturating_mul(elem_w as u64) < u32::MAX as u64,
+                            };
+                            if !in_range {
+                                let dest = self.alloc_reg();
+                                self.emit(Insn::LoadConst(dest, Box::new(Value::new(elem_w))));
+                                return Some(dest);
+                            }
+                            let lo = Self::packed_elem_lsb(dim, idx as i64, elem_w).max(0) as u32;
                             let hi = lo + elem_w - 1;
                             let dest = self.alloc_reg();
                             self.emit(Insn::RangeSelectConst(dest, base, hi, lo));
