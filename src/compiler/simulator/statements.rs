@@ -4054,6 +4054,7 @@ impl Simulator {
                             static_key: Some(key),
                             static_slice: None,
                             this_handle: None,
+                            root_frame: self.nba_root_frame(lvalue),
                         },
                         d,
                     );
@@ -4103,6 +4104,7 @@ impl Simulator {
                             static_key,
                             static_slice: None,
                             this_handle,
+                            root_frame: self.nba_root_frame(lvalue),
                         });
                     }
                 } else if let Some(id) = self.resolve_nba_target(lvalue) {
@@ -4146,6 +4148,7 @@ impl Simulator {
                             static_key,
                             static_slice: None,
                             this_handle,
+                            root_frame: self.nba_root_frame(lvalue),
                         },
                         d,
                     );

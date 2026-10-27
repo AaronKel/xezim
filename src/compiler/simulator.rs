@@ -1637,6 +1637,12 @@ struct NbaEntry {
     /// and re-pushed for the apply, exactly as `static_key` pins the declaring
     /// frame.
     this_handle: Option<usize>,
+    /// §10.4.2 / §4.9.4 (#569): the ROOT of a member or element target that
+    /// is a subroutine formal or local holding an object handle (`tr.data[3]
+    /// <= v` inside a task), captured when the NBA was SCHEDULED. Resolving
+    /// the name in the NBA region would consult whichever frame the event
+    /// loop still holds, which with two concurrent tasks is the wrong one.
+    root_frame: Option<(String, Value)>,
 }
 
 #[derive(Debug, Clone)]
@@ -6771,6 +6777,11 @@ pub struct Simulator {
     /// deferred-entry drain is held; it releases once, when the last start
     /// of the batch has run.
     t0_starts_remaining: usize,
+    /// §21.2.1.7: set while the `%p` operand itself is being rendered; a
+    /// standalone scalar prints plain decimal, a leaf INSIDE an aggregate
+    /// prints by its declared type (`'h` hex for vectors). Cleared by the
+    /// aggregate renderers before they descend into members or elements.
+    p_top_level: bool,
     /// §8.4: method names already reported as called through a null handle
     /// from inside class code (one report per method, not per call).
     null_call_reported: HashSet<String>,

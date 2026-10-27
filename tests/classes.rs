@@ -834,3 +834,12 @@ mod class_lparam_chain_76;
 
 #[path = "classes/extern_unsigned_method_scope_541.rs"]
 mod extern_unsigned_method_scope_541;
+
+#[path = "classes/class_handle_operand_width_564.rs"]
+mod class_handle_operand_width_564;
+
+#[path = "classes/subroutine_lhs_operand_width_565.rs"]
+mod subroutine_lhs_operand_width_565;
+
+#[path = "classes/nba_member_target_object_569.rs"]
+mod nba_member_target_object_569;
