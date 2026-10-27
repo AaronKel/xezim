@@ -12,7 +12,11 @@ use std::process::Command;
 fn run(design: &str, extra: &[&str], expect_pass: usize) {
     let test_file = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/hierarchy/{design}", ));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_xezim"));
-    cmd.current_dir(env!("CARGO_MANIFEST_DIR"))
+    // The design writes and reads `repro_mem.hex` in the working
+    // directory: run in a scratch dir so no file is left in the tree.
+    let scratch = std::env::temp_dir().join(format!("xezim_568_{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    cmd.current_dir(&scratch)
         .arg("--simulate")
         .arg("-s")
         .arg("t")
