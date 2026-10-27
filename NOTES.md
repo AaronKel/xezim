@@ -190,6 +190,14 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   nested array (§10.9.1, §6.20.2). (xezim-core #90 and #91, contributed by
   chenbhil)
 
+**Build**
+
+* The compiled-artifact, prepared-comb and method-cache formats are encoded
+  with bincode 2 (serde, standard configuration) instead of the unmaintained
+  bincode 1.x (RUSTSEC-2025-0141). Artifacts written by earlier versions are
+  refused with the usual "recompile with current xezim" message; the caches
+  are rebuilt (#531, core #87).
+
 ### 0.11.3 — hierarchy, interfaces, assertions and collection correctness (October 2026)
 
 **Correctness**

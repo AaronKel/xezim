@@ -1043,6 +1043,15 @@ pub enum CompiledMethodOutcome {
     Nil,
 }
 
+/// Decodes one on-disk method-cache entry (`m<key>.bin`). The cache's wire
+/// format is the artifact format; readers outside the simulator (tests)
+/// go through here so a format change touches one place.
+pub fn decode_persisted_method_outcome(bytes: &[u8]) -> Option<PersistedMethodOutcome> {
+    bincode::serde::decode_from_slice(bytes, xezim_core::xez_bincode_config())
+        .ok()
+        .map(|(outcome, _)| outcome)
+}
+
 /// class-perf persistent cache (XEZIM_METHOD_CACHE): the disk form of one
 /// compiled class-method outcome — the Rc-free mirror of
 /// `CompiledMethodOutcome`, bincode-serialized under a content key in the

@@ -81,7 +81,8 @@ impl Simulator {
             if &magic != PREPARED_COMB_MAGIC {
                 return Err("bad format marker".to_string());
             }
-            bincode::deserialize_from(reader).map_err(|e| e.to_string())
+            bincode::serde::decode_from_std_read(&mut reader, xezim_core::xez_bincode_config())
+                .map_err(|e| e.to_string())
         })();
         let cache = match result {
             Ok(cache) if self.prepared_comb_cache_is_valid(&cache) => cache,
@@ -174,7 +175,12 @@ impl Simulator {
                 time0_deferred: &self.comb_time0_deferred,
                 cont_driven: &self.cont_driven,
             };
-            bincode::serialize_into(&mut writer, &payload).map_err(|e| e.to_string())?;
+            bincode::serde::encode_into_std_write(
+                &payload,
+                &mut writer,
+                xezim_core::xez_bincode_config(),
+            )
+            .map_err(|e| e.to_string())?;
             writer.flush().map_err(|e| e.to_string())?;
             drop(writer);
             std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;

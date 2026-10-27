@@ -957,7 +957,12 @@ impl Simulator {
                 }
             }
             let mut writer = HashWriter(std::collections::hash_map::DefaultHasher::new());
-            bincode::serialize_into(&mut writer, &self.module).ok()?;
+            bincode::serde::encode_into_std_write(
+                &self.module,
+                &mut writer,
+                xezim_core::xez_bincode_config(),
+            )
+            .ok()?;
             let mut signals: Vec<_> = self.signal_name_to_id.iter().collect();
             signals.sort_unstable_by(|a, b| a.0.cmp(b.0));
             signals.hash(&mut writer.0);
@@ -992,7 +997,7 @@ impl Simulator {
     ) -> Option<super::bytecode::PersistedMethodOutcome> {
         let dir = method_cache_dir()?;
         let bytes = std::fs::read(dir.join(format!("m{:016x}.bin", key))).ok()?;
-        bincode::deserialize(&bytes).ok()
+        super::bytecode::decode_persisted_method_outcome(&bytes)
     }
 
     /// Best-effort atomic store (tmp file + rename; the pid suffix keeps
@@ -1009,7 +1014,8 @@ impl Simulator {
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
-        let Ok(bytes) = bincode::serialize(outcome) else {
+        let Ok(bytes) = bincode::serde::encode_to_vec(outcome, xezim_core::xez_bincode_config())
+        else {
             return;
         };
         let tmp = dir.join(format!("m{:016x}.tmp.{}", key, std::process::id()));

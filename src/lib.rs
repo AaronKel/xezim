@@ -1054,12 +1054,19 @@ fn reinstall_ooc_constraint_bodies(
     }
 }
 
+/// The encoded size of a value in the artifact format, for the memory
+/// diagnostics: counted through a sink, never buffered.
+pub(crate) fn serialized_len<T: serde::Serialize>(v: &T) -> usize {
+    bincode::serde::encode_into_std_write(v, &mut std::io::sink(), xezim_core::xez_bincode_config())
+        .unwrap_or(0)
+}
+
 /// `XEZIM_MEM_CENSUS`: the elaborated design as elaboration hands it over —
 /// serialized size per field (a stand-in for heap size that ranks them) and
 /// the sizes of the AST node types that make up most of it.
 fn elab_census(elab: &elaborate::ElaboratedModule) {
     fn ser<T: serde::Serialize>(v: &T) -> usize {
-        bincode::serialized_size(v).unwrap_or(0) as usize
+        serialized_len(v)
     }
     let mut rows: Vec<(&str, usize)> = vec![
         ("signals", ser(&elab.signals)),
