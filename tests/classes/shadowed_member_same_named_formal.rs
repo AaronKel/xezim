@@ -96,3 +96,66 @@ fn shadowed_member_access_while_same_named_formal_suspended() {
     ];
     assert_eq!(t_lines(FAMILY), want);
 }
+
+// The same writes from module `initial` blocks: a fork child, a fork
+// statement and a task local writing through an `automatic` or static
+// block local, while another process waits in a task (a class method or a
+// module task) whose formal of the base type has the same name.
+const MODULE_BLOCKS: &str = r#"
+class B; int p = -1; function int bp(); return p; endfunction endclass
+class D extends B; int p = -2; endclass
+class Blk; task hold(B item); #10; endtask endclass
+module t;
+  Blk k = new;
+  D shared;
+  task automatic mhold(B item); #10; endtask
+  task automatic tk(); D item = new; fork begin #5; item.p = 23; end #1 k.hold(item); join
+    $display("T|task_local|%0d %0d", item.p, item.bp()); endtask
+  initial begin
+    automatic D item = new;
+    fork begin #5; item.p = 21; end #1 k.hold(item); join
+    $display("T|fork_child|%0d %0d", item.p, item.bp());
+  end
+  initial begin
+    automatic D item = new;
+    #20;
+    fork #5 item.p = 22; #1 k.hold(item); join
+    $display("T|fork_stmt|%0d %0d", item.p, item.bp());
+  end
+  initial begin #40; tk(); end
+  initial begin : a1
+    D item;
+    #60 item = new; shared = item;
+    fork begin #5; item.p = 31; end join_none
+    #8 $display("T|other_initial|%0d %0d", item.p, item.bp());
+  end
+  initial begin #61 k.hold(shared); end
+  initial begin : a2
+    automatic D item;
+    #80 item = new;
+    fork begin #5; item.p = 32; end #1 mhold(item); join
+    $display("T|module_task|%0d %0d", item.p, item.bp());
+  end
+  initial begin : a3
+    D item;
+    #100 item = new;
+    fork begin #5; item.p = 33; end #1 k.hold(item); join
+    $display("T|static_local|%0d %0d", item.p, item.bp());
+  end
+endmodule
+"#;
+
+/// §8.14: the static type of a module block local decides the copy, as it
+/// does for a class method's local (the case the PR left open).
+#[test]
+fn module_block_local_write_while_base_formal_suspended() {
+    let want = [
+        "T|fork_child|21 -1",
+        "T|fork_stmt|22 -1",
+        "T|task_local|23 -1",
+        "T|other_initial|31 -1",
+        "T|module_task|32 -1",
+        "T|static_local|33 -1",
+    ];
+    assert_eq!(t_lines(MODULE_BLOCKS), want);
+}
