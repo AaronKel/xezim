@@ -3839,7 +3839,7 @@ impl Simulator {
     }
 
     /// Visit `it` and every item nested in it.
-    fn csp_item_walk(it: &ConstraintItem, f: &mut dyn FnMut(&ConstraintItem)) {
+    pub(super) fn csp_item_walk(it: &ConstraintItem, f: &mut dyn FnMut(&ConstraintItem)) {
         f(it);
         match it {
             ConstraintItem::Implication { constraint, .. } => Self::csp_item_walk(constraint, f),

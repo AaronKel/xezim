@@ -32,6 +32,13 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   then the elements (#576). `%p` of such a member, and of a module-scope
   variable of the same shapes, lists each row as a nested list; it printed
   `'{0, 0}`.
+* `std::randomize` of a variable with a dynamic or queue outer dimension
+  over unpacked rows (`bit [7:0] raw[][2]`, `int d[][]`), at module scope
+  or as a task local, solves (§18.12, §7.4.5). The scope solve split
+  `raw[][2]` into rows over its 64-slot buffer, so `raw.size() == 2` read 64
+  and failed, and took `int d[][]` for a dynamic array of scalars. The
+  outer size, then each dynamic row's size (`d[i].size()`), are solved
+  before the elements.
 * An unsized `'1` or `'0` in a constraint fills the width of the other
   operand (§5.7.1, §18.3). The joint solver and the constraint check took
   `'1` as the 1-bit value 1, so `y == '1` on an 8-bit `y` gave `8'h01` and

@@ -858,3 +858,5 @@ mod randomize_type_param_576;
 mod nested_dyn_members;
 #[path = "classes/randomize_fill_literal.rs"]
 mod randomize_fill_literal;
+#[path = "classes/randomize_nested_dyn_scope.rs"]
+mod randomize_nested_dyn_scope;

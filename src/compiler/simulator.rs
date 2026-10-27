@@ -6785,6 +6785,10 @@ pub struct Simulator {
     /// call being set up — name as the constraints write it, bounds
     /// outermost first — handed to the scope solve as `Csp::nd_dims`.
     rand_scope_nd: HashMap<String, Vec<(i64, i64)>>,
+    /// §7.4.5: the `std::randomize` targets with a dynamic outer dimension
+    /// over unpacked rows, by storage key: true for dynamic rows (`T d[][]`),
+    /// false for fixed ones (`T a[][N]`). Set by `std_randomize_vars`.
+    rand_scope_row_owners: HashMap<String, bool>,
     /// §21.2.1.7: set while the `%p` operand itself is being rendered; a
     /// standalone scalar prints plain decimal, a leaf INSIDE an aggregate
     /// prints by its declared type (`'h` hex for vectors). Cleared by the
