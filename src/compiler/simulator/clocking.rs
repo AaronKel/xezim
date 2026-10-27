@@ -379,6 +379,7 @@ impl Simulator {
         a: &crate::ast::stmt::AssertionStatement,
         kind: crate::ast::stmt::DeferredAssertion,
         passed: bool,
+        label: Option<&str>,
     ) {
         let kind_tag: u8 = match a.kind {
             crate::ast::stmt::AssertionKind::Assert => 0,
@@ -386,9 +387,11 @@ impl Simulator {
             crate::ast::stmt::AssertionKind::Cover => 2,
         };
         let src = self.current_src_file();
+        let stat_key = Self::assert_stat_key(a.span.start, src);
+        self.note_assert_label(stat_key, label);
         let entry = self
             .assertion_stats
-            .entry(Self::assert_stat_key(a.span.start, src))
+            .entry(stat_key)
             .or_insert(AssertionStat {
                 kind: kind_tag,
                 loc: Some((src, a.span.start)),
@@ -543,27 +546,17 @@ impl Simulator {
             let outcome = self.eval_expr(&probe.predicate).is_true();
             self.this_stack.pop();
             // Fold into assertion_stats so the coverage DB reflects
-            // concurrent-property hits without a separate channel.
-            // Synthesize a "span_key" by hashing the probe name so it
-            // doesn't collide with file-position-keyed immediate stats.
-            let span_key = probe
-                .name
-                .as_bytes()
-                .iter()
-                .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64))
-                .wrapping_add(1); // never 0
-            // AssertionStat.kind is a u8 tag — reuse the immediate-cover
-            // tag for concurrent-cover probes (no dedicated tag yet).
+            // concurrent-property hits without a separate channel, on the
+            // site's own entry: it was keyed by a hash of a synthetic name,
+            // tagged `cover` whatever its kind, and had no location.
             let stat = self
                 .assertion_stats
-                .entry(span_key as usize)
-                .or_insert_with(|| {
-                    AssertionStat {
-                        kind: 2,
-                        /* cover */ loc: None,
-                        pass_count: 0,
-                        fail_count: 0,
-                    }
+                .entry(probe.stat_key)
+                .or_insert_with(|| AssertionStat {
+                    kind: probe.kind,
+                    loc: Some(probe.loc),
+                    pass_count: 0,
+                    fail_count: 0,
                 });
             if outcome {
                 stat.pass_count += 1;

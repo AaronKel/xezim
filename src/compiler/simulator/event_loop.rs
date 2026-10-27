@@ -785,6 +785,17 @@ impl Simulator {
         span_start | (src_file.map_or(0, |f| f as usize + 1) << 40)
     }
 
+    /// §16.5 / §16.14 / §9.3.1: remember a labelled assertion site's label
+    /// for the coverage results file. The first registration's label stays;
+    /// instances of one module share the site.
+    pub(super) fn note_assert_label(&mut self, stat_key: usize, label: Option<&str>) {
+        if let Some(l) = label {
+            self.assertion_labels
+                .entry(stat_key)
+                .or_insert_with(|| l.to_string());
+        }
+    }
+
     /// Source file of the running process's module (memoized per process).
     pub(super) fn current_src_file(&mut self) -> Option<u32> {
         let pid = self.current_pid;

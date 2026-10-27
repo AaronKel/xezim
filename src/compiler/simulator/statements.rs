@@ -4670,6 +4670,13 @@ impl Simulator {
                 self.record_ast_loop_heat(i);
             }
             StatementKind::SeqBlock { stmts, name } => {
+                // §9.3.1: a labelled procedural assertion is this block.
+                if let Some(n) = name
+                    && stmts.len() == 1
+                    && matches!(stmts[0].kind, StatementKind::Assertion(_))
+                {
+                    self.assert_wrap_label = Some(n.name.clone());
+                }
                 // §6.21: a block-local declaration SHADOWS a same-named module
                 // signal — without a frame the frameless VarDecl exec lands on
                 // the signal itself and the block's writes clobber the module
@@ -5473,6 +5480,12 @@ impl Simulator {
             }
             StatementKind::Assertion(a) => {
                 use crate::ast::stmt::AssertionKind;
+                // The site's label: a module item's own (§16.5), or the name
+                // of the block the parser wrapped a labelled procedural
+                // statement in (§9.3.1).
+                let wrap_label = self.assert_wrap_label.take();
+                let site_label: Option<String> =
+                    a.label.as_ref().map(|l| l.name.clone()).or(wrap_label);
                 // LRM §16.5 — concurrent (`assert property (…)`) defers
                 // evaluation to the observed region. We queue an
                 // `ObservedProbe`; the drain in `drain_observed_region`
@@ -5614,7 +5627,7 @@ impl Simulator {
                         let idx = match existing {
                             Some(i) => i,
                             None => {
-                                self.register_sva_site(a, events, body);
+                                self.register_sva_site(a, events, body, site_label.as_deref());
                                 self.sva_sites.len() - 1
                             }
                         };
@@ -5639,10 +5652,22 @@ impl Simulator {
                         }
                         return;
                     }
-                    let probe_name = format!("prop@{}", a.span.start);
+                    // The unclocked property's outcomes land on the site's
+                    // own entry (file, line, kind and label), not on a
+                    // locationless one keyed by a synthetic name.
+                    let src = self.current_src_file();
+                    let stat_key = Self::assert_stat_key(a.span.start, src);
+                    self.note_assert_label(stat_key, site_label.as_deref());
+                    let kind: u8 = match a.kind {
+                        AssertionKind::Assert => 0,
+                        AssertionKind::Assume => 1,
+                        AssertionKind::Cover => 2,
+                    };
                     let this_handle = self.this_stack.last().and_then(|t| *t);
                     self.pending_observed.push(ObservedProbe {
-                        name: probe_name,
+                        stat_key,
+                        loc: (src, a.span.start),
+                        kind,
                         predicate: resolved_expr,
                         this_handle,
                     });
@@ -5660,7 +5685,7 @@ impl Simulator {
                 };
                 let true_branch = self.eval_expr(&a.expr).is_true();
                 if let Some(kind) = a.deferred {
-                    self.queue_deferred_assert(a, kind, true_branch);
+                    self.queue_deferred_assert(a, kind, true_branch, site_label.as_deref());
                     return;
                 }
                 // Track per-site tallies for end-of-sim summary + JSON DB.
@@ -5670,9 +5695,11 @@ impl Simulator {
                     AssertionKind::Cover => 2,
                 };
                 let src = self.current_src_file();
+                let stat_key = Self::assert_stat_key(a.span.start, src);
+                self.note_assert_label(stat_key, site_label.as_deref());
                 let entry = self
                     .assertion_stats
-                    .entry(Self::assert_stat_key(a.span.start, src))
+                    .entry(stat_key)
                     .or_insert(AssertionStat {
                         kind: kind_tag,
                         loc: Some((src, a.span.start)),

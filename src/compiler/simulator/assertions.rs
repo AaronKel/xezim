@@ -1626,6 +1626,7 @@ impl Simulator {
         a: &crate::ast::stmt::AssertionStatement,
         events: Vec<EventExpr>,
         body: Expression,
+        label: Option<&str>,
     ) {
         use crate::ast::stmt::AssertionKind;
         let span_key = a.span.start;
@@ -1802,11 +1803,7 @@ impl Simulator {
             _ => 2,
         };
         let stat_key = Self::assert_stat_key(span_key, src);
-        if let Some(l) = &a.label {
-            self.assertion_labels
-                .entry(stat_key)
-                .or_insert_with(|| l.name.clone());
-        }
+        self.note_assert_label(stat_key, label);
         self.sva_sites.push(SvaClockedSite {
             span_key,
             stat_key,

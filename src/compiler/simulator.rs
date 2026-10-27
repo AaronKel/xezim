@@ -3511,7 +3511,11 @@ struct DeferredReport {
 /// consumer-side follow-up.
 #[derive(Debug, Clone)]
 struct ObservedProbe {
-    name: String,
+    /// The site's `assertion_stats` key, location and kind tag, so its
+    /// outcome lands on the same entry the other assertion paths use.
+    stat_key: usize,
+    loc: (Option<u32>, usize),
+    kind: u8,
     predicate: Expression,
     /// Optional `this` handle so a property declared in a class context can
     /// resolve member references at evaluation time.
@@ -7176,6 +7180,13 @@ pub struct Simulator {
     /// §16.5, §16.14), keyed like `assertion_stats`. Filled once when the
     /// site registers; read only by the coverage DB writer.
     assertion_labels: HashMap<usize, String>,
+    /// §9.3.1: the name of a named block whose only statement is the
+    /// assertion about to execute. The parser hosts a procedural statement
+    /// label (`a_imm: assert (x);`) in such a block, and the bytecode
+    /// compiler's statement fallback re-wraps an assertion in its enclosing
+    /// named blocks the same way, so the block executor sets this and the
+    /// assertion takes it as its label.
+    assert_wrap_label: Option<String>,
     /// Code coverage sites and toggle state (`--code-coverage`); `None` when
     /// the run collects none. See `code_cov`.
     code_cov: Option<Box<code_cov::CodeCov>>,

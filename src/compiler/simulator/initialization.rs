@@ -4003,6 +4003,7 @@ impl Simulator {
             cg_heap: vec![None],
             assertion_stats: HashMap::default(),
             assertion_labels: HashMap::default(),
+            assert_wrap_label: None,
             code_cov: None,
             code_cov_hits: Vec::new(),
             code_cov_toggle_names,
