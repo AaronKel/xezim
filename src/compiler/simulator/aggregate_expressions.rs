@@ -1764,6 +1764,7 @@ impl Simulator {
             nested: false,
             is_object_elem: false,
             nd_base: None,
+            row_tail: None,
         };
         Self::csp_size_solved(&c, &wrapper)
     }

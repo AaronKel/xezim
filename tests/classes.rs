@@ -854,3 +854,5 @@ mod method_array_write_shadows_module_array;
 mod constructor_default_args_2023;
 #[path = "classes/randomize_type_param_576.rs"]
 mod randomize_type_param_576;
+#[path = "classes/nested_dyn_members.rs"]
+mod nested_dyn_members;

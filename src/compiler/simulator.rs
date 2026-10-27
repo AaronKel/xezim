@@ -303,7 +303,7 @@ fn method_boost_enabled() -> bool {
 /// salt hash to different keys and are simply recompiled; the safety net is
 /// the suite-level ON == OFF parity run against a warm cache.
 // §6.16 / §6.24.3: string casts emit conversion rather than width resizing.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3047;
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3048;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1566,7 +1566,7 @@ struct CombEntryCold {
     cov: Option<u32>,
 }
 
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB021";
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB022";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
@@ -12646,6 +12646,20 @@ struct RandColl {
     /// outermost first. The solver keys a row like a 1-D array and walks
     /// the leading dimensions through the bounds (`Csp::nd_dims`).
     nd_base: Option<(String, Vec<(i64, i64)>)>,
+    /// §7.4.5: a dynamic outer dimension whose elements are unpacked arrays
+    /// (`T a[][N]`, `T a[][]`): the shape of one row. The member's own
+    /// elements are the rows; the joint solver keys each row like a row of
+    /// a multi-dimensional array (`nd_base`) once the outer size is known.
+    row_tail: Option<RowTail>,
+}
+
+/// The rows of a dynamic outer dimension (`RandColl::row_tail`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowTail {
+    /// `T a[][N][M]`: every row has these fixed dimensions.
+    Fixed(Vec<(i64, i64)>),
+    /// `T a[][]`: every row is a dynamic array with its own size.
+    Dyn,
 }
 
 /// A `.size()` constraint on a rand dynamic array (§18.4): the array must be

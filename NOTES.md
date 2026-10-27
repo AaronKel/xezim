@@ -20,6 +20,18 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   dangling; `o.h = new()` and `o.arr[0] = new()` from outside the class
   built an object of class `T`; and a packed 2-D property through the
   parameter dropped element writes (#576).
+* A class member with a dynamic or queue outer dimension over unpacked rows
+  (`bit [7:0] raw[][2]`, `int q3[][2][3]`, `T cells[$][2]`, `int d[][]`)
+  works (§7.4.5, §7.5, §18.4). It was a dynamic array of scalars:
+  `o.raw[0][1] = 9` wrote nothing, `d[1] = new[3]` left one scalar row, a
+  two-variable `foreach` saw no elements, the copy constructor dropped the
+  rows, and a constraint on a row element (`cells[0][0].en == 1`,
+  `d[i].size() == i + 1`, `foreach (q3[i, j, k])`) failed randomize(). Each
+  object now shapes the member like a module-scope declaration of the same
+  form, and the joint solver solves the outer size, then each row's size,
+  then the elements (#576). `%p` of such a member, and of a module-scope
+  variable of the same shapes, lists each row as a nested list; it printed
+  `'{0, 0}`.
 * A cast to a typedef in a constant expression takes the typedef's width
   and signing (§6.24.1): `localparam int A = q_t'(45)` with a 4-bit `q_t`
   is 13, and the same holds for a declared width, a generate `if` or

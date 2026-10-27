@@ -1,13 +1,16 @@
-//! IEEE 1800-2023 §8.25 / §18.4: class members whose type comes from a
-//! class type parameter randomize in the object's own specialization (#576,
-//! reported by Ganesh-TNL). A `rand T beats[]` (dynamic, fixed, queue or
-//! associative) bound wider than `T`'s default solved its elements at the
-//! default width, so a field constraint fell outside them; a `rand T h`
-//! bound to a class was drawn as a random number instead of randomizing the
-//! object; `o.h = new()` and `o.arr[0] = new()` from outside the class built
-//! an object of class `T`; and a packed 2-D property through the parameter
-//! dropped element writes. Section B of the report (nested dynamic arrays,
-//! no type parameter) is a separate gap and is not covered here.
+//! IEEE 1800-2023 §8.25 / §18.4 / §7.4.5: class members whose type comes
+//! from a class type parameter randomize in the object's own
+//! specialization, and members with a dynamic outer dimension over unpacked
+//! rows randomize at all (#576, reported by Ganesh-TNL). A `rand T beats[]`
+//! (dynamic, fixed, queue or associative) bound wider than `T`'s default
+//! solved its elements at the default width, so a field constraint fell
+//! outside them; a `rand T h` bound to a class was drawn as a random number
+//! instead of randomizing the object; `o.h = new()` and `o.arr[0] = new()`
+//! from outside the class built an object of class `T`; a packed 2-D
+//! property through the parameter dropped element writes; and a member
+//! select on an element of `narrow_t cells[][2]` or `narrow_t both[][]`
+//! could not be solved. The report's testbench, all 63 checks, plus two
+//! checks for the construction and packed-select fixes.
 
 use std::path::Path;
 use std::process::Command;

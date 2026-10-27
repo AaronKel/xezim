@@ -1,7 +1,8 @@
-// IEEE 1800-2023 §8.25 / §18.4: randomization of class members whose type
-// comes from a class type parameter bound to a type other than the default
-// (#576, reported by Ganesh-TNL). Section B of the report (nested dynamic
-// arrays, no type parameter) is a separate gap and is not covered here.
+// IEEE 1800-2023 §8.25 / §18.4 / §7.4.5: randomization of class members
+// whose type comes from a class type parameter bound to a type other than
+// the default, and of members with a dynamic outer dimension over unpacked
+// rows (`narrow_t cells[][2]`, `narrow_t both[][]`) (#576, reported by
+// Ganesh-TNL; the report's testbench, plus checks G1 and G2).
 `ifndef SVTEST_DEFS_SVH
 `define SVTEST_DEFS_SVH
 
@@ -79,6 +80,14 @@ endclass
 class style_c #(type BEAT_T = narrow_t);
    rand BEAT_T beats[];
    rand bit    pick;
+endclass
+
+// ----- B: nested dynamic array, no type parameter anywhere -----------------
+class cells_c;
+   rand narrow_t cells[][2];   // outer dynamic, inner fixed
+   rand narrow_t flat[];       // single dynamic dim (control)
+   rand narrow_t fixed[2][2];  // both dims fixed (control)
+   rand narrow_t both[][];     // both dims dynamic
 endclass
 
 
@@ -252,6 +261,26 @@ module tb_top;
                                      beats[0].en == 1; beats[0].stop == 0;
                                      beats[0].en == 1 -> beats[0].stop == 1; };
            expect_unsat("A21 implication contradicted by fixed fields", ok); end
+
+      // ============ B: nested dynamic array, no type parameter at all =======
+      begin cells_c o = new();
+           ok = o.randomize() with { flat.size() == 1; flat[0].en == 1; };
+           expect_ok("B1 CONTROL single dynamic dim + member select", ok); end
+      begin cells_c o = new();
+           ok = o.randomize() with { fixed[0][0].en == 1; };
+           expect_ok("B2 CONTROL both dims fixed + member select", ok); end
+      begin cells_c o = new();
+           ok = o.randomize() with { cells.size() == 1; cells[0][0].en == 1; };
+           expect_ok("B3 outer dynamic / inner fixed + member select", ok); end
+      begin cells_c o = new();
+           ok = o.randomize() with { both.size() == 1; both[0].size() == 1; both[0][0].en == 1; };
+           expect_ok("B4 both dims dynamic + member select", ok); end
+      begin cells_c o = new();
+           ok = o.randomize() with { cells.size() == 1; };
+           expect_ok("B5 CONTROL nested shape, size() only", ok); end
+      begin cells_c o = new();
+           ok = o.randomize() with { cells.size() == 1; cells[0][0] == '1; };
+           expect_ok("B6 CONTROL nested shape, whole-element equality", ok); end
 
       // ============ C: cousin sweep over parameterized shapes ===============
       // foreach -- inline and inside a class constraint block
