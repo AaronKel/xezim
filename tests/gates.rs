@@ -81,3 +81,5 @@ mod wave_flag_gates_dumping;
 mod zero_delay_path_edge_ordering;
 #[path = "gates/udp_unnamed_after_delay_579.rs"]
 mod udp_unnamed_after_delay_579;
+#[path = "gates/udp_delay_forms.rs"]
+mod udp_delay_forms;
