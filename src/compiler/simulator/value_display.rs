@@ -41,17 +41,20 @@ impl Simulator {
             .map(|(label, _)| label.clone())
     }
 
-    /// `%p` of one packed leaf by its declared type: an enum as its label
-    /// (§6.19), a real as a real, a string quoted, an integer atom with its
-    /// declared signedness, any other integral as decimal — the forms the
-    /// reference simulator prints inside aggregates.
+    /// `%p` of one packed leaf by its declared type, as the majority of the
+    /// reference simulators prints it (#566): a 2/4-state VECTOR type
+    /// (`bit`, `logic`, `reg`, with any packed dimensions) as `'h` hex with
+    /// uppercase X/Z digits, a vector declared `signed` and the integer atoms
+    /// (`byte`, `int`, `shortint`, `longint`, `integer`) as decimal with
+    /// their declared signedness, an enum as its label, a real as a real and
+    /// a string quoted.
     pub(super) fn p_leaf_value(&self, v: &Value, dt: &DataType) -> String {
         use crate::ast::types::{IntegerAtomType, Signing, SimpleType};
         if let Some(label) = self.p_enum_label(v, dt) {
             return label;
         }
         match self.resolve_dt(dt) {
-            DataType::Real { .. } => format!("{}", v.to_f64()),
+            DataType::Real { .. } => Self::p_real(v.to_f64()),
             DataType::Simple {
                 kind: SimpleType::String,
                 ..
@@ -63,14 +66,27 @@ impl Simulator {
                     None => kind != IntegerAtomType::Time,
                 };
                 if x.is_real {
-                    format!("{}", x.to_f64())
+                    Self::p_real(x.to_f64())
                 } else {
                     x.to_dec_string()
                 }
             }
+            DataType::IntegerVector {
+                signing: Some(Signing::Signed),
+                ..
+            }
+            | DataType::Implicit {
+                signing: Some(Signing::Signed),
+                ..
+            } => {
+                let mut x = v.clone();
+                x.is_signed = true;
+                x.to_dec_string()
+            }
+            DataType::IntegerVector { .. } | DataType::Implicit { .. } => Self::p_hex(v),
             _ => {
                 if v.is_real {
-                    format!("{}", v.to_f64())
+                    Self::p_real(v.to_f64())
                 } else {
                     v.to_dec_string()
                 }
@@ -78,74 +94,40 @@ impl Simulator {
         }
     }
 
-    /// Render one `%p` member value: strings as quoted text, reals as reals,
-    /// everything else in decimal (LRM §21.2.1.7 assignment-pattern form).
-    /// §21.2.1.7 `%0p`: rewrite a `%p` assignment-pattern rendering into the
-    /// reference simulator's compact form — braces, member names and comma
-    /// separators drop out, values separate with single spaces
-    /// (`'{id:777, active:1}` -> `777 1`). Quoted strings pass through
-    /// verbatim, including any braces or commas inside them.
-    pub(super) fn compact_p(s: &str) -> String {
-        // A lone string prints unquoted (`%0p` of "ab" is `ab`).
-        if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-            return s[1..s.len() - 1].to_string();
+    /// `'h` hex of a vector value: lowercase digits, uppercase X/Z, leading
+    /// zeros dropped (`'h0` for zero).
+    pub(super) fn p_hex(v: &Value) -> String {
+        let digits: String = v
+            .to_hex()
+            .chars()
+            .map(|c| match c {
+                'x' => 'X',
+                'z' => 'Z',
+                c => c,
+            })
+            .collect();
+        let trimmed = digits.trim_start_matches('0');
+        format!("'h{}", if trimmed.is_empty() { "0" } else { trimmed })
+    }
+
+    /// A real inside an aggregate: the shortest round-trip form for ordinary
+    /// magnitudes, `%g`-style exponent form (six significant digits) for
+    /// very small or very large ones, as the reference simulators print a
+    /// reinterpreted union member (`3.21143e-322`).
+    pub(super) fn p_real(x: f64) -> String {
+        let a = x.abs();
+        if x != 0.0 && x.is_finite() && !(1e-4..1e15).contains(&a) {
+            let s = format!("{:.5e}", x);
+            let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
+            let m = if m.contains('.') {
+                m.trim_end_matches('0').trim_end_matches('.')
+            } else {
+                m
+            };
+            let e: i32 = e.parse().unwrap_or(0);
+            return format!("{m}e{}{:02}", if e < 0 { "-" } else { "+" }, e.abs());
         }
-        let mut out = String::with_capacity(s.len());
-        let mut it = s.chars().peekable();
-        let mut in_str = false;
-        let mut expect_name = false;
-        while let Some(c) = it.next() {
-            if in_str {
-                out.push(c);
-                if c == '"' {
-                    in_str = false;
-                }
-                continue;
-            }
-            match c {
-                '"' => {
-                    in_str = true;
-                    expect_name = false;
-                    out.push(c);
-                }
-                '\'' if it.peek() == Some(&'{') => {
-                    it.next();
-                    expect_name = true;
-                }
-                '}' => {}
-                ',' => {
-                    if it.peek() == Some(&' ') {
-                        it.next();
-                    }
-                    if !out.is_empty() && !out.ends_with(' ') {
-                        out.push(' ');
-                    }
-                    expect_name = true;
-                }
-                _ if expect_name && (c.is_ascii_alphabetic() || c == '_') => {
-                    // Possible `name:` label — drop it only if a ':' follows.
-                    let mut ident = String::new();
-                    ident.push(c);
-                    while it
-                        .peek()
-                        .is_some_and(|&n| n.is_ascii_alphanumeric() || n == '_')
-                    {
-                        ident.push(it.next().unwrap());
-                    }
-                    if it.peek() == Some(&':') {
-                        it.next();
-                    } else {
-                        out.push_str(&ident);
-                    }
-                    expect_name = false;
-                }
-                _ => {
-                    expect_name = false;
-                    out.push(c);
-                }
-            }
-        }
-        out
+        format!("{x}")
     }
 
     /// Render an already-extracted `Value` interpreted as `dt` (used for the
@@ -234,6 +216,12 @@ impl Simulator {
                 off += items[i].1;
             }
         }
+        // §7.3 / §21.2.1.7 (#566, majority): a PACKED union prints its first
+        // member only; an unpacked union prints every member over the shared
+        // storage, a `real` member as the bits reinterpreted.
+        if is_union && !su.tagged && su.packed {
+            items.truncate(1);
+        }
         let parts: Vec<String> = (0..items.len())
             .map(|i| {
                 let (n, w, mdt) = items[i].clone();
@@ -244,6 +232,14 @@ impl Simulator {
                 // A slice loses the member's signedness: an `int` member holding
                 // 32'hDEADBEEF prints -559038737, not 3735928559.
                 sub.is_signed = super::elaborate::is_type_signed(&mdt);
+                if is_union
+                    && !su.packed
+                    && matches!(self.resolve_dt(&mdt), DataType::Real { .. })
+                    && !v.is_real
+                {
+                    let bits = sub.to_u64().unwrap_or(0);
+                    return format!("{}:{}", n, Self::p_real(f64::from_bits(bits)));
+                }
                 format!("{}:{}", n, self.render_p_value_typed(&sub, &mdt))
             })
             .collect();
@@ -262,6 +258,7 @@ impl Simulator {
         let Some((first, rest)) = lists.split_first() else {
             return self.render_p_typed(name, dt);
         };
+        self.p_top_level = false;
         let parts: Vec<String> = first
             .iter()
             .map(|i| {
@@ -322,6 +319,7 @@ impl Simulator {
                         .unwrap_or_else(|| Value::zero(1));
                     return self.render_p_packed(&v, &su);
                 }
+                self.p_top_level = false;
                 let mut parts = Vec::new();
                 for m in &su.members {
                     for md in &m.declarators {
@@ -358,6 +356,15 @@ impl Simulator {
                 .map(|v| format!("\"{}\"", v.to_sv_string()))
                 .unwrap_or_else(|| "\"\"".into()),
             _ => match self.get_signal_value_by_name(name) {
+                Some(v) if std::mem::take(&mut self.p_top_level) => {
+                    if v.is_real {
+                        format!("{}", v.to_f64())
+                    } else if let Some(label) = self.p_enum_label(&v, dt) {
+                        label
+                    } else {
+                        v.to_dec_string()
+                    }
+                }
                 Some(v) => self.p_leaf_value(&v, dt),
                 None => self.p_unwritten_leaf(name, dt),
             },
@@ -537,7 +544,7 @@ impl Simulator {
     }
 
     /// A declared type by its (possibly package-qualified) name.
-    fn p_type_by_name(&self, tn: &str) -> Option<DataType> {
+    pub(super) fn p_type_by_name(&self, tn: &str) -> Option<DataType> {
         if let Some(dt) = self.module.typedef_types.get(tn) {
             return Some(dt.clone());
         }

@@ -2494,13 +2494,7 @@ impl Simulator {
         // §21.2.1.7 `%0p` (compact): the arm below marks where its output
         // starts; the rewrite runs here on the NEXT iteration (or after the
         // loop) because the arm has many early-continue exits.
-        let mut compact_from: Option<usize> = None;
         while let Some(c) = chars.next() {
-            if let Some(fp) = compact_from.take() {
-                let tail = Self::compact_p(&result[fp..]);
-                result.truncate(fp);
-                result.push_str(&tail);
-            }
             if c == '%' {
                 // §21.2.1.2: %[flags][width][.precision]<spec>. Flags: '-'
                 // left-justifies (pad spaces on the right), '+' forces a sign
@@ -2627,12 +2621,13 @@ impl Simulator {
                             }
                         }
                         'p' | 'P' => {
-                            if has_width && pad_width == 0 {
-                                compact_from = Some(result.len());
-                            }
+                            // §21.2.1.7 defines no width for `%p`; `%0p`
+                            // prints as `%p` (#566, majority), not a
+                            // brace-less list.
                             if ai < args.len() {
                                 let arg = &args[ai];
                                 ai += 1;
+                                self.p_top_level = true;
                                 // §8.9: a static fixed array spelled `Cls::S`
                                 // or `C#(T)::S`, or one element of it,
                                 // `Cls::S[i]`.
@@ -3467,11 +3462,6 @@ impl Simulator {
             } else {
                 result.push(c);
             }
-        }
-        if let Some(fp) = compact_from.take() {
-            let tail = Self::compact_p(&result[fp..]);
-            result.truncate(fp);
-            result.push_str(&tail);
         }
         (result, ai)
     }

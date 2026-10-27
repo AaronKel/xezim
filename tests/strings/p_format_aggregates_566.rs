@@ -1,16 +1,23 @@
-//! IEEE 1800-2023 §21.2.1.7: `%p` of every aggregate shape (#566, reported
-//! by Ganesh-TNL with a three-simulator comparison). The `'{...}` form is
-//! printed in every context — a class property through a handle, `this` or
-//! bare, a static or specialized-class property, an interface or
-//! virtual-interface member, an element of a queue, array or associative
-//! array of structs, a queue slice, a function result and a task formal or
-//! local — where each printed one flat decimal; an enum member prints its
-//! label, also for an enum declared in a package.
+//! IEEE 1800-2023 §21.2.1.7: `%p` of every aggregate shape, rendered as the
+//! majority of three commercial simulators prints it (#566, reported by
+//! Ganesh-TNL with the comparison):
 //!
-//! Member radix (decimal), the packed-union member set, `%0p` and the space
-//! before an associative array's closing brace stay as the project's
-//! reference simulator prints them (the `lrm` suite's goldens); the issue's
-//! majority vote on those is an open policy question.
+//! * the `'{...}` form in every context — a class property through a
+//!   handle, `this` or bare, a static or specialized-class property, an
+//!   interface or virtual-interface member, an element of a queue, array
+//!   or associative array of structs, a queue slice, a function result and
+//!   a task formal or local (each printed one flat decimal);
+//! * member radix: 2/4-state vector types (`bit`, `logic`, `reg`, packed
+//!   arrays of them) as `'h` hex with uppercase X/Z; `byte`, the integer
+//!   atoms and vectors declared `signed` as signed decimal; an enum as its
+//!   label (also from a package); a packed array member flat;
+//! * a packed union prints its first member only; an unpacked union prints
+//!   every member over the shared storage, a `real` member reinterpreted;
+//! * `%0p` prints as `%p`; no space before an associative array's closing
+//!   brace; a standalone scalar stays plain decimal.
+//!
+//! These forms replace the single-simulator goldens the suite carried
+//! before (decimal members, trailing space, compact `%0p`).
 
 use xezim::simulate;
 
@@ -245,56 +252,56 @@ endmodule
 "#;
 
 const EXPECTED: &[&str] = &[
-    "CHK PS.01-kitchen|'{a:3, b:-5, ub:300, sh:-2, lg:4886718345, it:-7, y:-1, l:90, r:91}",
-    "CHK PS.02-cfg|'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}",
-    "CHK PS.03-nested|'{inner:'{hi:10, lo:11}, tail:205}",
-    "CHK PS.04-enum-member|'{e:B, x:5}",
-    "CHK PS.05-xz|'{hi:X, lo:5}",
-    "CHK PS.06-zero|'{hi:0, lo:0}",
-    "CHK PS.07-wide|'{w:16045690984503054900, t:15}",
-    "CHK PS.08-packed-array-member|'{dom:305419896, t:15}",
-    "CHK PS.09-scalar-top|-5 -1 90 '{hi:1, lo:2}",
-    "CHK US.01-kitchen|'{a:1, sh:2, lg:3, it:4, ub:5, y:6, bv:90, lv:91, s:\"str\"}",
+    "CHK PS.01-kitchen|'{a:'h3, b:-5, ub:300, sh:-2, lg:4886718345, it:-7, y:-1, l:'h5a, r:'h5b}",
+    "CHK PS.02-cfg|'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}",
+    "CHK PS.03-nested|'{inner:'{hi:'ha, lo:'hb}, tail:'hcd}",
+    "CHK PS.04-enum-member|'{e:B, x:'h5}",
+    "CHK PS.05-xz|'{hi:'hX, lo:'h5}",
+    "CHK PS.06-zero|'{hi:'h0, lo:'h0}",
+    "CHK PS.07-wide|'{w:'hdeadbeefcafe1234, t:'hf}",
+    "CHK PS.08-packed-array-member|'{dom:'h12345678, t:'hf}",
+    "CHK PS.09-scalar-top|-5 -1 90 '{hi:'h1, lo:'h2}",
+    "CHK US.01-kitchen|'{a:1, sh:2, lg:3, it:4, ub:5, y:6, bv:'h5a, lv:'h5b, s:\"str\"}",
     "CHK US.02-real-enum|'{r:3.25, e:C}",
-    "CHK US.03-packed-in-unpacked|'{p:'{hi:3, lo:4}, arr:'{5, 6}}",
-    "CHK UN.01-packed|'{b:165, p:'{hi:10, lo:5}}",
-    "CHK UN.02-unpacked|'{i:65, r:65}",
-    "CHK AR.01-ps-array|'{'{hi:1, lo:2}, '{hi:3, lo:4}}",
-    "CHK AR.02-ps-elem|'{hi:3, lo:4}",
+    "CHK US.03-packed-in-unpacked|'{p:'{hi:'h3, lo:'h4}, arr:'{5, 6}}",
+    "CHK UN.01-packed|'{b:'ha5}",
+    "CHK UN.02-unpacked|'{i:65, r:3.21143e-322}",
+    "CHK AR.01-ps-array|'{'{hi:'h1, lo:'h2}, '{hi:'h3, lo:'h4}}",
+    "CHK AR.02-ps-elem|'{hi:'h3, lo:'h4}",
     "CHK AR.03-byte-array|'{17, 34}",
-    "CHK AR.04-bit-array|'{51, 68}",
+    "CHK AR.04-bit-array|'{'h33, 'h44}",
     "CHK AR.05-int-array|'{1, 2}",
     "CHK AR.06-2d-int|'{'{1, 2}, '{3, 4}}",
-    "CHK IF.01-if-array|'{'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}, '{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}, '{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}, '{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}}",
-    "CHK IF.02-if-array-elem|'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}",
-    "CHK IF.03-if-single|'{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}",
-    "CHK IF.04-vif-array-elem|'{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}",
-    "CHK IF.05-vif-single|'{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}",
+    "CHK IF.01-if-array|'{'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}, '{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}, '{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}, '{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}}",
+    "CHK IF.02-if-array-elem|'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}",
+    "CHK IF.03-if-single|'{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}",
+    "CHK IF.04-vif-array-elem|'{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}",
+    "CHK IF.05-vif-single|'{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}",
     "CHK IF.06-if-elem-member|3",
-    "CHK CL.01-handle|'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}",
-    "CHK CL.02-this|'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}",
-    "CHK CL.03-bare|'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}",
-    "CHK CL.04-unpacked|'{a:1, sh:2, lg:3, it:4, ub:5, y:6, bv:90, lv:91, s:\"str\"}",
-    "CHK CL.05-q|'{'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}, '{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}}",
-    "CHK CL.06-qelem|'{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}",
-    "CHK CL.07-arr|'{'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}, '{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}}",
-    "CHK CL.08-arrelem|'{f01:5, f02:580, f03:7, f04:33, f05:999, f06:3, f07:2, f08:12345, f09:2, f10:64, f11:0, f12:1, f13:0, f14:1}",
+    "CHK CL.01-handle|'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}",
+    "CHK CL.02-this|'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}",
+    "CHK CL.03-bare|'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}",
+    "CHK CL.04-unpacked|'{a:1, sh:2, lg:3, it:4, ub:5, y:6, bv:'h5a, lv:'h5b, s:\"str\"}",
+    "CHK CL.05-q|'{'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}, '{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}}",
+    "CHK CL.06-qelem|'{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}",
+    "CHK CL.07-arr|'{'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}, '{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}}",
+    "CHK CL.08-arrelem|'{f01:'h5, f02:'h244, f03:'h7, f04:'h21, f05:'h3e7, f06:'h3, f07:'h2, f08:'h3039, f09:'h2, f10:'h40, f11:'h0, f12:'h1, f13:'h0, f14:'h1}",
     "CHK CL.12-member|0",
-    "CHK CL.09-static|'{hi:3, lo:4}",
-    "CHK CL.10-spec-static|'{hi:5, lo:6}",
-    "CHK CL.11-spec-prop|'{hi:7, lo:8}",
-    "CHK QC.01-ps-queue|'{'{hi:1, lo:2}, '{hi:3, lo:4}, '{hi:5, lo:6}}",
-    "CHK QC.02-ps-dyn|'{'{hi:9, lo:10}, '{hi:11, lo:12}}",
-    "CHK QC.03-ps-assoc|'{0:'{hi:1, lo:2}, 5:'{hi:3, lo:4} }",
-    "CHK QC.04-byte-queue|'{'{hi:1, lo:2}, '{hi:3, lo:4}, '{hi:5, lo:6}}",
-    "CHK QC.05-queue-slice|'{'{hi:1, lo:2}, '{hi:3, lo:4}}",
-    "CHK ZP.01-packed|1 2",
-    "CHK ZP.02-unpacked|1 2 3 4 5 6 90 91 \"str\"",
-    "CHK ZP.03-int-array|1 2",
+    "CHK CL.09-static|'{hi:'h3, lo:'h4}",
+    "CHK CL.10-spec-static|'{hi:'h5, lo:'h6}",
+    "CHK CL.11-spec-prop|'{hi:'h7, lo:'h8}",
+    "CHK QC.01-ps-queue|'{'{hi:'h1, lo:'h2}, '{hi:'h3, lo:'h4}, '{hi:'h5, lo:'h6}}",
+    "CHK QC.02-ps-dyn|'{'{hi:'h9, lo:'ha}, '{hi:'hb, lo:'hc}}",
+    "CHK QC.03-ps-assoc|'{0:'{hi:'h1, lo:'h2}, 5:'{hi:'h3, lo:'h4}}",
+    "CHK QC.04-byte-queue|'{'{hi:'h1, lo:'h2}, '{hi:'h3, lo:'h4}, '{hi:'h5, lo:'h6}}",
+    "CHK QC.05-queue-slice|'{'{hi:'h1, lo:'h2}, '{hi:'h3, lo:'h4}}",
+    "CHK ZP.01-packed|'{hi:'h1, lo:'h2}",
+    "CHK ZP.02-unpacked|'{a:1, sh:2, lg:3, it:4, ub:5, y:6, bv:'h5a, lv:'h5b, s:\"str\"}",
+    "CHK ZP.03-int-array|'{1, 2}",
     "CHK ZP.04-scalar|-5",
-    "CHK FN.01-return|'{hi:9, lo:10}",
-    "CHK FN.02|'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}",
-    "CHK FN.03|'{f01:3, f02:4400, f03:9, f04:63, f05:1447, f06:0, f07:5, f08:508360320, f09:5, f10:128, f11:1, f12:0, f13:1, f14:0}",
+    "CHK FN.01-return|'{hi:'h9, lo:'ha}",
+    "CHK FN.02|'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}",
+    "CHK FN.03|'{f01:'h3, f02:'h1130, f03:'h9, f04:'h3f, f05:'h5a7, f06:'h0, f07:'h5, f08:'h1e4cf680, f09:'h5, f10:'h80, f11:'h1, f12:'h0, f13:'h1, f14:'h0}",
 ];
 
 #[test]

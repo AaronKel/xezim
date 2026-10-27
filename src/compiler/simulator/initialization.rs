@@ -3858,6 +3858,7 @@ impl Simulator {
             proc_settle_defer: false,
             deferred_proc_entries: Vec::new(),
             t0_starts_remaining: 0,
+            p_top_level: false,
             null_call_reported: Default::default(),
             cascade_limit: std::env::var("XEZIM_CASCADE_LIMIT")
                 .ok()
