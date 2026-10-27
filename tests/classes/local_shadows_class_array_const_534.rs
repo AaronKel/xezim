@@ -38,16 +38,15 @@ endmodule
 "#;
     let sim = simulate(src, 10).expect("simulate");
     let msgs: Vec<&str> = sim.output.iter().map(|o| o.message.as_str()).collect();
-    for m in ["size=4", "x3=8", "T[0]=5", "T[3]=8", "own=2"] {
+    for m in ["size=4", "x3=8", "T[0]=5", "T[3]=8", "fsize=3 fsum=60", "own=2"] {
         assert!(msgs.contains(&m), "missing {m}: {msgs:?}");
     }
 }
 
-/// Known gap: an unpacked-array FORMAL of a class method named like a class
-/// array constant still reads the constant (`$size`, `foreach` and element
-/// reads); only a declared local shadows it.
+/// An unpacked-array FORMAL of a class method named like a class array
+/// constant shadows it too (§13.5): the bare name was lifted to the object's
+/// member storage before the frame's formal was consulted.
 #[test]
-#[ignore = "known gap: a class-method array formal does not shadow a same-named class array constant"]
 fn method_array_formal_shadows_the_class_constant() {
     let src = r#"
 class C;

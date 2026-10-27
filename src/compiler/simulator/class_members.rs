@@ -735,6 +735,17 @@ impl Simulator {
         if let Some(k) = self.static_fixed_key_for_name(name) {
             return Some(k);
         }
+        // §23.9 / §13.5 (#534): an unpacked-array FORMAL of the running
+        // method is bound under its bare name (a module-array row plus a
+        // frame marker) and shadows a same-named class member; it must not
+        // be lifted to the object's storage. The array-row test keeps the
+        // marker probe off the common path.
+        if self.module.arrays.contains_key(name)
+            && let Some(frame) = self.local_stack.last()
+            && frame.contains_key(&format!("\u{1}array_formal:{name}"))
+        {
+            return None;
+        }
         // This guard sees every call (22M+ on a UVM run): keep the ORIGINAL
         // vectorizable one-pass `any` for the overwhelmingly common bare
         // names (a manual classify loop here measured +0.5% instructions on
