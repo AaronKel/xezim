@@ -1307,14 +1307,28 @@ fn simulate_multi_inner(
     let mut pre = take_preprocessed(raw_sources, source_paths, include_dirs, defines)
         .filter(|_| sources.as_slice() == raw_sources);
     let cache = design_cache_config();
-    if cache.is_some() && pre.is_none() {
-        // One pass serves both the cache key and (on a miss) elaboration.
+    if pre.is_none() {
+        // One pass serves the cache key, the intra-assignment delay rewrite
+        // below and (on a miss) elaboration.
         pre = Some(xezim_core::preprocess_design(
             &sources,
             source_paths,
             include_dirs,
             defines,
         ));
+    }
+    // §9.4.5 / §22.4 (#567): text spliced in by `include or by a macro
+    // exists only after preprocessing, so the pre-parse rewrite above never
+    // saw a delay written there. Rewrite the preprocessed texts too; the
+    // pass keeps every byte of whitespace, so the line maps stay valid, and
+    // a delay already rewritten is left alone.
+    if let Some(p) = pre.as_mut() {
+        for t in p.texts.iter_mut() {
+            let rewritten = intra_delay::rewrite_intra_assignment_delays(t);
+            if rewritten != *t {
+                *t = rewritten;
+            }
+        }
     }
     let mut cache_pp_texts: Vec<String> = Vec::new();
     let mut cache_line_maps = Vec::new();
