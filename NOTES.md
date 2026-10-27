@@ -10,6 +10,24 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A multi-dimensional unpacked array is a randomize target (§18.4, §18.12):
+  `std::randomize(t, a)` on a 2-D or 3-D local (static or automatic) and a
+  `rand int m[2][2]` class member with inline constraints each solve, with
+  `foreach (a[i]) foreach (a[i][j])` walking the declared bounds and
+  `a[i][j]` naming the element. Such an array was turned away by the scope
+  solve and barred the class solve, a nested `foreach` body passed the
+  inline check unexamined, a fixed multi-dimensional local kept only its
+  first dimension, and a 1-D `std::randomize` run after one gave up because
+  the two locals shared a shape entry (#519).
+* Inside a class method, `a[i] = v` on a bare array name the class declares
+  writes the object's member. A same-named module-level array's element
+  was found in the signal table first and took the write, so a method's
+  `foreach` fill left the member at 0 while the read side already named the
+  member (§8.3). A class solve's element repair likewise no longer writes a
+  bare module-level copy of a class property's element.
+* The `--compile` path rewrites an intra-assignment delay spliced in by
+  `include or a macro the way the simulate path does, so a compiled artifact
+  of such a design keeps the timing control (§9.4.5, #567).
 * A run that ends on a run-time error exits 1, as one that ends on `$fatal`
   does (§20.10): a read or a task call through a null handle in a process
   body, or a wait on a mailbox that was never constructed (§8.4); a `forever`
