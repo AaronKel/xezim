@@ -357,6 +357,9 @@ fn print_usage() {
     eprintln!("                   (exact name or '<hier>.' prefix). Repeatable.");
     eprintln!("  -fst_scope_file <file>  (--fst-scope-file) FST scopes from a file: one or");
     eprintln!("                   more per line, '#' or '//' comments. Adds to --fst-scope.");
+    eprintln!("  --fst-repack[=N] gzip-wrap the finished FST on a clean close (GTKWave's");
+    eprintln!("                   repack-on-close; deflate level N, 1..9, default 6). About");
+    eprintln!("                   1.5x smaller; readers inflate it on open.");
     eprintln!("  -xezim_env <file>  (--xezim-env) Set XEZIM_* variables from a file before");
     eprintln!("                   anything reads them: NAME=value, export NAME=value,");
     eprintln!("                   setenv NAME value, unsetenv NAME. Overrides the shell.");
@@ -2053,6 +2056,7 @@ fn run_main() -> i32 {
     let mut code_cov_kinds: Option<u8> = None;
     let mut code_cov_scopes: Vec<String> = Vec::new();
     let mut fst_file: Option<String> = None;
+    let mut fst_repack: Option<u8> = None;
     let mut fst_scopes: Vec<String> = Vec::new();
     let mut sim_debug = false;
     let mut dump_files_list = false;
@@ -2690,6 +2694,19 @@ fn run_main() -> i32 {
             _ if arg.starts_with("--fst=") => {
                 fst_file = Some(arg["--fst=".len()..].to_string());
             }
+            "--fst-repack" => {
+                fst_repack = Some(6);
+            }
+            _ if arg.starts_with("--fst-repack=") => {
+                let v = &arg["--fst-repack=".len()..];
+                match v.parse::<u8>() {
+                    Ok(level) if (1..=9).contains(&level) => fst_repack = Some(level),
+                    _ => {
+                        eprintln!("Error: --fst-repack level must be 1..=9, got '{}'", v);
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--fst-scope" => {
                 i += 1;
                 if i < args.len() {
@@ -3298,6 +3315,7 @@ suppressed but the explicit SDF annotation still applies."
             if head.len() == 8 && head[..7] == xezim::XEZIM_BYTECODE_MAGIC[..7] {
                 match xezim::read_compiled(sf) {
                     Ok(Some(elab)) => {
+                        xezim::compiler::fst_sink::set_fst_repack(fst_repack);
                         chatter_out!("Loaded compiled: {}", sf);
                         chatter_out!("Max time: {} ns", max_time);
                         chatter_out!("------------------------------");
@@ -3783,6 +3801,7 @@ suppressed but the explicit SDF annotation still applies."
     // coverage, x-warnings (they name the net that went x), the
     // partition tooling, and XEZIM_KEEP_PORTS=1. Library callers never turn
     // it on: they may look any signal up after the run.
+    xezim::compiler::fst_sink::set_fst_repack(fst_repack);
     xezim_core::elaborate::set_port_elision(
         !xezim::compiler::simulator::wave_enabled()
             && fst_file.is_none()

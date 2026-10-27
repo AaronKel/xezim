@@ -207,6 +207,14 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   refused with the usual "recompile with current xezim" message; the caches
   are rebuilt (#531, core #87).
 
+**Command line**
+
+* `--fst-repack[=N]` gzip-wraps the finished FST dump on a clean close, as
+  GTKWave's repack-on-close does (deflate level N, 1..9, default 6): about
+  1.5x smaller on top of the per-block LZ4, at the cost of one pass over
+  the file at close and an inflate on open. A run that dies earlier leaves
+  the unwrapped, crash-safe dump as before.
+
 ### 0.11.3 — hierarchy, interfaces, assertions and collection correctness (October 2026)
 
 **Correctness**
