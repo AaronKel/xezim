@@ -10,6 +10,14 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A cast to a typedef in a constant expression takes the typedef's width
+  and signing (§6.24.1): `localparam int A = q_t'(45)` with a 4-bit `q_t`
+  is 13, and the same holds for a declared width, a generate `if` or
+  `case`, a header parameter default and a parameter override. It works
+  for package and `$unit` typedefs, a child's own typedefs, and the type
+  parameters of a module, the root included. A `$unit` constant function
+  casts to the `$unit` typedef even when the calling instance declares one
+  of the same name (core #98 and #575, contributed by chenbhil).
 * The coverage results file (`XEZIM_COV_DB`) names a labelled `assert`,
   `assume` or `cover` site: `"name": "c_hit"` for `c_hit: cover property
   (...)` (§16.5, §16.14), so a tool matching cover points to a verification

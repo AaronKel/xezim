@@ -175,3 +175,49 @@ endmodule
     let iterations = msgs.iter().filter(|m| m.starts_with("it ")).count();
     assert_eq!(iterations, 3, "{msgs:?}");
 }
+
+/// §6.20.3/§6.24.1: a cast to a type parameter of the ROOT module, which
+/// is not elaborated as an instance, takes that parameter's type too.
+#[test]
+fn root_module_type_parameter_casts() {
+    let msgs = messages(
+        "module t #(parameter type T = logic [3:0], parameter type S = logic signed [2:0]);
+  localparam int H = T'(45);
+  localparam int N = T'(-1) < 0;
+  localparam int SV = S'(45);
+  localparam int SN = S'(45) < 0;
+  logic [T'(45)-1:0] v;
+  initial $display(\"H=%0d N=%0d SV=%0d SN=%0d bits=%0d\", H, N, SV, SN, $bits(v));
+endmodule
+",
+    );
+    assert_line(&msgs, "H=13 N=0 SV=-3 SN=1 bits=13");
+}
+
+/// §13.4.3/§6.24.1: a `$unit` constant function casts to the `$unit`
+/// typedef of that name even when the instance that calls it declares its
+/// own typedef of the same name; the instance's own function still casts
+/// to the instance's typedef.
+#[test]
+fn unit_function_cast_keeps_unit_scope_inside_an_instance() {
+    let msgs = messages(
+        "typedef logic signed [7:0] w_t;
+function automatic int f(int x); return w_t'(x); endfunction
+module child #(parameter int H = f(200)) ();
+  typedef logic [4:0] w_t;
+  function automatic int g(int x); return w_t'(x); endfunction
+  localparam int B = f(200);
+  localparam int C = g(200);
+  logic [f(200) < 0 ? 3 : 1 : 0] v;
+  initial #1 $display(\"%m H=%0d B=%0d C=%0d bits=%0d\", H, B, C, $bits(v));
+endmodule
+module t;
+  localparam int T0 = f(200);
+  child c ();
+  initial #1 $display(\"T0=%0d\", T0);
+endmodule
+",
+    );
+    assert_line(&msgs, "T0=-56");
+    assert_line(&msgs, "t.c H=-56 B=-56 C=8 bits=4");
+}
