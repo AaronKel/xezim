@@ -97,8 +97,52 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   or specialized-class property, an interface or virtual-interface member,
   an element of a queue, array or associative array of structs, a queue
   slice, a function result and a task formal or local each printed one flat
-  decimal. An enum member prints its label, also for an enum declared in a
-  package. (#566, reported by Ganesh-TNL)
+  decimal. Inside an aggregate the members now print as the majority of
+  three commercial simulators prints them: 2/4-state vector types (`bit`,
+  `logic`, `reg`, packed arrays of them) as `'h` hex with uppercase X/Z,
+  `byte`, the integer atoms and vectors declared `signed` as signed decimal,
+  an enum as its label (also from a package), a packed array member flat; a
+  packed union prints its first member only and an unpacked union every
+  member over the shared storage, a `real` member reinterpreted; `%0p`
+  prints as `%p`; an associative array closes with a tight `}`. A
+  standalone scalar stays plain decimal. Tests that pinned the earlier
+  single-simulator forms (decimal members, a space before `}`, a compact
+  `%0p`) were updated. (#566, reported by Ganesh-TNL)
+* An unpacked-array formal of a class method named like a class array
+  constant shadows it for `$size`, `foreach` and element reads (§13.5,
+  §23.9); the bare name was lifted to the object's member storage. (#534)
+* A comparison operand reached by walking down from a class handle in
+  module scope — a packed-struct member (`e.st.sa`) or an element of an
+  array property (`e.arr[0]`) — and a comparison whose left operand is a
+  subroutine formal or local take the context width (§11.6.1, §11.8.2).
+  (#564 and #565, reported by Ganesh-TNL)
+* An intra-assignment delay written in an `include`d file, or in a macro
+  defined in one, is a timing control like one in the compiled file
+  (§9.4.5, §22.4): the pre-parse rewrite now also runs over the
+  preprocessed text. (#567, reported by git-hevangel)
+* A blocking write to the whole of a variable in a nested interface
+  instance, by hierarchical name or virtual interface, lands in the signal
+  table also after a `$monitor` or `$readmemh` has filled the name-keyed
+  copy (§10.4.1, §23.6). (#568, reported by git-hevangel)
+* A nonblocking assignment to a member or element of a class object named
+  through a task formal or local updates the object named when the
+  statement executed (§10.4.2, §4.9.4), not whichever object the name
+  resolves to in the NBA region. (#569, reported by git-hevangel)
+* A virtual interface assigned `outer.leaf`, an interface instance nested
+  in another, is bound to `leaf` (§25.9, §23.6); it was read as a modport
+  view of `outer`. (#570, reported by git-hevangel)
+* `-override_timescale` scales a bare `#delay` in a package or
+  compilation-unit task or class method once (§3.14.2); the delay-only pass
+  scaled it a second time after the forced-timescale pass. (#571, reported
+  by git-hevangel)
+* An input port also passed to a sub-instance declared with a non-ANSI
+  header keeps its declared width and packed-struct layout (§23.2.2.1,
+  §23.3.3): the body-driven scan now reads a non-ANSI child's directions
+  from its body declarations. (#572, reported by git-hevangel)
+* A positional assignment pattern or an unpacked-array concatenation
+  written as the actual of an unpacked-array port supplies the port's
+  elements (§10.9.1, §10.10), including `pkg::t'{...}` struct literals.
+  (xezim-core #96 follow-up)
 * Port connections keep the formal's own width and labels when the actual
   is a part-select, a constant range, a whole net with a different declared
   range, or a fill literal (`'0`, `'1`): `input [11:2] p` reads `p[5:2]` by
