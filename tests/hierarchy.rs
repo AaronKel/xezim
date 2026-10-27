@@ -337,3 +337,12 @@ mod port_fill_literal_width;
 
 #[path = "hierarchy/upward_module_name_actual_561.rs"]
 mod upward_module_name_actual_561;
+
+#[path = "hierarchy/nested_iface_write_after_sync_568.rs"]
+mod nested_iface_write_after_sync_568;
+
+#[path = "hierarchy/vif_nested_instance_570.rs"]
+mod vif_nested_instance_570;
+
+#[path = "hierarchy/nonansi_child_port_width_572.rs"]
+mod nonansi_child_port_width_572;

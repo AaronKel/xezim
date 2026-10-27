@@ -4595,7 +4595,14 @@ impl Simulator {
                         .map(|s| s.name.name.as_str())
                         .collect::<Vec<_>>()
                         .join(".");
-                    if let Some(existing_val) = self.signals.get(&dotted_name).cloned() {
+                    // Only a name WITHOUT a table slot lives in the name-keyed
+                    // copy alone. After `sync_table_to_hashmap` (a `$monitor`,
+                    // a dump, a `$readmemh`) every table signal has a copy
+                    // there too; writing that copy loses the write at the next
+                    // sync while every read uses the table (#568, §10.4.1).
+                    if !self.signal_name_to_id.contains_key(dotted_name.as_str())
+                        && let Some(existing_val) = self.signals.get(&dotted_name).cloned()
+                    {
                         let w = existing_val.width;
                         let is_real =
                             self.real_signals.contains(&dotted_name) || existing_val.is_real;
