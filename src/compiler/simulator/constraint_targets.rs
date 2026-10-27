@@ -209,6 +209,57 @@ impl Simulator {
         None
     }
 
+    /// The class a member assignment target (`o.h`, `this.h`, or an element
+    /// `o.arr[0]` of a collection of handles) holds, with a type parameter
+    /// bound by the object that owns the member (§8.25).
+    pub(super) fn member_target_class(&self, lvalue: &Expression) -> Option<String> {
+        let mut lvalue = lvalue;
+        let mut indexed = false;
+        while let ExprKind::Index { expr, .. } = &lvalue.kind {
+            lvalue = expr;
+            indexed = true;
+        }
+        let (owner, prop) = match &lvalue.kind {
+            ExprKind::MemberAccess { expr, member } => {
+                (self.eval_handle_expr(expr)?, member.name.as_str())
+            }
+            ExprKind::Ident(h)
+                if h.path.len() == 2 && h.path.iter().all(|s| s.selects.is_empty()) =>
+            {
+                (
+                    self.eval_ident_handle(&h.path[0].name.name)?,
+                    h.path[1].name.name.as_str(),
+                )
+            }
+            _ => return None,
+        };
+        if owner == 0 {
+            return None;
+        }
+        // A collection of handles names a class only through an element
+        // (`o.arr[0] = new()`); the member itself takes `new[n]`.
+        let mut cur = self
+            .heap
+            .get(owner)
+            .and_then(|o| o.as_ref())
+            .map(|i| i.class_name.clone());
+        while let Some(cn) = cur {
+            let cd = self.module.classes.get(&cn)?;
+            if cd.properties.contains_key(prop) {
+                let coll = cd.array_properties.contains_key(prop)
+                    || cd.array_nd_properties.contains_key(prop)
+                    || cd.queue_properties.contains_key(prop)
+                    || cd.assoc_properties.contains_key(prop);
+                if coll != indexed {
+                    return None;
+                }
+                break;
+            }
+            cur = cd.extends.clone();
+        }
+        self.prop_class_type(owner, prop)
+    }
+
     /// Class-chain member-type lookup without a live instance handle (used
     /// when the receiver's base object is null but its DECLARED class is
     /// known). Mirrors `prop_class_type`; type params resolve via current_spec
@@ -368,11 +419,15 @@ impl Simulator {
                 // is the class name `obj`, so the elements are object handles
                 // (randomized recursively, never as scalars). For scalar/
                 // packed element types `type_name` is None or a non-class.
-                let is_object_elem = cd
-                    .properties
-                    .get(prop)
-                    .and_then(|s| s.type_name.clone())
-                    .is_some_and(|tn| self.module.classes.contains_key(&tn));
+                // §8.25: an element type that is a class type parameter is a
+                // class when this object binds the parameter to one.
+                let is_object_elem = self.prop_class_type(handle, prop).is_some();
+                // §8.25/§6.20.2: the element width in this object's
+                // specialization. The class tables hold the default's, so a
+                // `rand T beats[]` bound wider than T's default solved its
+                // elements at the default width and a field select of the
+                // bound type fell outside them (#576).
+                let spec_w = self.spec_member_elem_width(cd, handle, prop);
                 // §18.4 (#519): a multi-dimensional member joins as one row
                 // per prefix of its leading dimensions, each keyed like a
                 // 1-D array (`m[0]`, elements `m[0][j]`), with the base's
@@ -390,6 +445,7 @@ impl Simulator {
                         .get(&scoped)
                         .map(|t| t.2)
                         .or_else(|| self.module.arrays_nd.get(&scoped).map(|t| t.1))
+                        .or(spec_w)
                         .unwrap_or(32)
                         .max(1);
                     if let Some(dims) = dims
@@ -429,7 +485,7 @@ impl Simulator {
                         prop: prop.clone(),
                         scoped,
                         kind: CollKind::Fixed,
-                        width: w.max(1),
+                        width: spec_w.unwrap_or(w).max(1),
                         lo,
                         hi,
                         nested: false,
@@ -437,7 +493,10 @@ impl Simulator {
                         nd_base: None,
                     });
                 } else if cd.assoc_properties.contains_key(prop) {
-                    let w = cd.properties.get(prop).map_or(32, |s| s.width).max(1);
+                    let w = spec_w
+                        .or_else(|| cd.properties.get(prop).map(|s| s.width))
+                        .unwrap_or(32)
+                        .max(1);
                     out.push(RandColl {
                         prop: prop.clone(),
                         scoped,
@@ -455,7 +514,7 @@ impl Simulator {
                         prop: prop.clone(),
                         scoped,
                         kind: CollKind::Dyn,
-                        width: w.max(1),
+                        width: spec_w.unwrap_or(w).max(1),
                         lo: 0,
                         hi: 0,
                         nested,

@@ -3524,10 +3524,9 @@ impl Simulator {
                     continue;
                 }
                 let sig = cd.properties.get(&name)?;
-                let is_obj = sig
-                    .type_name
-                    .as_ref()
-                    .is_some_and(|tn| self.module.classes.contains_key(tn));
+                // §8.25: a member typed by a type parameter bound to a class
+                // is a handle too.
+                let is_obj = self.prop_class_type(sub, &name).is_some();
                 // §18.5.9: a rand object member joins the solve as a
                 // sub-object of its own (`rand_csp_nested_subs`).
                 if is_obj

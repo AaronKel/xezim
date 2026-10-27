@@ -42,8 +42,13 @@ impl Simulator {
                 return None;
             }
             if let Some(dt) = cd.property_types.get(prop) {
+                // §8.25: a property declared by a class type parameter
+                // (`rand T w;`, T = `logic [8:0][7:0]`) has the dimensions
+                // of the type this object binds to it; the declared `T`
+                // has none, so `o.w[1] = 7` wrote nothing (#576).
+                let bound = self.bind_type_params_in(dt, &|n| self.obj_type_param(handle, &c, n));
                 let dims = super::elaborate::packed_full_dims_chained(
-                    dt,
+                    bound.as_ref().unwrap_or(dt),
                     &self.module.parameters,
                     &self.module.typedef_types,
                 )?;

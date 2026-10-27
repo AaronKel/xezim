@@ -10,6 +10,16 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A class member typed by a class type parameter randomizes in the type
+  the object binds (§8.25, §18.4). A `rand T beats[]` (dynamic, fixed,
+  queue or associative) bound to a wider type than `T`'s default solved its
+  elements at the default width, so a constraint on a field of the element
+  (`beats[0].en == 1`, also under `foreach`, `dist`, `soft` or an
+  implication) failed randomize(); a `rand T h` bound to a class was drawn
+  as a number instead of randomizing the object, which left the handle
+  dangling; `o.h = new()` and `o.arr[0] = new()` from outside the class
+  built an object of class `T`; and a packed 2-D property through the
+  parameter dropped element writes (#576).
 * A cast to a typedef in a constant expression takes the typedef's width
   and signing (§6.24.1): `localparam int A = q_t'(45)` with a 4-bit `q_t`
   is 13, and the same holds for a declared width, a generate `if` or
