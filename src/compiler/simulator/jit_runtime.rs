@@ -607,6 +607,29 @@ impl Simulator {
                 {
                     return Some(w);
                 }
+                // §11.6.1 (#565): a subroutine formal or local is not a
+                // module-scope signal; its frame value carries the declared
+                // width (`logic [8:0] s` as a formal sizes `s === x + y`).
+                if h.path.len() == 1
+                    && h.path[0].selects.is_empty()
+                    && let Some(v) = self
+                        .local_stack
+                        .last()
+                        .and_then(|f| f.get(&h.path[0].name.name))
+                    && !v.is_real
+                    && v.width > 0
+                {
+                    return Some(v.width);
+                }
+                // §11.6.1 (#564): a dotted path rooted at a class VARIABLE
+                // (`e.st.sa`, `e.arr[0]`) is sized by walking the declared
+                // property types — no object is read.
+                if h.path.len() > 1
+                    && h.root.is_none()
+                    && let Some(w) = self.class_var_path_width(h)
+                {
+                    return Some(w);
+                }
                 // A CLASS-FIELD operand (e.g. a `time` / `longint` member of
                 // a `uvm_transaction`) isn't a module-scope signal, so the
                 // width tables above miss it. Falling back to the live
@@ -764,6 +787,17 @@ impl Simulator {
                 if let Some(w) = self.declared_select_width(expr) {
                     return Some(w);
                 }
+                // §11.6.1 (#564): an element of an array, queue or
+                // associative property reached from a class VARIABLE
+                // (`e.arr[0]`), sized from the declared property.
+                if let ExprKind::Index { expr: base, .. } = &expr.kind
+                    && let ExprKind::Ident(h) = &base.kind
+                    && h.root.is_none()
+                    && h.path.len() > 1
+                    && let Some(w) = self.class_var_path_width_impl(h, true)
+                {
+                    return Some(w);
+                }
                 (self.active_sva_site.is_some() && Self::cond_expr_is_effect_free(expr, false))
                     .then(|| self.eval_expr(expr).width)
             }
@@ -807,6 +841,79 @@ impl Simulator {
     /// variable (`pkg::pa`), a class static (`E::ta`) and a virtual-interface
     /// member (`vif.data`). All of them are answerable from the elaboration
     /// tables, so the width path stays side-effect free.
+    /// The declared width of `v.p1.p2...` where `v` is a class-typed
+    /// variable: each segment is a property of the class so far, the
+    /// walk descends through class-typed properties and, for a packed
+    /// struct property, ends at a field; an indexed last segment is an
+    /// element of an array, queue or associative property (§11.6.1).
+    fn class_var_path_width(&mut self, h: &HierarchicalIdentifier) -> Option<u32> {
+        self.class_var_path_width_impl(h, false)
+    }
+
+    /// `class_var_path_width` for a path whose last segment is indexed by
+    /// an enclosing `Index` node (`e.arr[0]` parses that way).
+    fn class_var_path_width_impl(
+        &mut self,
+        h: &HierarchicalIdentifier,
+        indexed_last: bool,
+    ) -> Option<u32> {
+        let decl = self.class_of_var(&h.path[0].name.name)?;
+        let mut cls = decl.split('#').next().unwrap_or(&decl).to_string();
+        let mut i = 1;
+        while i < h.path.len() {
+            let seg = &h.path[i];
+            let name = seg.name.name.clone();
+            let last = i + 1 == h.path.len();
+            let owners = self.prop_owners(&cls);
+            let (_, cd) = owners.get(&name)?;
+            let elem_w = cd
+                .array_properties
+                .get(&name)
+                .map(|&(_, _, w)| w)
+                .or_else(|| cd.queue_properties.get(&name).map(|(w, _)| *w))
+                .or_else(|| cd.assoc_index_props.get(&name).map(|(w, _)| *w));
+            let type_name = cd.properties.get(&name).and_then(|s| s.type_name.clone());
+            let whole_w = cd.properties.get(&name).map(|s| s.value.width);
+            if last {
+                return if seg.selects.is_empty() && !indexed_last {
+                    whole_w.filter(|w| *w > 0)
+                } else {
+                    elem_w.filter(|w| *w > 0)
+                };
+            }
+            if !seg.selects.is_empty() {
+                return None;
+            }
+            let tn = type_name?;
+            if self.module.classes.contains_key(&tn) {
+                cls = tn;
+                i += 1;
+                continue;
+            }
+            // A packed struct property: the rest of the path names a field.
+            let dt = self.p_type_by_name(&tn)?;
+            let fields = xezim_core::elaborate::packed_struct_field_layout(
+                &dt,
+                &self.module.parameters,
+                &self.module.typedefs,
+                &self.module.typedef_types,
+            )?;
+            let rest: Vec<&str> = h.path[i + 1..].iter().map(|s| s.name.name.as_str()).collect();
+            if h.path[i + 1..].iter().any(|s| !s.selects.is_empty()) {
+                return None;
+            }
+            let leaf = *rest.last()?;
+            let joined = rest.join(".");
+            return fields
+                .iter()
+                .find(|(f, _, _)| f.trim_start_matches('.') == joined)
+                .or_else(|| fields.iter().find(|(f, _, _)| f.rsplit('.').next() == Some(leaf)))
+                .map(|(_, _, w)| *w)
+                .filter(|w| *w > 0);
+        }
+        None
+    }
+
     fn declared_select_width(&mut self, expr: &Expression) -> Option<u32> {
         use crate::ast::expr::ExprKind;
         // A chain rooted at a CALL (`w.me().x`, `q.pop_front().addr`) is owned
