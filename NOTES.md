@@ -10,6 +10,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* The coverage results file (`XEZIM_COV_DB`) names a labelled `assert`,
+  `assume` or `cover` site: `"name": "c_hit"` for `c_hit: cover property
+  (...)` (§16.5, §16.14), so a tool matching cover points to a verification
+  plan has a stable key. An unlabelled site has no `name` key (#573,
+  contributed by hernloh). The name is also given for a module-level
+  deferred assertion (§16.4), an unclocked `assert property`, and a labelled
+  procedural statement (§9.3.1) that the parser hosts in a named block; the
+  unclocked property's entry now carries its file, line and kind too, where
+  it was keyed by a synthetic name and always tagged `cover`.
 * IEEE 1800-2023 §8.17 constructor argument forwarding parses and runs:
   `extends Base(default)` hands a subclass constructor's arguments (implicit
   or explicit) to the base constructor, `function new(default);` declares
