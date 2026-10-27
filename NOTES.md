@@ -32,6 +32,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   then the elements (#576). `%p` of such a member, and of a module-scope
   variable of the same shapes, lists each row as a nested list; it printed
   `'{0, 0}`.
+* An unsized `'1` or `'0` in a constraint fills the width of the other
+  operand (§5.7.1, §18.3). The joint solver and the constraint check took
+  `'1` as the 1-bit value 1, so `y == '1` on an 8-bit `y` gave `8'h01` and
+  `y != '1` admitted `8'hff`, in class constraints and `std::randomize`.
 * A cast to a typedef in a constant expression takes the typedef's width
   and signing (§6.24.1): `localparam int A = q_t'(45)` with a 4-bit `q_t`
   is 13, and the same holds for a declared width, a generate `if` or

@@ -5396,6 +5396,18 @@ impl Simulator {
         if w > 64 {
             return fallback(self, csp);
         }
+        // §5.7.1: an unsized `'0`/`'1` fills the width of its context; as a
+        // 1-bit constant, `y == '1` solved as `y == 1`.
+        let fill = |e: &Expression, ae: Ae| match &Self::unparen(e).kind {
+            ExprKind::Number(crate::ast::expr::NumberLiteral::UnbasedUnsized('1')) => {
+                Ae::Const(Value::from_u64(u64::MAX >> (64 - w), w))
+            }
+            ExprKind::Number(crate::ast::expr::NumberLiteral::UnbasedUnsized('0')) => {
+                Ae::Const(Value::zero(w))
+            }
+            _ => ae,
+        };
+        let (a, b) = (fill(left, a), fill(right, b));
         let s = sl && sr;
         let mut fits = Vec::new();
         let mut cx = LinCx::new(csp);
