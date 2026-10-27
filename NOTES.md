@@ -10,6 +10,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* IEEE 1800-2023 §8.17 constructor argument forwarding parses and runs:
+  `extends Base(default)` hands a subclass constructor's arguments (implicit
+  or explicit) to the base constructor, `function new(default);` declares
+  the constructor with the base's argument list and forwards it, and
+  `super.new(default)` forwards the formals. Each form was a parse error
+  (core #74, #75).
 * A multi-dimensional unpacked array is a randomize target (§18.4, §18.12):
   `std::randomize(t, a)` on a 2-D or 3-D local (static or automatic) and a
   `rand int m[2][2]` class member with inline constraints each solve, with

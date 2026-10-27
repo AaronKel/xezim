@@ -1318,6 +1318,7 @@ impl Simulator {
                         return None;
                     }
                     task_fd_storage = crate::ast::decl::FunctionDeclaration {
+                        default_args: false,
                         lifetime: t.lifetime.clone(),
                         specifier: t.specifier.clone(),
                         return_type: crate::ast::types::DataType::Void(crate::ast::Span::dummy()),

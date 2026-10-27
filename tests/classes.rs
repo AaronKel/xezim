@@ -849,3 +849,6 @@ mod randomize_nd_arrays_519;
 
 #[path = "classes/method_array_write_shadows_module_array.rs"]
 mod method_array_write_shadows_module_array;
+
+#[path = "classes/constructor_default_args_2023.rs"]
+mod constructor_default_args_2023;
