@@ -581,3 +581,5 @@ mod const_typedef_cast;
 mod const_bits_of_cast;
 #[path = "types/literal_whitespace_580.rs"]
 mod literal_whitespace_580;
+#[path = "types/const_bits_compound.rs"]
+mod const_bits_compound;
