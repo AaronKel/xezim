@@ -67,7 +67,7 @@ fst-reader = "0.17"
 # `tests/xtrace_conformance.rs` reads a zstd-compressed XTrace dump back to
 # check that its header declares the compression (XTrace §6.8). Same version
 # xezim-core writes the stream with.
-zstd = "0.13"
+zstd = "0.14"
 
 [build-dependencies]
 cc = "1"
