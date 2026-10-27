@@ -843,3 +843,9 @@ mod subroutine_lhs_operand_width_565;
 
 #[path = "classes/nba_member_target_object_569.rs"]
 mod nba_member_target_object_569;
+
+#[path = "classes/randomize_nd_arrays_519.rs"]
+mod randomize_nd_arrays_519;
+
+#[path = "classes/method_array_write_shadows_module_array.rs"]
+mod method_array_write_shadows_module_array;

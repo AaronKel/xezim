@@ -2893,7 +2893,41 @@ impl Simulator {
                 {
                     frame.push((bare.clone(), name.clone()));
                 }
+                // §7.4.4 (#519): a fixed MULTI-dimensional local keeps its
+                // full shape — it was registered from its first dimension
+                // as a 1-D array, and the elaborated shape of a same-named
+                // local of another subroutine stayed in the other table, so
+                // a later `std::randomize` read whichever shape it met first.
+                // Each declaration now owns the name in exactly one table.
+                let nd_shape: Option<Vec<(i64, i64)>> = if dims.len() >= 2 {
+                    dims.iter()
+                        .map(|dm| {
+                            super::elaborate::extract_array_range(
+                                std::slice::from_ref(dm),
+                                &self.module.parameters,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|sh| sh.iter().all(|&(l, h)| h >= l && h - l < 4096))
+                } else {
+                    None
+                };
+                if let Some(shape) = nd_shape {
+                    self.module.arrays.remove(&name);
+                    if shape.len() == 2 {
+                        self.module
+                            .arrays_2d
+                            .insert(name.clone(), (shape[0], shape[1], w));
+                        self.module.arrays_nd.remove(&name);
+                    } else {
+                        self.module.arrays_nd.insert(name.clone(), (shape, w));
+                        self.module.arrays_2d.remove(&name);
+                    }
+                    continue;
+                }
                 self.module.arrays.insert(name.clone(), (lo, hi, w));
+                self.module.arrays_2d.remove(&name);
+                self.module.arrays_nd.remove(&name);
                 if descending {
                     self.module.descending_arrays.insert(name.clone());
                 }

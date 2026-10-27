@@ -6777,6 +6777,10 @@ pub struct Simulator {
     /// deferred-entry drain is held; it releases once, when the last start
     /// of the batch has run.
     t0_starts_remaining: usize,
+    /// §18.12 (#519): the multi-dimensional arrays of the `std::randomize`
+    /// call being set up — name as the constraints write it, bounds
+    /// outermost first — handed to the scope solve as `Csp::nd_dims`.
+    rand_scope_nd: HashMap<String, Vec<(i64, i64)>>,
     /// §21.2.1.7: set while the `%p` operand itself is being rendered; a
     /// standalone scalar prints plain decimal, a leaf INSIDE an aggregate
     /// prints by its declared type (`'h` hex for vectors). Cleared by the
@@ -12622,6 +12626,11 @@ struct RandColl {
     /// a fresh random draw would overwrite the handle with junk, destroying
     /// the object reference and any aliasing (`arr[1]==arr[2]`).
     is_object_elem: bool,
+    /// §18.4 (#519): a ROW of a multi-dimensional unpacked array (`m[0]`
+    /// of `rand int m[2][2]`): the base member and its declared bounds,
+    /// outermost first. The solver keys a row like a 1-D array and walks
+    /// the leading dimensions through the bounds (`Csp::nd_dims`).
+    nd_base: Option<(String, Vec<(i64, i64)>)>,
 }
 
 /// A `.size()` constraint on a rand dynamic array (§18.4): the array must be
