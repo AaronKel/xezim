@@ -40,11 +40,10 @@ endmodule
     assert!(msgs.contains(&"v=3,100 p=2,380,1"), "{msgs:?}");
 }
 
-/// A pattern of any form as the actual of an unpacked-array port is still
-/// elaborated to zero; a whole array actual works. The parse is what the
-/// scoped-pattern fix covers.
+/// A positional pattern or an unpacked-array concatenation written as the
+/// actual of an unpacked-array port supplies the port's elements (§10.9.1,
+/// §10.10); each element pattern fills its packed struct.
 #[test]
-#[ignore = "known gap: an assignment pattern actual on an unpacked-array struct port reads 0"]
 fn package_scoped_typed_pattern_in_a_port_concatenation() {
     let src = format!(
         "{PKG}
