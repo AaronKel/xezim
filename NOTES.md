@@ -10,6 +10,28 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* `$random` and the `$dist_*` functions run the standard's Annex N
+  generators (§20.15), so a seed gives the sequence Questa and iverilog
+  give (`$random` with no seed starts 303379748). xezim used a generator
+  of its own.
+* `$monitor` of an automatic variable (a `for` or `foreach` loop variable,
+  one declared `automatic`, a local of an automatic task or a method) and
+  an ordered assignment pattern of the wrong size for an unpacked
+  dimension (`'{1,2,3}` for a `[1:4]` row) are errors, as in Questa and
+  iverilog (§6.21, §10.9.1). Both ran, and the monitor printed x.
+* `foreach (a[i][j])` inside `foreach (a[i])` iterates the selected
+  sub-array, and every loop variable runs in its dimension's declared
+  direction (§12.7.3); `j` walked the first dimension again, and `[3:1]`
+  ran 1 to 3.
+* A fixed multi-dimensional class member can be assigned whole, by pattern
+  and by row (`c.m = a`, `c.m[1] = '{..}`); every such write was dropped
+  (§7.6).
+* A write into an absent row of an associative array of collections
+  (`aq[6][0] = 9`) creates the row, `%p` prints the rows as nested lists,
+  `foreach (aq[k][j])` walks the row, and a string-valued row takes
+  `m[k]["x"] = "hi"` (§7.8, §7.10).
+* Reading an output clockvar (`mif.cb.addr`) gives the driven value, as in
+  Questa and Verilator, instead of x (§14.3).
 * A variable index of a package array of packed structs selects an element
   (§7.4.1, §26.3): `ENC[fmt].exp_bits` in a package function was a one-bit
   select, so fpnew's `bias` read 2^32-1 and `1.0 + 2.0` came back as +Inf
