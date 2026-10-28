@@ -206,3 +206,7 @@ mod review_package_collection_aliases;
 mod foreach_omitted_var_before_collection;
 #[path = "collections/assoc_select_write_and_return.rs"]
 mod assoc_select_write_and_return;
+#[path = "collections/foreach_subarray.rs"]
+mod foreach_subarray;
+#[path = "collections/assoc_coll_rows.rs"]
+mod assoc_coll_rows;

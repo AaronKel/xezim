@@ -409,3 +409,5 @@ mod function_formal_not_in_sensitivity;
 mod port_handshake_t0_550;
 #[path = "scheduling/armed_edge_dynamic_offset_read.rs"]
 mod armed_edge_dynamic_offset_read;
+#[path = "scheduling/clocking_output_clockvar_read.rs"]
+mod clocking_output_clockvar_read;

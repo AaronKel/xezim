@@ -540,3 +540,7 @@ mod include_intra_delay_567;
 mod override_timescale_package_delay_571;
 #[path = "misc/macro_args_next_line_578.rs"]
 mod macro_args_next_line_578;
+#[path = "misc/annex_n_random.rs"]
+mod annex_n_random;
+#[path = "misc/array_pattern_and_monitor_errors.rs"]
+mod array_pattern_and_monitor_errors;
