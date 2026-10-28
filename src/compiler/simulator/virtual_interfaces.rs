@@ -2245,7 +2245,14 @@ impl Simulator {
         // has not been sampled yet and holds its type's default (x for a
         // 4-state net), not the live net value.
         let (_, sigs) = self.clocking_meta.get(&cb)?;
-        let (net, _) = sigs.iter().find(|(n, is_in)| *is_in && matches_sig(n))?;
+        let Some((net, _)) = sigs.iter().find(|(n, is_in)| *is_in && matches_sig(n)) else {
+            // §14.3 makes reading an OUTPUT clockvar illegal; Questa and
+            // Verilator both answer with the driven net's current value
+            // (`$display(mif.cb.addr)` after `mif.cb.addr <= a`), so do the
+            // same instead of reading x.
+            let (net, _) = sigs.iter().find(|(n, _)| matches_sig(n))?;
+            return self.get_signal_value_by_name(net);
+        };
         match self.signal_name_to_id.get(net.as_str()).copied() {
             Some(id) if id < self.signal_widths.len() => {
                 let w = self.signal_widths[id];
