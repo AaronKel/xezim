@@ -4172,12 +4172,21 @@ impl Simulator {
         // Element type comes from the declared type when known, else each
         // element renders from its raw value.
         if self.module.associative_arrays.contains_key(name) {
+            // A class member (`<h>#mem`) has its element type on its class;
+            // without it the elements printed untyped, in decimal (§21.2.1.7).
             let dt = self
                 .module
                 .var_decl_types
                 .get(name)
                 .cloned()
-                .or_else(|| self.flat_path_type(name).map(|(d, _)| d));
+                .or_else(|| self.flat_path_type(name).map(|(d, _)| d))
+                .or_else(|| {
+                    self.class_member_coll_type(name)
+                        .filter(|d| {
+                            !matches!(self.resolve_dt_ref(d), DataType::TypeReference { .. })
+                        })
+                        .cloned()
+                });
             let prefix = format!("{}[", name);
             let registered = self.signal_name_to_id.names_with_prefix(&prefix);
             let mut keys: Vec<String> = self
