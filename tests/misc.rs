@@ -558,3 +558,5 @@ mod cover_bin_iff_605;
 mod config_declaration_603;
 #[path = "misc/sva_delay_count_609.rs"]
 mod sva_delay_count_609;
+#[path = "misc/cover_bin_with_611.rs"]
+mod cover_bin_with_611;

@@ -903,14 +903,15 @@ impl Simulator {
                     }
                 }
             } else if b.array_form && !b.is_wildcard {
-                // §19.5.1 `name[]`: one bin per value, `cp.name[<value>]`.
+                // §19.5.1 `name[]`: one bin per value, `cp.name[<value>]`;
+                // §19.5.1.1 only the values its `with` filter admits.
                 let mut n = 0u64;
                 for (l, h) in Self::cg_merge_ranges(ranges) {
                     for v in l..=h {
                         if n >= 1 << 20 {
                             break;
                         }
-                        if !Self::cg_in_ranges(v, &excl) {
+                        if !Self::cg_in_ranges(v, &excl) && self.cg_with_admits(b, v) {
                             bins.push(CgBin {
                                 key: Some(format!("{}[{}]", key, v)),
                                 name: b.name.name.clone(),
@@ -1598,6 +1599,68 @@ impl Simulator {
     /// The `bin_hits` keys a matching value adds for bin `bin`: the bin
     /// itself, or its array element (`name[value]` for `name[]`, the
     /// sub-bin index for `name[N]`).
+    /// §19.5.1.1: whether bin `bin`'s `with (expr)` filter admits value `v`
+    /// (`item` bound to it). The filter is a constant expression of `item`.
+    pub(super) fn cg_with_admits(&self, bin: &crate::ast::decl::CoverBin, v: i64) -> bool {
+        let Some(f) = &bin.with_filter else {
+            return true;
+        };
+        let mut e = f.clone();
+        let lit = Expression::new(
+            ExprKind::Number(crate::ast::expr::NumberLiteral::Integer {
+                size: None,
+                signed: true,
+                base: crate::ast::expr::NumberBase::Decimal,
+                value: v.to_string(),
+                cached_val: std::cell::Cell::new(None),
+            }),
+            f.span,
+        );
+        Self::subst_ident_expr(&mut e, "item", &lit);
+        self.cg_const_bool(&e).unwrap_or(true)
+    }
+
+    /// A constant Boolean: `inside` (values and `[lo:hi]` ranges), `&&`,
+    /// `||`, `!` and parentheses here, anything else through the constant
+    /// evaluator. None when it is not constant.
+    fn cg_const_bool(&self, e: &Expression) -> Option<bool> {
+        use crate::ast::expr::{BinaryOp, UnaryOp};
+        let num = |x: &Expression| {
+            super::elaborate::const_eval_i64_with_params(x, Some(&self.module.parameters))
+        };
+        match &e.kind {
+            ExprKind::Paren(x) => self.cg_const_bool(x),
+            ExprKind::Unary {
+                op: UnaryOp::LogNot,
+                operand,
+            } => self.cg_const_bool(operand).map(|b| !b),
+            ExprKind::Binary {
+                op: BinaryOp::LogAnd,
+                left,
+                right,
+            } => Some(self.cg_const_bool(left)? && self.cg_const_bool(right)?),
+            ExprKind::Binary {
+                op: BinaryOp::LogOr,
+                left,
+                right,
+            } => Some(self.cg_const_bool(left)? || self.cg_const_bool(right)?),
+            ExprKind::Inside { expr, ranges } => {
+                let v = num(expr)?;
+                for r in ranges {
+                    let hit = match &r.kind {
+                        ExprKind::Range(lo, hi) => (num(lo)?..=num(hi)?).contains(&v),
+                        _ => num(r)? == v,
+                    };
+                    if hit {
+                        return Some(true);
+                    }
+                }
+                Some(false)
+            }
+            _ => num(e).map(|r| r != 0),
+        }
+    }
+
     pub(super) fn cg_value_bin_keys(
         &self,
         bin: &crate::ast::decl::CoverBin,
@@ -1840,7 +1903,9 @@ impl Simulator {
                         } else {
                             self.value_in_ranges(&val, &bin.values)
                         };
-                        if !matched {
+                        // §19.5.1.1: a value the bin's `with` filter rejects
+                        // is not in the bin at all (a `default` bin may take it).
+                        if !matched || vi.is_some_and(|v| !self.cg_with_admits(bin, v)) {
                             continue;
                         }
                         any_value_match = true;

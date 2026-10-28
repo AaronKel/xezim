@@ -1487,7 +1487,7 @@ impl Simulator {
         }
     }
 
-    fn subst_ident_expr(e: &mut Expression, name: &str, lit: &Expression) {
+    pub(super) fn subst_ident_expr(e: &mut Expression, name: &str, lit: &Expression) {
         if let ExprKind::Ident(h) = &e.kind {
             if h.root.is_none()
                 && h.path.len() == 1
