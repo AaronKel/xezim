@@ -556,3 +556,5 @@ mod until_with_604;
 mod cover_bin_iff_605;
 #[path = "misc/config_declaration_603.rs"]
 mod config_declaration_603;
+#[path = "misc/sva_delay_count_609.rs"]
+mod sva_delay_count_609;
