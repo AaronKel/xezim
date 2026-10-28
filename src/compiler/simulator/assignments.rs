@@ -1967,6 +1967,22 @@ impl Simulator {
         Some(false)
     }
 
+    /// Whether the associative array stored at `name` has collections for
+    /// elements: a module-scope or block-local declaration recorded by core,
+    /// or an object's member (`<h>#m`) whose class records it.
+    fn assoc_has_coll_elems(&self, name: &str) -> bool {
+        if self.module.assoc_coll_elems.contains(name) {
+            return true;
+        }
+        if let Some((h, prop)) = name.split_once('#')
+            && let Ok(handle) = h.parse::<usize>()
+            && let Some(cd) = self.class_prop_declarer(handle, prop)
+        {
+            return cd.assoc_coll_properties.contains(prop);
+        }
+        false
+    }
+
     /// §7.8.6/§11.5.1: a bit write into an associative element whose
     /// element type is integral (`m[k][3] = 1`, `sb["k"][2] = 1`), absent or
     /// not: read it (an absent one as the element type's default), set the
@@ -1991,7 +2007,7 @@ impl Simulator {
         };
         let name = self.resolve_hier_name(hier).into_owned();
         let name = self.instance_assoc_member(&name).unwrap_or(name);
-        if !self.is_associative_array(&name) || self.module.assoc_coll_elems.contains(&name) {
+        if !self.is_associative_array(&name) || self.assoc_has_coll_elems(&name) {
             return None;
         }
         let default = self.assoc_missing_elem_value(&name)?;
@@ -2571,7 +2587,7 @@ impl Simulator {
             let n = me.resolve_hier_name(h).into_owned();
             let n = me.instance_assoc_member(&n).unwrap_or(n);
             me.is_associative_array(&n)
-                && !me.module.assoc_coll_elems.contains(&n)
+                && !me.assoc_has_coll_elems(&n)
                 && me.assoc_missing_elem_value(&n).is_some()
         };
         if let Some(an) = self.expr_assoc_name(expr).filter(|_| !elem_bit(self)) {
