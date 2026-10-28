@@ -589,3 +589,5 @@ mod const_bits_compound;
 mod package_struct_array_index_584;
 #[path = "types/review_nested_pattern_default.rs"]
 mod review_nested_pattern_default;
+#[path = "types/package_net_602.rs"]
+mod package_net_602;
