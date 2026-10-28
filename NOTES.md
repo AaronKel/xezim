@@ -29,7 +29,9 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 * A write into an absent row of an associative array of collections
   (`aq[6][0] = 9`) creates the row, `%p` prints the rows as nested lists,
   `foreach (aq[k][j])` walks the row, and a string-valued row takes
-  `m[k]["x"] = "hi"` (§7.8, §7.10).
+  `m[k]["x"] = "hi"` (§7.8, §7.10). This holds at every depth
+  (`byte a[string][int][string]` printed `'{"p":0}`) and for class
+  members.
 * Reading an output clockvar (`mif.cb.addr`) gives the driven value, as in
   Questa and Verilator, instead of x (§14.3).
 * A variable index of a package array of packed structs selects an element

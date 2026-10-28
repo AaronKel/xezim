@@ -86,9 +86,9 @@ P '{3:'{"x":"hi"}} '{3:'{"x":5}} '{"k":'{2:"s3"}} '{1:'{2:"s4"}} '{1:'{"q"}}"#;
     assert_eq!(got.join("\n"), want, "{got:#?}");
 }
 
-/// String and integer keys at each level, three levels, `exists`, `num`,
-/// `delete` and multi-variable `foreach`: a registered row keys its own
-/// elements by its declared key type.
+/// String and integer keys at each level, three and four levels, `exists`,
+/// `num`, `delete` and multi-variable `foreach`: each row keys its own
+/// elements by its declared key type, and `%p` prints every level.
 #[test]
 fn nested_rows_keep_their_key_types() {
     let src = r#"module tb;
@@ -110,7 +110,7 @@ fn nested_rows_keep_their_key_types() {
     foreach (a5[i, j, k]) $display("E %s %0d %s %0d", i, j, k, a5[i][j][k]);
     $display("F %0d %0d %0d %0d", a1["u"].exists(300), a1["u"].exists(3), a2[5].num(), a5["p"].num());
     a1["u"].delete(2); a2.delete(-1);
-    $display("G %p", a1); $display("H %p", a2); $display("I %p", a3); $display("J %p", a4);
+    $display("G %p", a1); $display("H %p", a2); $display("I %p", a3); $display("J %p", a4); $display("K %p", a5);
     foreach (a2[5][j]) $display("L %s", j);
   end
 endmodule
@@ -133,13 +133,60 @@ G '{"u":'{300:1}, "v":'{-4:3}}
 H '{5:'{"ab":1, "c":2}}
 I '{"k":'{"m":4, "n":5}}
 J '{1:'{2:6, 3:7}, 9:'{0:8}}
+K '{"p":'{7:'{"q":9}, 8:'{"r":10}}}
 L ab
 L c"#;
     let got = shown(
         src,
         &[
-            "A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I ", "J ", "L ",
+            "A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I ", "J ", "K ", "L ",
         ],
     );
+    assert_eq!(got.join("\n"), want, "{got:#?}");
+}
+
+/// Deeper rows (a queue under two keys, four string levels), middle-level
+/// methods and deletes, and the same shapes as class members written from
+/// a method and through a handle.
+#[test]
+fn deep_and_class_member_rows() {
+    let src = r#"class H;
+  int m [int][string];
+  int q [string][int][$];
+  function void fill(); m[1]["a"] = 2; m[3]["b"] = 4; q["x"][5][0] = 7; q["x"][5][1] = 8; endfunction
+endclass
+module tb;
+  int b1 [int][int][$];
+  string b2 [string][string][string][string];
+  shortint b3 [int][string][int];
+  initial begin
+    H h = new;
+    b1[1][2][0] = 5; b1[1][2][1] = 6; b1[1][3].push_back(9); b1[4][0][0] = 1;
+    b2["a"]["b"]["c"]["d"] = "deep"; b2["a"]["b"]["e"]["f"] = "two";
+    b3[-2]["k"][100] = 3; b3[-2]["k"][-100] = -4; b3[7]["z"][0] = 1;
+    $display("A %p", b1); $display("B %p", b2); $display("C %p", b3);
+    $display("D %0d %0d %0d %0d", b1[1].num(), b1[1][2].size(), b3[-2]["k"].num(), b2["a"]["b"].num());
+    $display("E %0d %0d", b3[-2].exists("k"), b3[-2]["k"].exists(5));
+    b3[-2]["k"].delete(100); b1[1].delete(3);
+    $display("F %p %p", b3, b1);
+    foreach (b3[i, j, k]) $display("G %0d %s %0d %0d", i, j, k, b3[i][j][k]);
+    foreach (b1[i, j, k]) $display("H %0d %0d %0d %0d", i, j, k, b1[i][j][k]);
+    h.fill(); $display("I %p %p %0d", h.m, h.q, h.q["x"][5].size());
+  end
+endmodule
+"#;
+    let want = r#"A '{1:'{2:'{5, 6}, 3:'{9}}, 4:'{0:'{1}}}
+B '{"a":'{"b":'{"c":'{"d":"deep"}, "e":'{"f":"two"}}}}
+C '{-2:'{"k":'{-100:-4, 100:3}}, 7:'{"z":'{0:1}}}
+D 2 2 2 2
+E 1 0
+F '{-2:'{"k":'{-100:-4}}, 7:'{"z":'{0:1}}} '{1:'{2:'{5, 6}}, 4:'{0:'{1}}}
+G -2 k -100 -4
+G 7 z 0 1
+H 1 2 0 5
+H 1 2 1 6
+H 4 0 0 1
+I '{1:'{"a":2}, 3:'{"b":4}} '{"x":'{5:'{7, 8}}} 2"#;
+    let got = shown(src, &["A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I "]);
     assert_eq!(got.join("\n"), want, "{got:#?}");
 }
