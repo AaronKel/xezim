@@ -2516,6 +2516,7 @@ impl NbaFastIndex {
 }
 
 mod aggregate_assignments;
+mod annex_n;
 mod aggregate_expressions;
 mod aggregate_members;
 mod arguments;
@@ -6157,6 +6158,8 @@ pub struct Simulator {
     vpi_port_directions: HashMap<Arc<str>, PortDirection>,
     /// Signals currently under force/release control (LRM §9.3.1).
     forced_signals: HashMap<usize, Value>,
+    /// Annex N seed of a no-seed `$random` (§20.15.1); starts at 0.
+    annex_n_seed: i32,
     /// §10.6.2 bit/part-select forces on nets, by signal id. Each id is
     /// also in `forced_signals` (so ordinary writes drop) and has a
     /// `partial` `active_force_exprs` entry that re-merges the drivers.

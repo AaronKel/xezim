@@ -3711,6 +3711,7 @@ impl Simulator {
             real_signals,
             multi_dim_array_names,
             forced_signals: HashMap::default(),
+            annex_n_seed: 0,
             partial_forces: HashMap::default(),
             pending_release_ids: Vec::new(),
             prop_raw_ty_cache: std::cell::RefCell::new(HashMap::default()),

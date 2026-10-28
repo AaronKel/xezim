@@ -3328,131 +3328,70 @@ impl Simulator {
                     .unwrap_or(0);
                 Value::from_u64(self.rng_range_u64(a.min(b), a.max(b)), 32)
             }
-            // `$random` (no seed) keeps its legacy deterministic value; with a
-            // seed it produces a reproducible stream (updating the seed).
-            // §20.15.2 probabilistic distribution functions. Each takes an
-            // inout `seed` it advances in place, so the same seed replays
-            // the same stream.
-            "$dist_uniform" | "$dist_normal" | "$dist_exponential" | "$dist_poisson"
-            | "$dist_chi_square" | "$dist_t" | "$dist_erlang" => {
-                let Some(seed_arg) = args.first() else {
+            // §20.15.1, §20.15.2: `$random` and the distribution functions
+            // run the Annex N generators. Each takes an inout `seed` it
+            // advances in place, so the same seed replays the same stream
+            // in every simulator that follows the standard.
+            "$random" | "$dist_uniform" | "$dist_normal" | "$dist_exponential"
+            | "$dist_poisson" | "$dist_chi_square" | "$dist_t" | "$dist_erlang" => {
+                use super::annex_n;
+                let seed_arg = args.first();
+                if seed_arg.is_none() && name != "$random" {
                     return Value::zero(32);
+                }
+                // A no-seed `$random` draws from one simulation-wide seed
+                // that starts at 0 (Annex N's `$random` static seed).
+                let mut seed = match seed_arg {
+                    Some(a) => self.eval_expr(a).to_u64().unwrap_or(0) as u32 as i32,
+                    None => self.annex_n_seed,
                 };
-                let mut seed = self.eval_expr(seed_arg).to_u64().unwrap_or(0) as u32;
-                // Advance the caller's seed exactly once per call.
-                let next_u32 = |sd: &mut u32| -> u32 {
-                    *sd = Self::prng_next(*sd);
-                    *sd
-                };
-                let unit = |sd: &mut u32| -> f64 {
-                    // (0,1) — never exactly 0, so ln() stays finite.
-                    (next_u32(sd) as f64 + 1.0) / (u32::MAX as f64 + 2.0)
-                };
-                let arg_i = |sim: &mut Self, i: usize| -> i64 {
+                let arg_i = |sim: &mut Self, i: usize| -> i32 {
                     args.get(i)
-                        .map(|a| sim.eval_expr(a).to_i64().unwrap_or(0))
+                        .map(|a| sim.eval_expr(a).to_i64().unwrap_or(0) as i32)
                         .unwrap_or(0)
                 };
-                let out: i64 = match name.as_str() {
+                let out = match name.as_str() {
+                    "$random" => annex_n::random(&mut seed),
                     "$dist_uniform" => {
-                        let lo = arg_i(self, 1);
-                        let hi = arg_i(self, 2);
-                        if hi <= lo {
-                            lo
-                        } else {
-                            let span = (hi - lo + 1) as u64;
-                            lo + (next_u32(&mut seed) as u64 % span) as i64
-                        }
+                        let (lo, hi) = (arg_i(self, 1), arg_i(self, 2));
+                        annex_n::dist_uniform(&mut seed, lo, hi)
                     }
                     "$dist_normal" => {
-                        let mean = arg_i(self, 1) as f64;
-                        let sd = arg_i(self, 2) as f64;
-                        // Box-Muller.
-                        let u1 = unit(&mut seed);
-                        let u2 = unit(&mut seed);
-                        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-                        (mean + sd * z).round() as i64
+                        let (mean, sd) = (arg_i(self, 1), arg_i(self, 2));
+                        annex_n::dist_normal(&mut seed, mean, sd)
                     }
                     "$dist_exponential" => {
-                        let mean = arg_i(self, 1).max(1) as f64;
-                        (-mean * unit(&mut seed).ln()).round() as i64
+                        let mean = arg_i(self, 1);
+                        annex_n::dist_exponential(&mut seed, mean)
                     }
                     "$dist_poisson" => {
-                        let mean = arg_i(self, 1).max(0) as f64;
-                        // Knuth.
-                        let l = (-mean).exp();
-                        let mut k = 0i64;
-                        let mut p = 1.0f64;
-                        loop {
-                            p *= unit(&mut seed);
-                            if p <= l || k > 10_000 {
-                                break;
-                            }
-                            k += 1;
-                        }
-                        k
+                        let mean = arg_i(self, 1);
+                        annex_n::dist_poisson(&mut seed, mean)
                     }
                     "$dist_chi_square" => {
-                        // Sum of `df` squared standard normals.
-                        let df = arg_i(self, 1).max(1);
-                        let mut acc = 0.0f64;
-                        for _ in 0..df.min(1000) {
-                            let u1 = unit(&mut seed);
-                            let u2 = unit(&mut seed);
-                            let z =
-                                (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-                            acc += z * z;
-                        }
-                        acc.round() as i64
+                        let df = arg_i(self, 1);
+                        annex_n::dist_chi_square(&mut seed, df)
                     }
                     "$dist_t" => {
-                        let df = arg_i(self, 1).max(1);
-                        let u1 = unit(&mut seed);
-                        let u2 = unit(&mut seed);
-                        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-                        let mut chi = 0.0f64;
-                        for _ in 0..df.min(1000) {
-                            let a = unit(&mut seed);
-                            let b = unit(&mut seed);
-                            let zz =
-                                (-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos();
-                            chi += zz * zz;
-                        }
-                        (z / (chi / df as f64).sqrt()).round() as i64
+                        let df = arg_i(self, 1);
+                        annex_n::dist_t(&mut seed, df)
                     }
                     _ => {
-                        // $dist_erlang(seed, k, mean)
-                        let k = arg_i(self, 1).max(1);
-                        let mean = arg_i(self, 2).max(1) as f64;
-                        let mut acc = 0.0f64;
-                        for _ in 0..k.min(1000) {
-                            acc += -unit(&mut seed).ln();
-                        }
-                        (acc * mean / k as f64).round() as i64
+                        let (k, mean) = (arg_i(self, 1), arg_i(self, 2));
+                        annex_n::dist_erlang(&mut seed, k, mean)
                     }
                 };
-                self.assign_value(seed_arg, &Value::from_u64(seed as u64, 32));
-                let mut v = Value::from_u64(out as u64, 32);
+                match seed_arg {
+                    Some(a) => {
+                        let mut sv = Value::from_u64(seed as u32 as u64, 32);
+                        sv.is_signed = true;
+                        self.assign_value(a, &sv);
+                    }
+                    None => self.annex_n_seed = seed,
+                }
+                let mut v = Value::from_u64(out as u32 as u64, 32);
                 v.is_signed = true;
                 v
-            }
-            "$random" => {
-                if let Some(seed_arg) = args.first() {
-                    let s = self.eval_expr(seed_arg).to_u64().unwrap_or(0) as u32;
-                    let next = Self::prng_next(s);
-                    self.assign_value(seed_arg, &Value::from_u64(next as u64, 32));
-                    let mut v = Value::from_u64(next as u64, 32);
-                    v.is_signed = true;
-                    v
-                } else {
-                    // §20.15.1: no-seed `$random` draws from the global RNG
-                    // (same stream as no-arg `$urandom`) and returns a SIGNED
-                    // 32-bit value. It used to return a constant 0, so every
-                    // `$random` stimulus was stuck at 0.
-                    let mut v = Value::from_u64(self.rng_u32() as u64, 32);
-                    v.is_signed = true;
-                    v
-                }
             }
             "$isunknown" => {
                 let v = args
