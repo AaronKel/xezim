@@ -1003,10 +1003,24 @@ impl Simulator {
                             let struct_w =
                                 fields.iter().map(|(_, o, fw)| o + fw).max().unwrap_or(0);
                             let dims = self.module.packed_full_dims.get(&arr_name).cloned();
+                            // A package parameter (`p::ENC[f].man_bits` in a
+                            // class method reaches here as `p.ENC`) is no
+                            // signal: read its value from the parameters.
                             if struct_w > 0
                                 && let Some(slot) =
                                     Self::flatten_packed_slot(&indices, dims.as_deref())
-                                && let Some(sig) = self.get_local_or_signal(&arr_name)
+                                && let Some(sig) =
+                                    self.get_local_or_signal(&arr_name).or_else(|| {
+                                        self.module
+                                            .parameters
+                                            .get(&arr_name)
+                                            .or_else(|| {
+                                                self.module
+                                                    .parameters
+                                                    .get(&arr_name.replacen('.', "::", 1))
+                                            })
+                                            .cloned()
+                                    })
                             {
                                 let lo = slot * struct_w + off;
                                 if lo + w <= sig.width {
