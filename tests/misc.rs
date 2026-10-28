@@ -552,3 +552,5 @@ mod args_file_bare_top_601;
 mod macro_formals_multiline_606;
 #[path = "misc/until_with_604.rs"]
 mod until_with_604;
+#[path = "misc/cover_bin_iff_605.rs"]
+mod cover_bin_iff_605;

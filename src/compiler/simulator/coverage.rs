@@ -1844,6 +1844,14 @@ impl Simulator {
                             continue;
                         }
                         any_value_match = true;
+                        // §19.5: a bin's own `iff` guard keeps it from
+                        // counting while false (#605); the value still
+                        // belongs to it, so no `default` bin takes it.
+                        if let Some(g) = &bin.iff_guard
+                            && !self.eval_expr(g).is_true()
+                        {
+                            continue;
+                        }
                         match bin.kind {
                             crate::ast::decl::CoverBinKind::Bins if !excluded => {
                                 bin_increments
