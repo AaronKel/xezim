@@ -554,3 +554,5 @@ mod macro_formals_multiline_606;
 mod until_with_604;
 #[path = "misc/cover_bin_iff_605.rs"]
 mod cover_bin_iff_605;
+#[path = "misc/config_declaration_603.rs"]
+mod config_declaration_603;
