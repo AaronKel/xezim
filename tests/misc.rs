@@ -546,3 +546,5 @@ mod annex_n_random;
 mod array_pattern_and_monitor_errors;
 #[path = "misc/resetall_after_one_line_module_600.rs"]
 mod resetall_after_one_line_module_600;
+#[path = "misc/args_file_bare_top_601.rs"]
+mod args_file_bare_top_601;

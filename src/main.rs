@@ -1120,8 +1120,16 @@ fn process_command_file(
                         t, path
                     );
                 }
+                // A design-unit name that is not a file (relative to the
+                // args file) names a top, as on the command line (#601).
                 _ => {
-                    source_files.push(resolve_rel(base, t));
+                    let file = resolve_rel(base, t);
+                    match cli_compat::bare_top_name(t, &compat.libs)
+                        .filter(|_| !Path::new(&file).exists())
+                    {
+                        Some(top) => top_modules.push(top),
+                        None => source_files.push(file),
+                    }
                 }
             }
             i += 1;
