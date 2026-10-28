@@ -85,3 +85,61 @@ P '{3:'{"x":"hi"}} '{3:'{"x":5}} '{"k":'{2:"s3"}} '{1:'{2:"s4"}} '{1:'{"q"}}"#;
     let got = shown(src, &["A ", "P "]);
     assert_eq!(got.join("\n"), want, "{got:#?}");
 }
+
+/// String and integer keys at each level, three levels, `exists`, `num`,
+/// `delete` and multi-variable `foreach`: a registered row keys its own
+/// elements by its declared key type.
+#[test]
+fn nested_rows_keep_their_key_types() {
+    let src = r#"module tb;
+  int a1 [string][int];
+  int a2 [int][string];
+  int a3 [string][string];
+  int a4 [int][int];
+  byte a5 [string][int][string];
+  initial begin
+    a1["u"][2] = 8; a1["u"][300] = 1; a1["v"][-4] = 3;
+    a2[5]["ab"] = 1; a2[5]["c"] = 2; a2[-1]["zz"] = 3;
+    a3["k"]["m"] = 4; a3["k"]["n"] = 5;
+    a4[1][2] = 6; a4[1][3] = 7; a4[9][0] = 8;
+    a5["p"][7]["q"] = 9; a5["p"][8]["r"] = 10;
+    foreach (a1[i, j]) $display("A %s %0d %0d", i, j, a1[i][j]);
+    foreach (a2[i, j]) $display("B %0d %s %0d", i, j, a2[i][j]);
+    foreach (a3[i, j]) $display("C %s %s %0d", i, j, a3[i][j]);
+    foreach (a4[i, j]) $display("D %0d %0d %0d", i, j, a4[i][j]);
+    foreach (a5[i, j, k]) $display("E %s %0d %s %0d", i, j, k, a5[i][j][k]);
+    $display("F %0d %0d %0d %0d", a1["u"].exists(300), a1["u"].exists(3), a2[5].num(), a5["p"].num());
+    a1["u"].delete(2); a2.delete(-1);
+    $display("G %p", a1); $display("H %p", a2); $display("I %p", a3); $display("J %p", a4);
+    foreach (a2[5][j]) $display("L %s", j);
+  end
+endmodule
+"#;
+    let want = r#"A u 2 8
+A u 300 1
+A v -4 3
+B -1 zz 3
+B 5 ab 1
+B 5 c 2
+C k m 4
+C k n 5
+D 1 2 6
+D 1 3 7
+D 9 0 8
+E p 7 q 9
+E p 8 r 10
+F 1 0 2 2
+G '{"u":'{300:1}, "v":'{-4:3}}
+H '{5:'{"ab":1, "c":2}}
+I '{"k":'{"m":4, "n":5}}
+J '{1:'{2:6, 3:7}, 9:'{0:8}}
+L ab
+L c"#;
+    let got = shown(
+        src,
+        &[
+            "A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I ", "J ", "L ",
+        ],
+    );
+    assert_eq!(got.join("\n"), want, "{got:#?}");
+}

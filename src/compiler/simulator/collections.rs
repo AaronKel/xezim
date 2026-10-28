@@ -2949,6 +2949,11 @@ impl Simulator {
                 || self.is_string_keyed_array(prefix);
             let (kw, ks) = self.assoc_index_width_for(prefix).unwrap_or((32, true));
             (is_str, kw, ks)
+        } else if let Some(&row_str) = self.module.associative_arrays.get(prefix) {
+            // A row registered as an associative array of its own (see
+            // `ensure_assoc_row`) keys its elements by its declared key type.
+            let (kw, ks) = self.assoc_index_width_for(prefix).unwrap_or((32, true));
+            (row_str || declared_str.unwrap_or(false), kw, ks)
         } else {
             (
                 declared_str.unwrap_or_else(|| keys.iter().any(|k| k.parse::<i128>().is_err())),
@@ -2995,6 +3000,7 @@ impl Simulator {
                 // (an int key 2 is the character 0x02), else by value (a
                 // string key "ab" is the number 0x6162).
                 let as_text = level > 0
+                    && !self.module.associative_arrays.contains_key(prefix)
                     && (self.is_string_keyed_array(prefix)
                         || self.is_string_keyed_array(root)
                         || (!is_str && key.parse::<i128>().is_err()));
