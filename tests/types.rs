@@ -591,3 +591,5 @@ mod package_struct_array_index_584;
 mod review_nested_pattern_default;
 #[path = "types/package_net_602.rs"]
 mod package_net_602;
+#[path = "types/package_net_kinds_610.rs"]
+mod package_net_kinds_610;
