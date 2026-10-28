@@ -2349,6 +2349,15 @@ impl Simulator {
         &mut self,
         e: &Expression,
     ) -> Option<(String, Vec<String>, bool)> {
+        // `c.m` through a class handle: the object's own store.
+        if let ExprKind::Ident(h) = &e.kind
+            && h.path.len() >= 2
+            && h.path.iter().all(|s| s.selects.is_empty())
+            && let Some(store) = self.class_nd_store(e, "")
+        {
+            let sfx = self.nd_formal_suffixes(&store)?;
+            return Some((store, sfx, true));
+        }
         match &e.kind {
             ExprKind::Ident(h)
                 if h.path.iter().all(|s| s.selects.is_empty())
@@ -2368,16 +2377,31 @@ impl Simulator {
                         return Some((name.to_string(), sfx, false));
                     }
                 }
-                None
+                let name = name.into_owned();
+                let store = self.class_nd_store(e, &name)?;
+                let sfx = self.nd_formal_suffixes(&store)?;
+                Some((store, sfx, true))
+            }
+            ExprKind::MemberAccess { .. } => {
+                let store = self.class_nd_store(e, "")?;
+                let sfx = self.nd_formal_suffixes(&store)?;
+                Some((store, sfx, true))
             }
             ExprKind::Index { expr, index } => {
-                let ExprKind::Ident(h) = &expr.kind else {
-                    return None;
+                let name: String = match &expr.kind {
+                    ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                        let n = self.resolve_hier_name(h).into_owned();
+                        if self.module.arrays_2d.contains_key(&n)
+                            || self.module.arrays_nd.contains_key(&n)
+                        {
+                            n
+                        } else {
+                            self.class_nd_store(expr, &n)?
+                        }
+                    }
+                    ExprKind::MemberAccess { .. } => self.class_nd_store(expr, "")?,
+                    _ => return None,
                 };
-                if !h.path.iter().all(|s| s.selects.is_empty()) {
-                    return None;
-                }
-                let name = self.resolve_hier_name(h);
                 let rest: Vec<(i64, i64)> =
                     if let Some(&(_, b, _)) = self.module.arrays_2d.get(&*name) {
                         vec![b]
@@ -2398,6 +2422,23 @@ impl Simulator {
             }
             _ => None,
         }
+    }
+
+    /// §7.4.2/§8: the per-object store (`<handle>#m`) of a fixed
+    /// multi-dimensional class member named by `e` (`c.m`, `this.m`, or a
+    /// bare `m` in a method, whose resolved name is `bare`).
+    fn class_nd_store(&mut self, e: &Expression, bare: &str) -> Option<String> {
+        if self.no_class_objects() {
+            return None;
+        }
+        let store = self.expr_assoc_name(e).or_else(|| {
+            (!bare.is_empty())
+                .then(|| self.instance_assoc_member(bare))
+                .flatten()
+        })?;
+        ((self.module.arrays_2d.contains_key(&store) || self.module.arrays_nd.contains_key(&store))
+            && !self.module.dynamic_arrays.contains(&store))
+        .then_some(store)
     }
 
     /// `w = v` / `r = v[1]` / `v[1] = r` over multi-dimensional unpacked

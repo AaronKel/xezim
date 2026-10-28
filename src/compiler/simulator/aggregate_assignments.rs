@@ -14,9 +14,16 @@ impl Simulator {
         if items.is_empty() {
             return false;
         }
-        let Some(scoped) = self.expr_assoc_name(lvalue) else {
+        // §7.4.2: a selected ROW of a multi-dimensional member
+        // (`c.m[1] = '{..}`) takes the pattern over the remaining dimensions.
+        let (base_expr, row_selects) = Self::split_row_selects(lvalue);
+        let Some(scoped) = self.expr_assoc_name(&base_expr) else {
             return false;
         };
+        let row: Vec<i64> = row_selects
+            .iter()
+            .map(|e| self.eval_expr(e).to_i64().unwrap_or(0))
+            .collect();
         let Some((handle_text, member)) = scoped.split_once('#') else {
             return false;
         };
@@ -72,8 +79,66 @@ impl Simulator {
         if descending.len() != dimensions.len() {
             descending.clear();
         }
+        if !row.is_empty() {
+            if row.len() >= dimensions.len() {
+                return false;
+            }
+            let mut target = scoped.clone();
+            for i in &row {
+                target.push_str(&format!("[{i}]"));
+            }
+            let rest = dimensions[row.len()..].to_vec();
+            let rest_desc = if descending.is_empty() {
+                Vec::new()
+            } else {
+                descending[row.len()..].to_vec()
+            };
+            self.assign_pattern_array(&target, &rest, &data_type, items, &rest_desc);
+            return true;
+        }
         self.assign_pattern_array(&scoped, &dimensions, &data_type, items, &descending);
         true
+    }
+
+    /// `c.m[1]` / `c.m[1][2]` (either parse shape) as the unselected member
+    /// expression and its index selects, outermost first. Range selects and
+    /// anything else come back whole, with no selects.
+    fn split_row_selects(e: &Expression) -> (Expression, Vec<Expression>) {
+        let is_range =
+            |x: &Expression| matches!(x.kind, ExprKind::Range(..) | ExprKind::RangeSelect { .. });
+        let mut sels: Vec<Expression> = Vec::new();
+        let mut cur = e;
+        while let ExprKind::Index { expr, index } = &cur.kind {
+            if is_range(index) {
+                return (e.clone(), Vec::new());
+            }
+            sels.push((**index).clone());
+            cur = expr;
+        }
+        sels.reverse();
+        if let ExprKind::Ident(h) = &cur.kind
+            && let Some(last) = h.path.last()
+            && !last.selects.is_empty()
+            && h.path[..h.path.len() - 1]
+                .iter()
+                .all(|s| s.selects.is_empty())
+        {
+            if last.selects.iter().any(is_range) {
+                return (e.clone(), Vec::new());
+            }
+            let mut bare = h.clone();
+            let lsel = bare
+                .path
+                .last_mut()
+                .map(|s| std::mem::take(&mut s.selects))
+                .unwrap_or_default();
+            bare.cached_signal_id = std::cell::Cell::new(None);
+            bare.cached_resolved_name = std::cell::OnceCell::new();
+            let mut all = lsel;
+            all.extend(sels);
+            return (Expression::new(ExprKind::Ident(bare), cur.span), all);
+        }
+        (cur.clone(), sels)
     }
 
     /// Whole-assignment pattern to a CLASS COLLECTION property accessed by

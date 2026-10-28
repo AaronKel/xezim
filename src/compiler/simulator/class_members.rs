@@ -1166,9 +1166,14 @@ impl Simulator {
         while let Some(cn) = cur {
             match self.module.classes.get(cn) {
                 Some(cd) => {
+                    // §7.4.2: a fixed multi-dimensional member (`int m [2][3]`)
+                    // stores under `<handle>#m` as a 1-D one does; without
+                    // it every whole-member write (`c.m = a`, a pattern, a
+                    // row `c.m[1] = '{..}`) resolved nowhere and was dropped.
                     if cd.assoc_properties.contains_key(member)
                         || cd.queue_properties.contains_key(member)
                         || cd.array_properties.contains_key(member)
+                        || cd.array_nd_properties.contains_key(member)
                     {
                         return true;
                     }

@@ -3835,8 +3835,15 @@ impl Simulator {
             // lives under "<handle>#member" — resolve it like element
             // accesses already do, else a whole-array copy involving
             // a property is silently dropped.
+            // A FIXED multi-dimensional member is not a collection: it
+            // copies element-wise by shape (`copy_multi_dim_array`).
             sim.expr_assoc_name(e)
                 .filter(|an| !sim.is_associative_array(an))
+                .filter(|an| {
+                    sim.module.dynamic_arrays.contains(an)
+                        || !(sim.module.arrays_2d.contains_key(an)
+                            || sim.module.arrays_nd.contains_key(an))
+                })
                 .map(|an| (an, true))
         };
         let l_res = resolve_coll(self, lvalue);
