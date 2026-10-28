@@ -10,6 +10,32 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A compiled assignment pattern on a packed struct with a nested struct
+  member packs its direct members only (§10.9.2); a named sibling such as
+  `trans_id` read 0 (#589, PR #590, contributed by davekeeshan). `default:`
+  fills each member of a nested struct member, on both paths.
+* `always_comb` stays sensitive to a struct it reads whole beside a member
+  write (#591), and to a module variable a nested callee reads when the
+  caller has a formal of that name (#592) (§9.2.2.2.1); a compiled
+  `super.m(...)` sizes its arguments by the parent's formals (§13.5.1,
+  #593); a `foreach` constraint over an empty dynamic dimension adds no
+  constraint (§18.5.8.1, #599). All four reported, with patches, by
+  akashlevy.
+* `d = new[n](src)`, a whole assignment and a by-value argument copy the
+  rows of a dynamic array of collections (§7.5.1, #595); `other.h = new()`
+  builds the class `other`'s specialization binds (§8.25, #596); `%p`
+  prints a dynamic array's fixed rows from their left bound, a class member
+  shadows a same-named module array in its methods, and `push_back` fills a
+  descending row from its left bound (#597). Reported by akashlevy.
+* A package may declare nets (§26.2, #602); a configuration declaration is
+  set aside with a warning (§33.4, #603); `until_with` and `s_until_with`
+  parse and check (§16.12.12, #604); a covergroup bin's `iff` guard parses
+  and gates the bin (§19.5, #605); a macro's formal list may span lines
+  (§22.5.1, #606); a `` `resetall `` after a module closed on its own line
+  is legal (§22.3, #600). Reported by amal-khailtash.
+* A labelled assertion keeps its label in the coverage results under
+  `--code-coverage` (§9.3.1, #586, reported by hernloh).
+
 * `$random` and the `$dist_*` functions run the standard's Annex N
   generators (§20.15), so a seed gives the sequence Questa and iverilog
   give (`$random` with no seed starts 303379748). xezim used a generator
@@ -317,6 +343,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   are rebuilt (#531, core #87).
 
 **Command line**
+
+* A bare top name inside a `-f` argument file names a top, as on the
+  command line (#601, reported by amal-khailtash).
+* `--fst-repack` repacks a dump path that is a symbolic link into its
+  target, and removes its temporary file when the rename fails (#598,
+  reported by akashlevy).
 
 * `--fst-repack[=N]` gzip-wraps the finished FST dump on a clean close, as
   GTKWave's repack-on-close does (deflate level N, 1..9, default 6): about
