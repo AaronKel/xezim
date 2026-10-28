@@ -522,6 +522,14 @@ impl Simulator {
         if let Some(local) = self.dyn_name_lookup(&name) {
             name = local.to_string();
         }
+        // §7.8/§12.7.3: `foreach (aq[k][j])` over a row of an associative
+        // array of collections walks that row (`aq[k]`), not `aq`'s keys.
+        if indices.len() == 1 && self.is_associative_array(&name) {
+            let kv = self.eval_expr(indices[0]);
+            let row = format!("{}[{}]", name, self.assoc_key_str(&name, &kv));
+            return (self.module.dynamic_arrays.contains(&row) || self.is_associative_array(&row))
+                .then_some(row);
+        }
         if self.foreach_dims(&name).is_none()
             && let Some(scoped) = self.hint_scoped(&name)
         {

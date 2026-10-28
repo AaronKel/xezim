@@ -4133,6 +4133,16 @@ impl Simulator {
         Some(out)
     }
 
+    /// Whether the element `elem` of an associative array is itself a
+    /// collection with its own store (a queue, dynamic or associative row).
+    fn p_elem_is_collection(&self, elem: &str) -> bool {
+        self.module.dynamic_arrays.contains(elem)
+            || self.is_associative_array(elem)
+            || self
+                .get_signal_value_by_name(&Self::name_with_suffix(elem, ".size"))
+                .is_some()
+    }
+
     pub(super) fn render_p_var(&mut self, name: &str) -> Option<String> {
         // Elements of a collection are nested leaves (`p_top_level`).
         if self.module.dynamic_arrays.contains(name)
@@ -4275,6 +4285,12 @@ impl Simulator {
                 .map(|k| {
                     let elem = format!("{}[{}]", name, k);
                     let v = match &dt {
+                        // §21.2.1.7: an element that is itself a queue,
+                        // dynamic or associative array (`int aq[int][$]`,
+                        // `int aa[int][int]`) prints as a nested list.
+                        _ if self.p_elem_is_collection(&elem) => self
+                            .render_p_var(&elem)
+                            .unwrap_or_else(|| "'{}".to_string()),
                         Some(d) => self.render_p_typed(&elem, d),
                         None => {
                             let ev = self
@@ -4332,7 +4348,12 @@ impl Simulator {
                 .iter()
                 .map(|k| {
                     let elem = format!("{}[{}]", name, k);
-                    let v = self.render_p_typed(&elem, &dt);
+                    let v = if self.p_elem_is_collection(&elem) {
+                        self.render_p_var(&elem)
+                            .unwrap_or_else(|| "'{}".to_string())
+                    } else {
+                        self.render_p_typed(&elem, &dt)
+                    };
                     if string_keyed {
                         format!("\"{}\":{}", k, v)
                     } else {

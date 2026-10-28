@@ -1955,6 +1955,21 @@ impl Simulator {
         if !self.string_char_receiver_is_scalar(expr) {
             return None;
         }
+        // §7.8: a row of an associative array of collections
+        // (`string m[int][string]`, `m[3]["x"] = "hi"`) is itself a
+        // collection; `[k]` selects its element. Taken for a character
+        // index, the write was dropped.
+        if let ExprKind::Index { expr: arr, .. } = &expr.kind
+            && let ExprKind::Ident(h) = &arr.kind
+            && h.path.len() == 1
+            && h.path[0].selects.is_empty()
+        {
+            let name = self.resolve_hier_name(h).into_owned();
+            let name = self.instance_assoc_member(&name).unwrap_or(name);
+            if self.is_associative_array(&name) && self.assoc_has_coll_elems(&name) {
+                return None;
+            }
+        }
         let mut b = self.eval_expr(expr).sv_string_bytes();
         let i = self.eval_expr(index).to_u64().unwrap_or(0) as usize;
         let cbyte = (val.resize(8).to_u64().unwrap_or(0) & 0xFF) as u8;
@@ -1989,6 +2004,75 @@ impl Simulator {
     /// bit and write it back. An absent element was created with the bit
     /// dropped, and a present one's bit went under a bogus `m[k][3]` key.
     /// None when `expr` is not such an element.
+    /// §7.8/§7.10: a write into a row of an associative array of
+    /// collections (`aq[6][0] = 9` on `int aq[int][$]`) whose row does not
+    /// exist yet creates the row as the collection its declaration names,
+    /// as `push_back` does, so the element is stored in that row (the write
+    /// left a bare `aq[6][0]` cell no queue read, `%p` or `foreach` saw).
+    fn ensure_assoc_row(&mut self, row_expr: &Expression) {
+        use crate::ast::types::UnpackedDimension as UD;
+        let ExprKind::Index {
+            expr: arr,
+            index: key,
+        } = &row_expr.kind
+        else {
+            return;
+        };
+        let ExprKind::Ident(hier) = &arr.kind else {
+            return;
+        };
+        if hier.path.len() != 1 || !hier.path[0].selects.is_empty() {
+            return;
+        }
+        let name = self.resolve_hier_name(hier).into_owned();
+        let Some(dims) = self
+            .module
+            .assoc_row_dims
+            .get(&name)
+            .or_else(|| self.module.assoc_row_dims.get(&hier.path[0].name.name))
+            .cloned()
+        else {
+            return;
+        };
+        if !self.is_associative_array(&name) {
+            return;
+        }
+        let kv = self.eval_expr(key);
+        if kv.has_xz() && !kv.is_real && !self.is_string_keyed_array(&name) {
+            return;
+        }
+        let row = format!("{}[{}]", name, self.assoc_key_str(&name, &kv));
+        if self.module.dynamic_arrays.contains(&row)
+            || self.is_associative_array(&row)
+            || self
+                .get_signal_value_by_name(&Self::name_with_suffix(&row, ".size"))
+                .is_some()
+        {
+            return;
+        }
+        let w = self.assoc_elem_width(&name).unwrap_or(32);
+        match dims.first() {
+            Some(UD::Queue { .. } | UD::Unsized(_)) => {
+                self.module.dynamic_arrays.insert(row.clone());
+                self.module.arrays.entry(row.clone()).or_insert((0, 63, w));
+                self.set_queue_size(&row, 0);
+            }
+            Some(UD::Associative { data_type, .. }) => {
+                let is_str = data_type.as_ref().is_some_and(|dt| {
+                    matches!(
+                        dt.as_ref(),
+                        crate::ast::types::DataType::Simple {
+                            kind: crate::ast::types::SimpleType::String,
+                            ..
+                        }
+                    )
+                });
+                self.module.associative_arrays.insert(row, is_str);
+            }
+            _ => {}
+        }
+    }
+
     fn assoc_elem_bit_write(
         &mut self,
         expr: &Expression,
@@ -2068,6 +2152,9 @@ impl Simulator {
         }
         if let Some(r) = self.assoc_elem_bit_write(expr, index, val) {
             return r;
+        }
+        if !self.module.assoc_row_dims.is_empty() {
+            self.ensure_assoc_row(expr);
         }
         // §11.5.1: a hierarchical class property's selected element lives
         // in the heap/shared static cell, rather than a synthesized signal.
