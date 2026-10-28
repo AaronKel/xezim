@@ -3865,7 +3865,9 @@ impl Simulator {
                 && (l_is_prop || self.module.dynamic_arrays.contains(&lname))
                 && (r_is_prop || self.module.dynamic_arrays.contains(&rname))
             {
-                self.copy_whole_queue(&lname, &rname);
+                // Rows that are themselves dynamic arrays or queues
+                // (`int d[][]`) are copied with their sizes and elements.
+                self.copy_dyn_tree(&lname, &rname);
                 self.settle_after_proc_write();
                 return;
             }

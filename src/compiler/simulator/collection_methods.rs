@@ -1807,6 +1807,18 @@ impl Simulator {
         for (j, v) in vals.into_iter().enumerate() {
             self.set_signal_value_by_name(&format!("{}[{}]", key, j), v);
         }
+        // §13.5.1: a by-value `int o[][]` gets a copy of each row too; read
+        // as one value per row it arrived with every row empty (#595).
+        if cname != key {
+            for j in 0..size {
+                let srow = format!("{cname}[{j}]");
+                if self.module.dynamic_arrays.contains(&srow) {
+                    let drow = format!("{key}[{j}]");
+                    self.register_dyn_row_like(&drow, &srow);
+                    self.copy_dyn_tree(&drow, &srow);
+                }
+            }
+        }
         self.set_queue_size(&key, size);
         Some((key, cname))
     }

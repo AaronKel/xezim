@@ -333,17 +333,24 @@ impl Simulator {
         // §7.4.5: a class member `T d[][]` (dynamic rows): each element is
         // a collection of its own, empty until `d[i] = new[m]` sizes it.
         if let Some(w) = self.class_dyn_row_width(name) {
-            let keep = if src.as_deref() == Some(name) {
-                self.get_queue_size(name).min(n)
-            } else {
-                0
-            };
-            for i in keep..n {
+            let self_copy = src.as_deref() == Some(name);
+            let keep = src
+                .as_deref()
+                .map_or(0, |sn| self.get_queue_size(sn).min(n));
+            for i in if self_copy { keep } else { 0 }..n {
                 let row = format!("{}[{}]", name, i);
                 self.clear_dyn_row(&row);
                 self.module.dynamic_arrays.insert(row.clone());
                 self.module.arrays.insert(row.clone(), (0, 63, w));
                 self.set_queue_size(&row, 0);
+            }
+            // §7.5.1: each kept row of another array is copied with its size
+            // and elements; every row was cleared (#595).
+            if let Some(sn) = src.as_deref().filter(|_| !self_copy) {
+                for i in 0..keep {
+                    let (drow, srow) = (format!("{name}[{i}]"), format!("{sn}[{i}]"));
+                    self.copy_dyn_tree(&drow, &srow);
+                }
             }
             self.set_queue_size(name, n);
             return;
@@ -354,7 +361,17 @@ impl Simulator {
         };
         if let Some(sn) = &src {
             for i in 0..keep {
-                self.queue_copy_elem(sn, i, &name, i);
+                // §7.5.1: a row that is itself a dynamic array or queue
+                // (`int d[][]`) is copied with its size and elements; read as
+                // one value it was x (#595).
+                let srow = format!("{sn}[{i}]");
+                if sn.as_str() != name && self.module.dynamic_arrays.contains(&srow) {
+                    let drow = format!("{name}[{i}]");
+                    self.register_dyn_row_like(&drow, &srow);
+                    self.copy_dyn_tree(&drow, &srow);
+                } else {
+                    self.queue_copy_elem(sn, i, &name, i);
+                }
             }
         }
         // `T a[][16]`: each slot is itself a fixed array

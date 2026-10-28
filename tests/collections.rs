@@ -210,3 +210,5 @@ mod assoc_select_write_and_return;
 mod foreach_subarray;
 #[path = "collections/assoc_coll_rows.rs"]
 mod assoc_coll_rows;
+#[path = "collections/dyn_rows_copy_595.rs"]
+mod dyn_rows_copy_595;

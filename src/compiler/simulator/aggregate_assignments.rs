@@ -2399,6 +2399,36 @@ impl Simulator {
         Some(Value::concat(&elems))
     }
 
+    /// §7.5.1/§7.6: copy the dynamic array or queue at `src` into `dst`,
+    /// a row that is itself a dynamic array or queue (`int d[][]`,
+    /// `int q[][$]`, deeper too) with its own size and elements. `dst`'s
+    /// rows are registered like the source's and start empty.
+    pub(super) fn copy_dyn_tree(&mut self, dst: &str, src: &str) {
+        let n = self.get_queue_size(src);
+        for i in 0..n {
+            let (srow, drow) = (format!("{src}[{i}]"), format!("{dst}[{i}]"));
+            if self.module.dynamic_arrays.contains(&srow) {
+                self.register_dyn_row_like(&drow, &srow);
+                self.copy_dyn_tree(&drow, &srow);
+            } else {
+                self.queue_copy_elem(src, i, dst, i);
+            }
+        }
+        self.set_queue_size(dst, n);
+    }
+
+    /// Register `row` as an empty dynamic row shaped like `like`.
+    pub(super) fn register_dyn_row_like(&mut self, row: &str, like: &str) {
+        self.clear_dyn_row(row);
+        self.module.dynamic_arrays.insert(row.to_string());
+        let shape = self.module.arrays.get(like).copied().unwrap_or((0, 63, 32));
+        self.module.arrays.insert(row.to_string(), shape);
+        if self.module.queue_vars.contains(like) {
+            self.module.queue_vars.insert(row.to_string());
+        }
+        self.set_queue_size(row, 0);
+    }
+
     pub(super) fn copy_whole_queue(&mut self, dst: &str, src: &str) {
         let n = self.get_queue_size(src);
         for i in 0..n {
