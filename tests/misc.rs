@@ -550,3 +550,5 @@ mod resetall_after_one_line_module_600;
 mod args_file_bare_top_601;
 #[path = "misc/macro_formals_multiline_606.rs"]
 mod macro_formals_multiline_606;
+#[path = "misc/until_with_604.rs"]
+mod until_with_604;
