@@ -7845,19 +7845,63 @@ impl<'a> BytecodeCompiler<'a> {
             return None;
         }
         let mut regs: Vec<RegId> = Vec::with_capacity(fields.len());
-        for (idx, (_, _, w)) in fields.iter().enumerate() {
+        for (idx, (name, _, w)) in fields.iter().enumerate() {
             let expr = if !ordered.is_empty() {
                 ordered[idx]
             } else if let Some((_, e)) = named.iter().find(|(i, _)| *i == idx) {
                 e
             } else {
-                default?
+                // §10.9.2: `default:` fills a nested struct member member by
+                // member (see `apply_packed_struct_pattern`).
+                let d = default?;
+                regs.push(self.compile_default_fill(layout, name, d, *w)?);
+                continue;
             };
             let src = self.compile_expr(expr, *w)?;
             let r = self.alloc_reg();
             self.emit(Insn::Move(r, src));
             self.emit(Insn::Resize(r, *w));
             regs.push(r);
+        }
+        let dest = self.alloc_reg();
+        self.emit(Insn::Concat(dest, Box::new(regs)));
+        Some(dest)
+    }
+
+    /// The value `default:` gives the packed-struct member `name` of width
+    /// `w`: each of its own members filled in turn when it is a nested
+    /// struct (§10.9.2), else the default at the member's width. A pattern
+    /// default is left to the interpreter.
+    fn compile_default_fill(
+        &mut self,
+        layout: &[(String, u32, u32)],
+        name: &str,
+        default: &Expression,
+        w: u32,
+    ) -> Option<RegId> {
+        let pfx = format!("{name}.");
+        let mut kids: Vec<(String, u32, u32)> = layout
+            .iter()
+            .filter(|(k, _, _)| {
+                k.strip_prefix(&pfx)
+                    .is_some_and(|r| !r.is_empty() && !r.contains('.'))
+            })
+            .cloned()
+            .collect();
+        if kids.is_empty() {
+            let src = self.compile_expr(default, w)?;
+            let r = self.alloc_reg();
+            self.emit(Insn::Move(r, src));
+            self.emit(Insn::Resize(r, w));
+            return Some(r);
+        }
+        if matches!(default.kind, ExprKind::AssignmentPattern(_)) {
+            return None;
+        }
+        kids.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut regs = Vec::with_capacity(kids.len());
+        for (k, _, kw) in &kids {
+            regs.push(self.compile_default_fill(layout, k, default, *kw)?);
         }
         let dest = self.alloc_reg();
         self.emit(Insn::Concat(dest, Box::new(regs)));

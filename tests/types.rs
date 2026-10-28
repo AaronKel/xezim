@@ -587,3 +587,5 @@ mod literal_whitespace_580;
 mod const_bits_compound;
 #[path = "types/package_struct_array_index_584.rs"]
 mod package_struct_array_index_584;
+#[path = "types/review_nested_pattern_default.rs"]
+mod review_nested_pattern_default;

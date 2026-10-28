@@ -1104,11 +1104,27 @@ impl Simulator {
         }
 
         for (i, (full, leaf, off, w)) in children.iter().enumerate() {
-            let expr = named
+            let keyed = named
                 .get(leaf.as_str())
                 .copied()
-                .or_else(|| ordered.get(i).copied())
-                .or(default);
+                .or_else(|| ordered.get(i).copied());
+            // §10.9.2: `default:` reaches into a nested struct member and
+            // fills each of its members (`'{trans_id: id, default: 1}` sets
+            // `exception.cause` and `exception.valid` to 1), as Questa does;
+            // the whole member took the value, so only its LSB was set.
+            if keyed.is_none()
+                && let Some(d) = default
+                && !matches!(d.kind, ExprKind::AssignmentPattern(_))
+                && layout
+                    .iter()
+                    .any(|(k, _, _)| k.len() > full.len() + 1 && k.starts_with(&format!("{full}.")))
+            {
+                let sub = [AssignmentPatternItem::Default(d.clone())];
+                if self.apply_packed_struct_pattern(acc, layout, full, base_offset, &sub) {
+                    continue;
+                }
+            }
+            let expr = keyed.or(default);
             let Some(e) = expr else { continue };
             // A nested pattern on a sub-struct member recurses so each of ITS
             // members lands at the right offset too.
