@@ -212,3 +212,5 @@ mod foreach_subarray;
 mod assoc_coll_rows;
 #[path = "collections/dyn_rows_copy_595.rs"]
 mod dyn_rows_copy_595;
+#[path = "collections/dyn_row_print_order_597.rs"]
+mod dyn_row_print_order_597;

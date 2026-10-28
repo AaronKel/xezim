@@ -2882,11 +2882,24 @@ impl Simulator {
         // elements at `q[i][j]` — evaluating the row to one packed value
         // would land in a phantom scalar `q[i]` that no read ever visits.
         if let Some(&(_, (jlo, jhi), _)) = self.module.arrays_2d.get(obj_name) {
+            // §10.9.1 / §7.6: the row pairs by position from its declared
+            // left bound (`int q[$][3:1]` takes `'{1,2,3}` as q[i][3] = 1).
+            let order = |me: &Self, name: &str, lo: i64, hi: i64, nth: usize| -> Vec<i64> {
+                match me
+                    .unpacked_decl_dims_of(name)
+                    .and_then(|d| d.get(nth).copied())
+                {
+                    Some((l, r)) if l > r => (r..=l).rev().collect(),
+                    _ => (lo..=hi).collect(),
+                }
+            };
+            let dst = order(self, obj_name, jlo, jhi, 1);
             if let Some(src) = self.flat_member_name(arg) {
-                if let Some(&(slo, _, _)) = self.module.arrays.get(&src) {
-                    for (k, j) in (jlo..=jhi).enumerate() {
+                if let Some(&(slo, shi, _)) = self.module.arrays.get(&src) {
+                    let from = order(self, &src, slo, shi, 0);
+                    for (j, si) in dst.iter().zip(from.iter()) {
                         let v = self
-                            .get_signal_value_by_name(&format!("{}[{}]", src, slo + k as i64))
+                            .get_signal_value_by_name(&format!("{}[{}]", src, si))
                             .unwrap_or_else(|| Value::zero(32));
                         self.set_signal_value_by_name(&format!("{}[{}]", elem, j), v);
                     }
@@ -2895,7 +2908,7 @@ impl Simulator {
             }
             if let ExprKind::AssignmentPattern(items) = &arg.kind {
                 let vals: Vec<Value> = items.iter().map(|it| self.eval_expr(it.expr())).collect();
-                for (k, j) in (jlo..=jhi).enumerate() {
+                for (k, j) in dst.iter().enumerate() {
                     let v = vals.get(k).cloned().unwrap_or_else(|| Value::zero(32));
                     self.set_signal_value_by_name(&format!("{}[{}]", elem, j), v);
                 }
@@ -4091,6 +4104,38 @@ impl Simulator {
     /// itself an unpacked array: a fixed tail (`T a[][N]`, registered with a
     /// 2-D or N-D shape) or dynamic rows (`T a[][]`, each row with its own
     /// size). `None` for a dynamic array of scalars.
+    /// Declared (left, right) bounds of each unpacked dimension of the array
+    /// stored at `name`: a module or local array's, or a class member's
+    /// (`<handle>#prop`). A dynamic dimension may be listed or left out.
+    fn unpacked_decl_dims_of(&self, name: &str) -> Option<Vec<(i64, i64)>> {
+        if let Some(d) = self.module.unpacked_decl_dims.get(name) {
+            return Some(d.clone());
+        }
+        let (h, prop) = name.split_once('#')?;
+        let handle = h.parse::<usize>().ok()?;
+        let cd = self.class_prop_declarer(handle, prop)?;
+        if let Some(d) = cd.array_prop_decl_dims.get(prop) {
+            return Some(d.clone());
+        }
+        // A dynamic outer dimension over fixed rows (`int a[][1:0]`): the
+        // rows' declared bounds, evaluated here.
+        let tail = cd.dynamic_tail_properties.get(prop)?;
+        let p = Some(&self.module.parameters);
+        tail.iter()
+            .map(|d| match d {
+                crate::ast::types::UnpackedDimension::Range { left, right, .. } => Some((
+                    super::elaborate::const_eval_i64_with_params(left, p)?,
+                    super::elaborate::const_eval_i64_with_params(right, p)?,
+                )),
+                crate::ast::types::UnpackedDimension::Expression { expr, .. } => {
+                    let n = super::elaborate::const_eval_i64_with_params(expr, p)?;
+                    (n > 0).then_some((0, n - 1))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(super) fn render_p_dyn_rows(&mut self, name: &str, sz: u64) -> Option<Vec<String>> {
         let inner: Option<Vec<(i64, i64)>> = self
             .module
@@ -4132,16 +4177,33 @@ impl Simulator {
                 }
             }
         };
+        // §21.2.1.7 / §10.9.1: each fixed dimension prints from its declared
+        // left bound to its right one (`[1:0]` gives element 1 first), as a
+        // fixed array does; the normalized (lo, hi) printed it upward (#597).
+        let inner = inner.map(|dims| {
+            let decl = self.unpacked_decl_dims_of(name);
+            match decl {
+                Some(d) if d.len() == dims.len() + 1 => d[1..].to_vec(),
+                Some(d) if d.len() == dims.len() => d,
+                _ => dims,
+            }
+        });
         fn fixed(
             me: &mut Simulator,
             key: &str,
             dims: &[(i64, i64)],
             leaf: &mut dyn FnMut(&mut Simulator, &str) -> String,
         ) -> String {
-            let Some((&(lo, hi), rest)) = dims.split_first() else {
+            let Some((&(l, r), rest)) = dims.split_first() else {
                 return leaf(me, key);
             };
-            let parts: Vec<String> = (lo..=hi)
+            let order: Vec<i64> = if l <= r {
+                (l..=r).collect()
+            } else {
+                (r..=l).rev().collect()
+            };
+            let parts: Vec<String> = order
+                .into_iter()
                 .map(|i| fixed(me, &format!("{}[{}]", key, i), rest, leaf))
                 .collect();
             format!("'{{{}}}", parts.join(", "))

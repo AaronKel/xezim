@@ -2815,7 +2815,12 @@ impl Simulator {
                 let mut base_name = self.resolve_hier_name(hier);
                 // Bare class-member N-D array inside a method:
                 // resolve to its per-instance `<handle>#<member>`.
-                if !self.module.arrays_nd.contains_key(&*base_name) {
+                // A member shadows a module array of the same name (§8.10).
+                if !self.module.arrays_nd.contains_key(&*base_name)
+                    || (hier.path.len() == 1
+                        && hier.path[0].selects.is_empty()
+                        && *base_name == *hier.path[0].name.name)
+                {
                     if let Some(s) = self.instance_assoc_member(&base_name) {
                         base_name = std::borrow::Cow::Owned(s);
                     }
@@ -2991,9 +2996,14 @@ impl Simulator {
         {
             if let ExprKind::Ident(hier) = &inner_expr.kind {
                 let mut name = self.resolve_hier_name(hier);
-                // Bare class-member 2D array inside a method:
-                // resolve to its per-instance `<handle>#<member>`.
-                if !self.module.arrays_2d.contains_key(&*name) {
+                // Bare class-member 2D array inside a method: resolve to its
+                // per-instance `<handle>#<member>`. The member shadows a
+                // module array of the same name (§8.10); taking the module's
+                // first sent the write to it and left the member at 0 (#597).
+                let bare_member = hier.path.len() == 1
+                    && hier.path[0].selects.is_empty()
+                    && *name == *hier.path[0].name.name;
+                if !self.module.arrays_2d.contains_key(&*name) || bare_member {
                     if let Some(s) = self.instance_assoc_member(&name) {
                         name = std::borrow::Cow::Owned(s);
                     }
