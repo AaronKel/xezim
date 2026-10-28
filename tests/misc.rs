@@ -548,3 +548,5 @@ mod array_pattern_and_monitor_errors;
 mod resetall_after_one_line_module_600;
 #[path = "misc/args_file_bare_top_601.rs"]
 mod args_file_bare_top_601;
+#[path = "misc/macro_formals_multiline_606.rs"]
+mod macro_formals_multiline_606;
