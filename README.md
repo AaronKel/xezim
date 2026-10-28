@@ -1,7 +1,11 @@
-<h1 align="center">xezim</h1>
+<h1 align="center">Xezim</h1>
 
 <p align="center">
-  <b>An open-source SystemVerilog simulator, written in Rust.</b><br>
+  <b>Xezim — Extensible SystemVerilog Simulator. Zero lock-in.</b>
+</p>
+
+<p align="center">
+  An open-source SystemVerilog simulator, written in Rust.<br>
   RTL, gate-level and UVM simulation in one command, from source to results.
 </p>
 
@@ -24,7 +28,7 @@
 
 ---
 
-## Welcome to xezim
+## Welcome to Xezim
 
 <table>
 <tr>
@@ -91,9 +95,9 @@
 
 The [feature list](docs/features.md) has the details.
 
-## What xezim does
+## What Xezim does
 
-xezim reads Verilog and SystemVerilog source files and simulates them. It
+Xezim reads Verilog and SystemVerilog source files and simulates them. It
 preprocesses and parses the sources, elaborates the design hierarchy, compiles
 processes and continuous assignments into bytecode, and runs them on an
 event-driven kernel that follows the IEEE 1800 scheduling semantics. Most
@@ -149,12 +153,12 @@ See the [user guide](docs/user-guide.md) and the
 ## Performance
 
 Whole-run wall-clock time on one machine (Intel Core i7-9800X, six logical
-CPUs, Linux). The xezim 0.11.3 figures were measured with a plain release
+CPUs, Linux). The Xezim 0.11.3 figures were measured with a plain release
 build and cold caches. Reference figures are from earlier verified runs on
 the same machine in optimized mode, without debug visibility. Both
 simulators produce the same results on every row.
 
-| Workload | xezim | Reference simulator |
+| Workload | Xezim | Reference simulator |
 |---|---|---|
 | XuanTie C906 SoC, CoreMark ×1 (295,294 cycles) | 82 s, 0.62 GiB peak | 82 s, 44 s of it simulating |
 | XuanTie C910 dual-core SoC, memcpy ×200, cold start | 121 s, about 12 s of it compiling | 136 s, 97 s of it simulating |
@@ -163,7 +167,7 @@ simulators produce the same results on every row.
 AXI4 is the median of five runs; each SoC figure is one run. Host load affects
 elapsed time, so these figures describe the measured workloads rather than a
 controlled comparison. Compilation and elaboration account for only a small
-part of these xezim runs, making startup cost useful to consider separately
+part of these Xezim runs, making startup cost useful to consider separately
 from simulation time.
 
 To get the most out of a build, measure a
@@ -175,7 +179,7 @@ with few, very hot blocks, so measure it on yours.
 
 ## Conformance
 
-- **sv-tests:** xezim 0.11.0 passes 4,722 of 4,770 tests (99.0%) of the
+- **sv-tests:** Xezim 0.11.0 passes 4,722 of 4,770 tests (99.0%) of the
   [sv-tests](https://github.com/chipsalliance/sv-tests) suite.
 - **UVM:** the mbits-mirafra AVIP base tests for AXI4, APB, I3C, SPI and
   AXI4-Lite print the same UVM messages as a commercial reference simulator,
@@ -189,7 +193,7 @@ with few, very hot blocks, so measure it on yours.
 |---|---|
 | [Supported features](docs/features.md) | Language, UVM, coverage, debug and integration features in detail |
 | [User guide](docs/user-guide.md) | Running simulations, waveforms, design cache, native compilation, timescales |
-| [Command-line reference](docs/command-line.md) | Every option and environment variable, and the spellings of other simulators that xezim accepts |
+| [Command-line reference](docs/command-line.md) | Every option and environment variable, and the spellings of other simulators that Xezim accepts |
 | [UVM guide](docs/uvm-guide.md) | Running UVM testbenches, supported features, UVM's DPI-C library |
 | [DPI and VPI guide](docs/dpi-guide.md) | Loading C and C++ libraries, the VPI surface |
 | [Coverage guide](docs/coverage-guide.md) | Functional, assertion and code coverage, `xezim_cov.json` |
@@ -208,7 +212,7 @@ welcome.
 
 ## Background
 
-xezim explores whether modern tools and AI assistance can sharply reduce the
+Xezim explores whether modern tools and AI assistance can sharply reduce the
 cost of building core EDA infrastructure such as a simulator: work that has
 traditionally taken large teams many years. It was built incrementally, from
 simple combinational logic up to SoCs and UVM environments, with every step
@@ -220,7 +224,7 @@ The project was previously developed under the name `sisSIM`.
 
 ## Contributors
 
-Thank you to everyone who contributes code, tests and bug reports to xezim
+Thank you to everyone who contributes code, tests and bug reports to Xezim
 and xezim-core.
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for what each person contributed, and
@@ -230,8 +234,8 @@ See [CONTRIBUTORS.md](CONTRIBUTORS.md) for what each person contributed, and
 
 - The Icarus Verilog project, for its public test suite
 - The [sv-tests](https://github.com/chipsalliance/sv-tests) project
-- The Rust community and the open-source EDA projects xezim builds on
+- The Rust community and the open-source EDA projects Xezim builds on
 
 ## License
 
-xezim is free software, licensed under the [Apache License 2.0](LICENSE).
+Xezim is free software, licensed under the [Apache License 2.0](LICENSE).
