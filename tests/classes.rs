@@ -866,3 +866,7 @@ mod shadowed_member_same_named_formal;
 mod member_multidim_copy;
 #[path = "classes/member_new_owner_spec_596.rs"]
 mod member_new_owner_spec_596;
+#[path = "classes/super_call_formal_widths_593.rs"]
+mod super_call_formal_widths_593;
+#[path = "classes/randomize_foreach_empty_dyn_599.rs"]
+mod randomize_foreach_empty_dyn_599;
