@@ -1967,6 +1967,76 @@ impl Simulator {
         Some(false)
     }
 
+    /// §7.8.6/§11.5.1: a bit write into an associative element whose
+    /// element type is integral (`m[k][3] = 1`, `sb["k"][2] = 1`), absent or
+    /// not: read it (an absent one as the element type's default), set the
+    /// bit and write it back. An absent element was created with the bit
+    /// dropped, and a present one's bit went under a bogus `m[k][3]` key.
+    /// None when `expr` is not such an element.
+    fn assoc_elem_bit_write(
+        &mut self,
+        expr: &Expression,
+        index: &Expression,
+        val: &Value,
+    ) -> Option<bool> {
+        let ExprKind::Index {
+            expr: inner_expr,
+            index: inner_idx,
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let ExprKind::Ident(hier) = &inner_expr.kind else {
+            return None;
+        };
+        let name = self.resolve_hier_name(hier).into_owned();
+        let name = self.instance_assoc_member(&name).unwrap_or(name);
+        if !self.is_associative_array(&name) || self.module.assoc_coll_elems.contains(&name) {
+            return None;
+        }
+        let default = self.assoc_missing_elem_value(&name)?;
+        let kv = self.eval_expr(inner_idx);
+        if kv.has_xz() && !kv.is_real && !self.is_string_keyed_array(&name) {
+            self.warn_invalid_assoc_index(&name);
+            return Some(false);
+        }
+        let bv = self.eval_expr(index);
+        let Some(b) = bv.to_i64().filter(|_| !bv.has_xz()) else {
+            return Some(false);
+        };
+        let key = self.assoc_key_str(&name, &kv);
+        let elem = format!("{}[{}]", name, key);
+        // A row that is itself a collection (`aq[k]` of `int aq[int][$]`):
+        // `[j]` selects its element, which the collection paths handle.
+        if self.is_associative_array(&elem)
+            || self.module.dynamic_arrays.contains(&elem)
+            || self
+                .signals
+                .contains_key(&Self::name_with_suffix(&elem, ".size"))
+        {
+            return None;
+        }
+        let fresh = !self.signals.contains_key(&elem);
+        let mut cur = self.get_signal_value_by_name(&elem).unwrap_or(default);
+        let phys = match self.select_base_elem_dim(expr) {
+            Some((dl, dr)) if dl < dr => dr - b,
+            Some((dl, dr)) => b - dl.min(dr),
+            None => b,
+        };
+        if phys < 0 || phys as u32 >= cur.width {
+            return Some(false);
+        }
+        let nb = val.get_bit(0);
+        let changed = cur.get_bit(phys as usize) != nb;
+        cur.set_bit(phys as usize, nb);
+        if changed || fresh {
+            self.set_signal_value_by_name(&elem, cur);
+            self.mark_dirty(&elem);
+            self.touch_queue(&name);
+        }
+        Some(changed)
+    }
+
     /// Outlined from `assign_value_inner` (see `exec_stmt_blocking_assign`): keeps
     /// the dispatcher's stack frame small.
     #[inline(never)]
@@ -1978,6 +2048,9 @@ impl Simulator {
         index: &Box<Expression>,
     ) -> bool {
         if let Some(r) = self.try_string_index_char_write(expr, index, val) {
+            return r;
+        }
+        if let Some(r) = self.assoc_elem_bit_write(expr, index, val) {
             return r;
         }
         // §11.5.1: a hierarchical class property's selected element lives
@@ -2485,7 +2558,23 @@ impl Simulator {
         }
         // Class associative-array member element write — base may be
         // a bare member (`m[k]=v`) or another object's (`obj.m[k]=v`).
-        if let Some(an) = self.expr_assoc_name(expr) {
+        // Not a BIT of an associative element whose element is a plain
+        // integral (`m[k][3] = 1`): that is no collection, and storing the
+        // value under `m[k][3]` dropped the bit (§11.5.1).
+        let elem_bit = |me: &mut Self| -> bool {
+            let ExprKind::Index { expr: b, .. } = &expr.kind else {
+                return false;
+            };
+            let ExprKind::Ident(h) = &b.kind else {
+                return false;
+            };
+            let n = me.resolve_hier_name(h).into_owned();
+            let n = me.instance_assoc_member(&n).unwrap_or(n);
+            me.is_associative_array(&n)
+                && !me.module.assoc_coll_elems.contains(&n)
+                && me.assoc_missing_elem_value(&n).is_some()
+        };
+        if let Some(an) = self.expr_assoc_name(expr).filter(|_| !elem_bit(self)) {
             let idx_val = self.eval_expr(index);
             let idx_str = self.assoc_key_str(&an, &idx_val);
             let elem_name = Self::name_with_key(&an, &idx_str);
@@ -5058,13 +5147,35 @@ impl Simulator {
                     if index_value.has_xz() && !index_value.is_real {
                         return false;
                     }
+                    // §7.8.6: a select write to an ABSENT associative element
+                    // reads it as the element type's default, replaces the
+                    // selected bits and writes it back, creating it; the
+                    // write was dropped. Its key takes the array's key form.
+                    let mut assoc_default: Option<Value> = None;
                     let element_name = self.class_nd_elem_name(array_expr, index).or_else(|| {
-                        let base = self.expr_assoc_name(array_expr)?;
+                        // A module-scope or block-local array is not an
+                        // object member: resolve the plain name too.
+                        let base = self.expr_assoc_name(array_expr).or_else(|| {
+                            let ExprKind::Ident(h) = &array_expr.kind else {
+                                return None;
+                            };
+                            let n = self.resolve_hier_name(h).into_owned();
+                            let n = self.instance_assoc_member(&n).unwrap_or(n);
+                            self.is_associative_array(&n).then_some(n)
+                        })?;
+                        if self.is_associative_array(&base) {
+                            let key = self.assoc_key_str(&base, &index_value);
+                            assoc_default = self.assoc_missing_elem_value(&base);
+                            return Some(format!("{}[{}]", base, key));
+                        }
                         let index = index_value.to_i64()?;
                         Some(format!("{}[{}]", base, index))
                     });
                     if let Some(element_name) = element_name {
-                        if let Some(mut current) = self.get_signal_value_by_name(&element_name) {
+                        if let Some(mut current) = self
+                            .get_signal_value_by_name(&element_name)
+                            .or(assoc_default)
+                        {
                             let width = current.width as usize;
                             let hi = msb.min(width.saturating_sub(1));
                             if oob_write_discard(msb_i, src_base, width as u32) {
@@ -5085,7 +5196,7 @@ impl Simulator {
                                     }
                                 }
                             }
-                            if changed {
+                            if changed || !self.signals.contains_key(&element_name) {
                                 self.set_signal_value_by_name(&element_name, current);
                             }
                             return changed;
