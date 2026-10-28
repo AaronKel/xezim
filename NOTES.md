@@ -10,6 +10,20 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A variable index of a package array of packed structs selects an element
+  (§7.4.1, §26.3): `ENC[fmt].exp_bits` in a package function was a one-bit
+  select, so fpnew's `bias` read 2^32-1 and `1.0 + 2.0` came back as +Inf
+  (#584, reported and fixed by davekeeshan, core #101 and #585). Also a
+  fused `assign v[i]` on `logic [0:N]`, and `p::ENC[f].man_bits` read from
+  a class method, which read 0.
+* A bit, part or indexed part-select write to an absent associative
+  element creates it from the element type's default (§7.8.6, §11.5.1);
+  the write was dropped (#582, reported by Ganesh-TNL). An associative
+  array returned from a class method (instance, virtual, static, or
+  through the method's name) keeps its entries; it came back empty (#583,
+  reported by Ganesh-TNL). `f()[k]` and `o.method().size()` on a returned
+  collection read 0, and `%p` of a class member associative array of
+  vectors printed decimal.
 * White space, newlines included, may separate the size of a based literal
   from its base and the base from its value (§5.7.1, §5.3). A space before
   the apostrophe dropped the size with no message, so `2 'd1` was 32 bits
