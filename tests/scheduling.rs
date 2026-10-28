@@ -411,3 +411,5 @@ mod port_handshake_t0_550;
 mod armed_edge_dynamic_offset_read;
 #[path = "scheduling/clocking_output_clockvar_read.rs"]
 mod clocking_output_clockvar_read;
+#[path = "scheduling/comb_sensitivity_591_592.rs"]
+mod comb_sensitivity_591_592;

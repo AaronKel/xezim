@@ -4,6 +4,24 @@ use super::*;
 #[allow(unused_imports)]
 use crate::{log_eprintln as eprintln, log_println as println};
 
+thread_local! {
+    /// While set (`collect_stmt_reads_whole`): the names read as a whole value,
+    /// not only as the base of a member read.
+    static WHOLE_READS: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
+    /// While a function body's reads are collected: the reads of the
+    /// functions it calls, kept apart from its own (`collect_callee_reads`).
+    static CALLEE_READS: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
+}
+
+/// Record `name` as read whole, when `collect_stmt_reads_whole` is collecting.
+fn note_whole_read(name: &str) {
+    WHOLE_READS.with(|c| {
+        if let Some(set) = c.borrow_mut().as_mut() {
+            set.insert(name.to_string());
+        }
+    });
+}
+
 impl Simulator {
     pub(super) fn collect_leaf_idents(expr: &Expression, out: &mut HashSet<String>) {
         match &expr.kind {
@@ -258,6 +276,26 @@ impl Simulator {
         v
     }
 
+    /// The reads of the function `name` a call reaches (`collect_function_reads`).
+    /// Inside another function's body they go to that function's
+    /// `CALLEE_READS` sink, apart from its own reads, so its frame names
+    /// (formals, locals) do not filter them (§13.4: the callee's `x` is not
+    /// the caller's formal `x`).
+    fn collect_callee_reads(name: &str, module: &ElaboratedModule, reads: &mut HashSet<String>) {
+        let mut got: HashSet<String> = HashSet::default();
+        Self::collect_function_reads(name, module, &mut got);
+        let rest = CALLEE_READS.with(|c| match c.borrow_mut().as_mut() {
+            Some(sink) => {
+                sink.extend(got);
+                None
+            }
+            None => Some(got),
+        });
+        if let Some(got) = rest {
+            reads.extend(got);
+        }
+    }
+
     pub(super) fn collect_function_reads(
         name: &str,
         module: &ElaboratedModule,
@@ -294,6 +332,7 @@ impl Simulator {
         }
         let mut scratch_writes: HashSet<String> = HashSet::default();
         let mut body_reads: HashSet<String> = HashSet::default();
+        let outer = CALLEE_READS.with(|c| c.replace(Some(HashSet::default())));
         // §13.4.3: a default-argument expression is evaluated at call time, so
         // its reads are part of the caller's sensitivity too.
         for port in &fdecl.ports {
@@ -304,6 +343,7 @@ impl Simulator {
         for item in &fdecl.items {
             Self::collect_stmt_reads(item, module, &mut body_reads, &mut scratch_writes);
         }
+        let callee_reads = CALLEE_READS.with(|c| c.replace(outer)).unwrap_or_default();
         // §13.4: the formals, the return variable and the block locals are
         // frame state, not module signals the caller can be sensitive to. A
         // formal named like a design net (`uj_imm(logic [31:0] instruction_i)`
@@ -325,6 +365,7 @@ impl Simulator {
         }
         local_names(&fdecl.items, &mut frame);
         body_reads.retain(|r| !frame.contains(r.as_str()));
+        body_reads.extend(callee_reads);
         // A bare read in the body of an INSTANCE's function names that
         // instance's variable (`internal_func_dep` inside
         // `dut.eval_with_hidden_dep` is `dut.internal_func_dep`) — the bare
@@ -712,6 +753,7 @@ impl Simulator {
                         reads.insert(parent.to_string());
                     }
                 }
+                note_whole_read(&name);
                 reads.insert(name);
             }
             ExprKind::Index { expr: base, index } => {
@@ -764,6 +806,7 @@ impl Simulator {
                             }
                         }
                     } else {
+                        note_whole_read(&name);
                         reads.insert(name);
                     }
                 } else if let Some(elems) = Self::multi_dim_elem_names(base, index, module) {
@@ -875,9 +918,9 @@ impl Simulator {
                             // and would collect unprefixed, unresolvable reads.
                             let full = Self::resolve_hier_name_static(hier, module);
                             if full != seg.name.name && module.functions.contains_key(&full) {
-                                Self::collect_function_reads(&full, module, reads);
+                                Self::collect_callee_reads(&full, module, reads);
                             } else {
-                                Self::collect_function_reads(&seg.name.name, module, reads);
+                                Self::collect_callee_reads(&seg.name.name, module, reads);
                             }
                         }
                     }
@@ -940,7 +983,9 @@ impl Simulator {
                                 parts.push(seg.name.name.clone());
                             }
                             parts.reverse();
-                            reads.insert(parts.join("."));
+                            let name = parts.join(".");
+                            note_whole_read(&name);
+                            reads.insert(name);
                             // A member of a PACKED struct/union has no separate
                             // leaf signal — the value lives in the parent's bit
                             // slice. Register the parent when it is an actual
@@ -1788,6 +1833,19 @@ impl Simulator {
         }
     }
 
+    /// `collect_stmt_reads`, also returning the names `stmt` reads as a whole
+    /// value (for `self_written_read`).
+    pub(super) fn collect_stmt_reads_whole(
+        stmt: &Statement,
+        module: &ElaboratedModule,
+        reads: &mut HashSet<String>,
+        writes: &mut HashSet<String>,
+    ) -> HashSet<String> {
+        let outer = WHOLE_READS.with(|c| c.replace(Some(HashSet::default())));
+        Self::collect_stmt_reads(stmt, module, reads, writes);
+        WHOLE_READS.with(|c| c.replace(outer)).unwrap_or_default()
+    }
+
     /// §9.2.2.2.1(b): is read `r` excluded from a block's implicit sensitivity
     /// because the block writes it? Exact; a written '.'-prefix (`out` written,
     /// `out.vld` read); or a bare base that is in `reads` only as the prefix of
@@ -1802,6 +1860,7 @@ impl Simulator {
         r: &str,
         reads: &HashSet<String>,
         writes: &HashSet<String>,
+        whole: &HashSet<String>,
     ) -> bool {
         fn direct(r: &str, writes: &HashSet<String>) -> bool {
             if writes.contains(r) {
@@ -1818,6 +1877,12 @@ impl Simulator {
         }
         if direct(r, writes) {
             return true;
+        }
+        // A base the block also reads as a whole (`out = s` beside
+        // `s.a = ...`) stays: every member it does not write reaches `out`
+        // through it.
+        if whole.contains(r) {
+            return false;
         }
         let prefix = format!("{r}.");
         if !writes.iter().any(|w| w.starts_with(&prefix)) {
@@ -1845,7 +1910,7 @@ impl Simulator {
         let mut writes: HashSet<String> = HashSet::default();
         // §9.2.2.2: `@*` sensitivity excludes called-function CONTENTS.
         SKIP_FN_BODY_READS.with(|c| c.set(true));
-        Self::collect_stmt_reads(body, &self.module, &mut reads, &mut writes);
+        let whole = Self::collect_stmt_reads_whole(body, &self.module, &mut reads, &mut writes);
         SKIP_FN_BODY_READS.with(|c| c.set(false));
         // Registration usually runs with the hint unset (the process body
         // just executed); the executing instance's own scope is the correct
@@ -1860,7 +1925,7 @@ impl Simulator {
             // §9.2.2.2.1: exclude reads of variables this block writes —
             // at MEMBER granularity too (same rule as the comb-entry path),
             // or the base fallback below would re-introduce the self-dep.
-            if Self::self_written_read(r, &reads, &writes) {
+            if Self::self_written_read(r, &reads, &writes, &whole) {
                 continue;
             }
             // Prefer the instance-scoped name when one exists, mirroring the
