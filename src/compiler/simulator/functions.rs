@@ -1244,6 +1244,48 @@ impl Simulator {
     /// Is `func` a call of a module/package function whose return type is
     /// a queue, dynamic or associative array typedef?
     pub(super) fn call_returns_collection(&self, func: &Expression) -> bool {
+        // §13.4: a METHOD returning a collection (`o.build().size()`,
+        // `B::make().size()`): the receiver's class, or the scope class of a
+        // static call, declares it. Only module functions were recognized,
+        // so the collection method ran on nothing and answered 0.
+        let (recv, mname): (Option<Expression>, &str) = match &func.kind {
+            ExprKind::Ident(h) if h.path.len() >= 2 => {
+                let mut r = h.clone();
+                r.path.pop();
+                r.cached_signal_id = std::cell::Cell::new(None);
+                (
+                    Some(Expression::new(ExprKind::Ident(r), func.span)),
+                    h.path[h.path.len() - 1].name.name.as_str(),
+                )
+            }
+            ExprKind::MemberAccess { expr, member } => {
+                (Some((**expr).clone()), member.name.as_str())
+            }
+            _ => (None, ""),
+        };
+        if let Some(recv) = recv {
+            let class = match &recv.kind {
+                ExprKind::Ident(rh)
+                    if rh.path.len() == 1
+                        && self.module.classes.contains_key(&rh.path[0].name.name) =>
+                {
+                    Some(rh.path[0].name.name.clone())
+                }
+                _ => self.get_expr_type_name(&recv),
+            };
+            let mut cur = class;
+            while let Some(cn) = cur {
+                let Some(cd) = self.module.classes.get(&cn) else {
+                    break;
+                };
+                if let Some(m) = cd.methods.get(mname) {
+                    return matches!(&m.kind, crate::ast::decl::ClassMethodKind::Function(f)
+                        if self.fn_ret_coll_dims(&f.return_type).is_some());
+                }
+                cur = cd.extends.clone();
+            }
+            return false;
+        }
         let ExprKind::Ident(h) = &func.kind else {
             return false;
         };

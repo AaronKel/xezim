@@ -4798,6 +4798,39 @@ impl Simulator {
                 r
             }
             ExprKind::Index { expr, index } => {
+                // §13.4/§7.4: an element of a function's or method's returned
+                // collection (`f()[k]`, `o.build()[k]`). Evaluating the call
+                // as a scalar and bit-selecting it read 0 or x.
+                if let ExprKind::Call {
+                    func: cf,
+                    args: cargs,
+                } = &expr.kind
+                    && self.call_returns_collection(cf)
+                {
+                    self.pending_ret_collection = None;
+                    let _ = self.eval_call(cf, cargs);
+                    if let Some(src) = self.take_pending_ret_collection() {
+                        let iv = self.eval_expr(index);
+                        if self.is_associative_array(&src) {
+                            let key = self.assoc_key_str(&src, &iv);
+                            return self
+                                .get_signal_value_by_name(&format!("{}[{}]", src, key))
+                                .or_else(|| self.assoc_missing_elem_value(&src))
+                                .unwrap_or_else(|| Value::new(32));
+                        }
+                        if let Some(i) = iv.to_i64().filter(|_| !iv.has_xz()) {
+                            if i >= 0 && (i as u64) < self.get_queue_size(&src) {
+                                if let Some(v) =
+                                    self.get_signal_value_by_name(&format!("{}[{}]", src, i))
+                                {
+                                    return v;
+                                }
+                            }
+                        }
+                        // §7.4.6: out of range or x/z reads the element default.
+                        return Value::new(32);
+                    }
+                }
                 // §8.25: class constant arrays precede packed-property probes.
                 // The declaration-name cache excludes ordinary indexed reads
                 // before constructing or resolving a class-scope path.
