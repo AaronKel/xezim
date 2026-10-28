@@ -3712,6 +3712,7 @@ impl Simulator {
             multi_dim_array_names,
             forced_signals: HashMap::default(),
             annex_n_seed: 0,
+            has_assoc_rows: false,
             partial_forces: HashMap::default(),
             pending_release_ids: Vec::new(),
             prop_raw_ty_cache: std::cell::RefCell::new(HashMap::default()),
@@ -4695,6 +4696,12 @@ impl Simulator {
             pending_t0_triggers: Vec::new(),
             in_pre_process_settle: false,
         };
+        sim.has_assoc_rows = !sim.module.assoc_row_dims.is_empty()
+            || sim
+                .module
+                .classes
+                .values()
+                .any(|c| !c.assoc_row_property_dims.is_empty());
         // Static event names get stable IDs before simulation; class, local
         // and selected event identities can still be interned on first use.
         // Interning alone must not make an event appear already triggered.
