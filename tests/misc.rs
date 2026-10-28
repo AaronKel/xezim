@@ -544,3 +544,5 @@ mod macro_args_next_line_578;
 mod annex_n_random;
 #[path = "misc/array_pattern_and_monitor_errors.rs"]
 mod array_pattern_and_monitor_errors;
+#[path = "misc/resetall_after_one_line_module_600.rs"]
+mod resetall_after_one_line_module_600;
