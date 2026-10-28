@@ -3329,6 +3329,10 @@ impl Simulator {
             // None and passes through unchanged.
             let type_name =
                 type_name.map(|tn| self.resolve_type_param_binding(&tn).unwrap_or(tn.clone()));
+            // §8.25: a member target (`other.h = new`) takes the binding of
+            // the object that owns the member, not the running
+            // specialization's (#596).
+            let type_name = self.member_target_class(lvalue).or(type_name);
             if let Some(tname) = type_name {
                 // §8.25: the type-parameter resolved to a SPECIALIZED
                 // class name `Base#(args)` (e.g. `T obj = new()` where
@@ -3610,18 +3614,16 @@ impl Simulator {
                     // real `new` runs. Plain class names are unchanged.
                     let type_name =
                         type_name.map(|tn| self.resolve_type_param_binding(&tn).unwrap_or(tn));
-                    // §8.25: `o.h = new()` from outside the class, `h`
-                    // declared by a type parameter: the active specialization
-                    // is not `o`'s, so the name stayed the parameter's and an
-                    // opaque object of class `T` was built. Bind it through
-                    // the object that owns the member (#576).
-                    let type_name = match type_name {
-                        Some(tn) if !self.module.classes.contains_key(&tn) => {
-                            Some(self.member_target_class(lvalue).unwrap_or(tn))
-                        }
-                        None => self.member_target_class(lvalue),
-                        other => other,
-                    };
+                    // §8.25: `o.h = new()`, `h` declared by a type parameter:
+                    // the active specialization is not `o`'s (outside the
+                    // class, or inside another specialization), so the name
+                    // stayed the parameter's or took the wrong binding. Bind
+                    // it through the object that owns the member (#576).
+                    // The owner's binding comes first even when the running
+                    // specialization names a class: inside `W #(A)`,
+                    // `other.h = new()` with `other` a `W #(B)` builds a `B`
+                    // (#596).
+                    let type_name = self.member_target_class(lvalue).or(type_name);
                     if let Some(tname) = type_name {
                         if tname == "semaphore" {
                             let handle = self.heap.len();

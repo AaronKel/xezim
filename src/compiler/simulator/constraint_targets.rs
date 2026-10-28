@@ -168,6 +168,24 @@ impl Simulator {
     /// not a random *value* — the object it points at is randomized, and the
     /// enclosing object's constraints may refer to its members.
     pub(super) fn prop_class_type(&self, handle: usize, prop: &str) -> Option<String> {
+        self.prop_class_binding(handle, prop)
+            .filter(|t| self.module.classes.contains_key(t))
+    }
+
+    /// `prop_class_type`, also answering a binding that names a specialized
+    /// class (`P#(7)`), which is no key of the class table.
+    pub(super) fn prop_class_or_spec_type(&self, handle: usize, prop: &str) -> Option<String> {
+        self.prop_class_binding(handle, prop).filter(|t| {
+            self.module.classes.contains_key(t)
+                || self
+                    .extract_spec_from_string(t)
+                    .is_some_and(|(b, _)| self.module.classes.contains_key(&b))
+        })
+    }
+
+    /// The declared type of the class property `prop` of object `handle`,
+    /// with a type parameter bound through the object (§8.25).
+    fn prop_class_binding(&self, handle: usize, prop: &str) -> Option<String> {
         let mut cur = self
             .heap
             .get(handle)
@@ -194,15 +212,25 @@ impl Simulator {
                     // outrank the instance's own chain. `ancestor_type_param_`
                     // binding walks `owner.class_name` up to the declaring class
                     // and is authoritative for a live instance.
+                    // The owner's own specialization (`W #(B) wb`) comes
+                    // before the ambient one: inside a method of `W #(A)`,
+                    // `other.h` of a `W #(B)` is a `B` (#596).
+                    let own_spec = owner.and_then(|i| i.spec.clone()).filter(|(b, _)| *b == cn);
                     let resolved = inst_binding
                         .clone()
                         .or_else(|| self.ancestor_type_param_binding(handle, &cn, raw))
+                        .or_else(|| {
+                            own_spec
+                                .is_some()
+                                .then(|| self.resolve_type_param_with(raw, &own_spec))
+                                .flatten()
+                        })
                         .or_else(|| self.resolve_type_param_binding(raw));
                     if let Some(r) = resolved {
                         tn = Some(r);
                     }
                 }
-                return tn.filter(|t| self.module.classes.contains_key(t));
+                return tn;
             }
             cur = cd.extends.clone();
         }
@@ -257,7 +285,7 @@ impl Simulator {
             }
             cur = cd.extends.clone();
         }
-        self.prop_class_type(owner, prop)
+        self.prop_class_or_spec_type(owner, prop)
     }
 
     /// Class-chain member-type lookup without a live instance handle (used
