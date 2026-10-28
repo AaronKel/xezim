@@ -478,6 +478,12 @@ impl Simulator {
     /// stays small: this arm's locals inflated every call's frame (the
     /// dispatcher recursed with a 7.8 KB frame per level).
     #[inline(never)]
+    /// A statement-coverage marker inserted by `--code-coverage`.
+    fn is_cov_marker(s: &Statement) -> bool {
+        matches!(&s.kind, StatementKind::Expr(e)
+            if matches!(&e.kind, ExprKind::SystemCall { name, .. } if name == super::COV_HIT_TASK))
+    }
+
     pub(super) fn exec_stmt_foreach(
         &mut self,
         stmt: &Statement,
@@ -4875,12 +4881,17 @@ impl Simulator {
                 self.record_ast_loop_heat(i);
             }
             StatementKind::SeqBlock { stmts, name } => {
-                // §9.3.1: a labelled procedural assertion is this block.
-                if let Some(n) = name
-                    && stmts.len() == 1
-                    && matches!(stmts[0].kind, StatementKind::Assertion(_))
-                {
-                    self.assert_wrap_label = Some(n.name.clone());
+                // §9.3.1: a labelled procedural assertion is this block. A
+                // `--code-coverage` statement marker beside it is not a
+                // statement of the design: counted, it dropped the label of
+                // every instrumented one (an `initial` block's, #586).
+                if let Some(n) = name {
+                    let mut real = stmts.iter().filter(|s| !Self::is_cov_marker(s));
+                    if matches!(real.next(), Some(s) if matches!(s.kind, StatementKind::Assertion(_)))
+                        && real.next().is_none()
+                    {
+                        self.assert_wrap_label = Some(n.name.clone());
+                    }
                 }
                 // §6.21: a block-local declaration SHADOWS a same-named module
                 // signal — without a frame the frameless VarDecl exec lands on
