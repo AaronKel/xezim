@@ -547,6 +547,115 @@ impl Simulator {
         Some(name)
     }
 
+    /// §12.7.3: a loop variable runs from its dimension's LEFT bound to its
+    /// RIGHT bound. The per-dimension "declared descending" flags of the
+    /// fixed array `name` (`int d [1:2][3:1]` gives `[false, true]`); the
+    /// shape tables normalize every range to (lo, hi).
+    pub(super) fn foreach_unpacked_descs(&self, name: &str, ndims: usize) -> Vec<bool> {
+        let mut descs: Vec<bool> = self
+            .module
+            .unpacked_decl_dims
+            .get(name)
+            .map(|d| d.iter().map(|&(l, r)| l > r).collect())
+            .unwrap_or_default();
+        descs.resize(ndims, false);
+        descs
+    }
+
+    /// The iteration shape of `foreach (a[i]...[k][vars])` over a FIXED
+    /// unpacked array `a`: the dimensions after the `k` selected ones, then
+    /// the element's packed dimensions. None for any other collection, a
+    /// range select, or a row that is itself a queue, dynamic or associative
+    /// array (those have their own stores; see `foreach_selected_collection`).
+    fn foreach_fixed_subarray_dims(
+        &self,
+        array: &Expression,
+        nvars: usize,
+    ) -> Option<(Vec<(i64, i64)>, Vec<bool>)> {
+        let is_range =
+            |e: &Expression| matches!(e.kind, ExprKind::Range(..) | ExprKind::RangeSelect { .. });
+        let mut base = array;
+        let mut k = 0usize;
+        while let ExprKind::Index { expr, index } = &base.kind {
+            if is_range(index) {
+                return None;
+            }
+            k += 1;
+            base = expr;
+        }
+        let ExprKind::Ident(h) = &base.kind else {
+            return None;
+        };
+        if h.path.len() != 1 || h.path[0].selects.iter().any(is_range) {
+            return None;
+        }
+        k += h.path[0].selects.len();
+        if k == 0 || nvars == 0 {
+            return None;
+        }
+        let mut name = h.path[0].name.name.clone();
+        if let Some(local) = self.dyn_name_lookup(&name) {
+            name = local.to_string();
+        }
+        if self.foreach_dims(&name).is_none()
+            && let Some(scoped) = self.hint_scoped(&name)
+        {
+            name = scoped;
+        }
+        if self.module.dynamic_arrays.contains(&name) || self.is_associative_array(&name) {
+            return None;
+        }
+        let dims = self.foreach_dims(&name)?;
+        if dims.len() < k {
+            return None;
+        }
+        // A row (or element) that is itself a collection.
+        let mut first = name.clone();
+        for &(lo, _) in &dims {
+            first.push_str(&format!("[{lo}]"));
+        }
+        if self.module.dynamic_arrays.contains(&first)
+            || self.module.associative_arrays.contains_key(&first)
+            || self.signals.contains_key(&format!("{first}.size"))
+        {
+            return None;
+        }
+        let mut rest: Vec<(i64, i64)> = dims[k..].to_vec();
+        let mut descs = self.foreach_unpacked_descs(&name, dims.len())[k..].to_vec();
+        if rest.len() < nvars {
+            if let Some(pdims) = self.module.packed_full_dims.get(&name) {
+                for &(l, r) in pdims {
+                    if rest.len() >= nvars {
+                        break;
+                    }
+                    rest.push((l.min(r), l.max(r)));
+                    descs.push(l > r);
+                }
+            } else if rest.len() + 1 == nvars {
+                // A lone packed dimension the packed tables do not record
+                // (`logic [3:0] b [2]`): the element width, `[w-1:0]` unless
+                // declared ascending.
+                let ew = self
+                    .module
+                    .arrays
+                    .get(&name)
+                    .map(|&(_, _, w)| w)
+                    .or_else(|| self.module.arrays_2d.get(&name).map(|&(_, _, w)| w))
+                    .or_else(|| self.module.arrays_nd.get(&name).map(|(_, w)| *w));
+                if let Some(w) = ew.filter(|&w| w > 1) {
+                    rest.push((0, w as i64 - 1));
+                    descs.push(!self.module.ascending_packed.contains_key(&name));
+                }
+            }
+        }
+        if rest.len() < nvars {
+            return None;
+        }
+        rest.truncate(nvars);
+        descs.truncate(nvars);
+        Some((rest, descs))
+    }
+
     pub(super) fn exec_stmt_foreach_inner(
         &mut self,
         _stmt: &Statement,
@@ -890,6 +999,19 @@ impl Simulator {
             }
             return;
         }
+        // §12.7.3: `foreach (a[i][j])` inside `foreach (a[i])` iterates the
+        // SELECTED sub-array: its loop variables map onto the dimensions after
+        // the selected ones. The selects were dropped, so `j` walked the first
+        // dimension again (2 of 3 columns of `int a[2][3]`).
+        if let Some((dims, descs)) = self.foreach_fixed_subarray_dims(array, vars.len()) {
+            self.exec_foreach_nested_dir(&dims, vars, body, None, Some(&descs), iterations);
+            self.auto_loop_vars.truncate(fe_auto_len);
+            self.restore_loop_vars(&fe_saved);
+            if !self.return_flag && self.disable_target.is_none() {
+                self.break_flag = false;
+            }
+            return;
+        }
         // `foreach (obj.assoc_member[k])` — iterate that object's
         // instance-scoped associative array (base may be a 2-seg
         // Ident `b.edges` or a MemberAccess).
@@ -980,7 +1102,15 @@ impl Simulator {
                 if vars.len() == 1 {
                     if let Some(dims) = self.foreach_dims(&an) {
                         if dims.len() >= 2 {
-                            self.exec_foreach_nested(&dims[..1], vars, body, None, iterations);
+                            let descs = self.foreach_unpacked_descs(&an, 1);
+                            self.exec_foreach_nested_dir(
+                                &dims[..1],
+                                vars,
+                                body,
+                                None,
+                                Some(&descs),
+                                iterations,
+                            );
                             self.auto_loop_vars.truncate(fe_auto_len);
                             self.restore_loop_vars(&fe_saved);
                             if !self.return_flag && self.disable_target.is_none() {
@@ -1425,7 +1555,15 @@ impl Simulator {
             {
                 if let Some(dims) = self.foreach_dims(&name) {
                     if dims.len() >= 2 {
-                        self.exec_foreach_nested(&dims[..1], vars, body, None, iterations);
+                        let descs = self.foreach_unpacked_descs(&name, 1);
+                        self.exec_foreach_nested_dir(
+                            &dims[..1],
+                            vars,
+                            body,
+                            None,
+                            Some(&descs),
+                            iterations,
+                        );
                         self.auto_loop_vars.truncate(fe_auto_len);
                         self.restore_loop_vars(&fe_saved);
                         if !self.return_flag && self.disable_target.is_none() {
@@ -1479,7 +1617,11 @@ impl Simulator {
                     // ascending for the odometer). Fall back to the
                     // flat width only for a lone packed dim we did not
                     // record (e.g. a bare `reg [W-1:0]` element).
-                    let mut descs: Vec<bool> = vec![false; dims.len()];
+                    let mut descs: Vec<bool> = if purely_packed {
+                        Vec::new()
+                    } else {
+                        self.foreach_unpacked_descs(&name, dims.len())
+                    };
                     if dims.len() < vars.len() {
                         if let Some(pdims) = prop_packed_dims
                             .as_ref()
