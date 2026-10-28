@@ -204,3 +204,5 @@ mod review_package_collection_aliases;
 
 #[path = "collections/foreach_omitted_var_before_collection.rs"]
 mod foreach_omitted_var_before_collection;
+#[path = "collections/assoc_select_write_and_return.rs"]
+mod assoc_select_write_and_return;
