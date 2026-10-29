@@ -10,6 +10,14 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A packed-struct assignment pattern written into a class property (`obj.p`,
+  `this.p`, `super.p`, a bare `p` in a method, a property a derived class
+  redeclares) or into a whole element of an instance's fixed array lays its
+  members out at their declared offsets; the upper members were scrambled
+  (§10.9.2, #587). Rand elements wider than 64 bits are drawn at full width,
+  so the upper bits (a wide struct's leading `vld`) vary, and `sum()`
+  targets and shares over wide elements keep every bit (§18.4, §7.12.3,
+  #588). (PR #631, contributed by Ganesh-TNL)
 * Class events, virtual interfaces, clocking blocks and class statics
   (#632-#648, PR #649 and xezim-core #107, contributed by AaronKel): a bare
   `@vif.cb` or `@h.ev` waits on the member (§9.4.2); a class event waits
