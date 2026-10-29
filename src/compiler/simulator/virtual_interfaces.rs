@@ -363,6 +363,54 @@ impl Simulator {
         self.nested_iface_instance(e).map(Some)
     }
 
+    /// `vif_operand`, then a receiver with an element select
+    /// (`cfg.kids[0].vif`, `arr[i].vif`), which the `&self` chain walk cannot
+    /// index: those classified as nothing, so a bound vif compared equal to
+    /// null by value (§25.9). Evaluate the receiver to its object handle and
+    /// classify the property there. A receiver with a call is left alone so
+    /// it is not evaluated twice.
+    pub(super) fn vif_operand_eval(&mut self, e: &Expression) -> Option<Option<String>> {
+        if let Some(c) = self.vif_operand(e) {
+            return Some(c);
+        }
+        fn has_select(e: &Expression) -> bool {
+            match &e.kind {
+                ExprKind::Index { .. } => true,
+                ExprKind::Ident(h) => h.path.iter().any(|s| !s.selects.is_empty()),
+                ExprKind::MemberAccess { expr, .. } => has_select(expr),
+                _ => false,
+            }
+        }
+        let prop = match &e.kind {
+            ExprKind::MemberAccess { member, .. } => member.name.as_str(),
+            ExprKind::Ident(h) if h.path.len() >= 2 && h.path.last()?.selects.is_empty() => {
+                h.path.last()?.name.name.as_str()
+            }
+            _ => return None,
+        };
+        if !self.class_member_names().vif_props.contains(prop) {
+            return None;
+        }
+        let prop = prop.to_string();
+        let recv = match &e.kind {
+            ExprKind::MemberAccess { expr, .. } => (**expr).clone(),
+            ExprKind::Ident(h) => {
+                let mut bh = h.clone();
+                bh.path.pop();
+                Expression::new(ExprKind::Ident(bh), e.span)
+            }
+            _ => return None,
+        };
+        if !has_select(&recv) || Self::expr_contains_call(&recv) {
+            return None;
+        }
+        let oh = self.eval_expr(&recv).to_u64()? as usize;
+        if oh == 0 {
+            return None;
+        }
+        self.vif_operand_handle_prop(oh, &prop)
+    }
+
     /// `obj.prop` classification for `vif_operand` — engages only when the
     /// receiver's class DECLARES `prop` as a virtual interface.
     pub(super) fn vif_operand_obj_prop(&self, obj: &str, prop: &str) -> Option<Option<String>> {
