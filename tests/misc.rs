@@ -576,3 +576,5 @@ mod parser_gaps_651_658;
 mod macro_empty_actual;
 #[path = "misc/package_ref_signature.rs"]
 mod package_ref_signature;
+#[path = "misc/always_star_spacing.rs"]
+mod always_star_spacing;
