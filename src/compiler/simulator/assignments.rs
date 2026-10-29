@@ -1157,6 +1157,15 @@ impl Simulator {
         lvalue: &Expression,
         items: &[AssignmentPatternItem],
     ) -> Option<(usize, String, Vec<(String, u32, u32)>)> {
+        // §8.14/§8.15: `super.p`, and `h.p` / `this.p` naming a property a
+        // derived class redeclares, select a base class's cell; take the
+        // spelling `assign_value` writes, never the leaf's `p`.
+        if let Some(rw) = self
+            .super_rewrite(lvalue)
+            .or_else(|| self.shadowed_member_rewrite(lvalue))
+        {
+            return self.class_prop_pattern_target(&rw, items);
+        }
         // Keyed/Typed items denote associative or type-keyed aggregates, not
         // a by-member struct pack — leave those to the existing paths.
         if items.iter().any(|it| {
