@@ -564,3 +564,5 @@ mod cover_bin_with_611;
 mod restrict_property_614;
 #[path = "misc/sva_local_array_618.rs"]
 mod sva_local_array_618;
+#[path = "misc/macro_usage_before_paste_616.rs"]
+mod macro_usage_before_paste_616;
