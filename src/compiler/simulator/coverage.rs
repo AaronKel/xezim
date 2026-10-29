@@ -1977,17 +1977,25 @@ impl Simulator {
                         }
                         // §19.6: a crossed VARIABLE with no coverpoint of its
                         // own gets an implicit coverpoint over it. It used to
-                        // be recorded as a constant 0.
+                        // be recorded as a constant 0. A dotted item is a
+                        // hierarchical reference (XEZIM_RELAX_CROSS_HIER_ITEM).
                         let val = match val {
                             Some(v) => v,
                             None => {
                                 let e = Expression::new(
                                     ExprKind::Ident(crate::ast::expr::HierarchicalIdentifier {
                                         root: None,
-                                        path: vec![crate::ast::expr::HierPathSegment {
-                                            name: id.clone(),
-                                            selects: Vec::new(),
-                                        }],
+                                        path: id
+                                            .name
+                                            .split('.')
+                                            .map(|n| crate::ast::expr::HierPathSegment {
+                                                name: crate::ast::Identifier {
+                                                    name: n.to_string(),
+                                                    span: id.span,
+                                                },
+                                                selects: Vec::new(),
+                                            })
+                                            .collect(),
                                         span: id.span,
                                         cached_signal_id: std::cell::Cell::new(None),
                                         cached_resolved_name: std::cell::OnceCell::new(),
