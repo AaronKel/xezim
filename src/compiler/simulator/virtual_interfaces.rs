@@ -363,6 +363,50 @@ impl Simulator {
         self.nested_iface_instance(e).map(Some)
     }
 
+    /// §23.8: inside a subroutine of an interface or module instance,
+    /// `parent_if.children[0]` names by its DEFINITION name the instance the
+    /// subroutine runs in. Spell it the way the instance's own `children[0]`
+    /// reaches the resolver (`parent.children`, under the same select); read as
+    /// written it named no interface instance and bound nothing.
+    pub(super) fn strip_own_definition_name(&self, e: &Expression) -> Option<Expression> {
+        let (h, index) = match &e.kind {
+            ExprKind::Ident(h) => (h, None),
+            ExprKind::Index { expr, index } => match &expr.kind {
+                ExprKind::Ident(h) => (h, Some(index)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if h.root.is_some() || h.path.len() < 2 || !h.path[0].selects.is_empty() {
+            return None;
+        }
+        let scope = self.name_resolve_hint.borrow().clone()?;
+        let head = h.path[0].name.name.as_str();
+        if self.is_interface_instance(head)
+            || !self
+                .instance_by_path(&scope)
+                .is_some_and(|i| i.def_name == head)
+        {
+            return None;
+        }
+        let mut local = h.clone();
+        local.path.remove(0);
+        local.path[0].name.name = format!("{}.{}", scope, local.path[0].name.name);
+        local.cached_signal_id = std::cell::Cell::new(None);
+        local.cached_resolved_name = std::cell::OnceCell::new();
+        let local = Expression::new(ExprKind::Ident(local), e.span);
+        Some(match index {
+            Some(index) => Expression::new(
+                ExprKind::Index {
+                    expr: Box::new(local),
+                    index: index.clone(),
+                },
+                e.span,
+            ),
+            None => local,
+        })
+    }
+
     /// `vif_operand`, then a receiver with an element select
     /// (`cfg.kids[0].vif`, `arr[i].vif`), which the `&self` chain walk cannot
     /// index: those classified as nothing, so a bound vif compared equal to
@@ -1566,6 +1610,9 @@ impl Simulator {
             && let Some(stripped) = self.strip_package_lvalue(rvalue)
         {
             return self.resolve_vif_rhs_name(&stripped);
+        }
+        if let Some(local) = self.strip_own_definition_name(rvalue) {
+            return self.resolve_vif_rhs_name(&local);
         }
         if let Some(b) = self.static_vif_binding(rvalue) {
             return Some(b);
@@ -3255,6 +3302,9 @@ impl Simulator {
             && let Some(stripped) = self.strip_package_lvalue(e)
         {
             return self.vif_rhs_possible(&stripped);
+        }
+        if let Some(local) = self.strip_own_definition_name(e) {
+            return self.vif_rhs_possible(&local);
         }
         if !self.static_vif_names.is_empty() {
             let leaf = match &e.kind {
