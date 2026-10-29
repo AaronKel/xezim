@@ -912,3 +912,5 @@ mod virtual_named_class_param;
 mod vif_type_param_module_var;
 #[path = "classes/queue_last_member.rs"]
 mod queue_last_member;
+#[path = "classes/package_constructor_scope.rs"]
+mod package_constructor_scope;
