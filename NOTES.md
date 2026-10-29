@@ -10,6 +10,23 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* Class events, virtual interfaces, clocking blocks and class statics
+  (#632-#648, PR #649 and xezim-core #107, contributed by AaronKel): a bare
+  `@vif.cb` or `@h.ev` waits on the member (§9.4.2); a class event waits
+  inside a `forever` loop, `ev.triggered` reads `this`'s event, and
+  event-array elements and local events have their own identity (§15.5);
+  a vif compares by binding through `this`, an indexed receiver, or the
+  instance's own definition name, and binds when inherited through a
+  base class's type parameter or given as a module-scope specialization's
+  type argument (§25.9, §8.25, §23.8); a continuous assign may name its
+  own instance by its definition name (§23.8); unpacked-array clockvars
+  are sampled per element and a selected clockvar can be driven (§14.3,
+  §14.16); a class static's initializer runs once; a string local no
+  longer retypes a same-named formal.
+* A macro usage built by a paste right before its argument list keeps its
+  arguments (`` `uvm_pack_``TYPE``(ARG, p) ``), which the paste change of this
+  release had broken for every `` `uvm_field_array_* `` macro (§22.5.1,
+  xezim-core #102 and #103, contributed by urbanij).
 * A struct formal's packed geometry comes from the active call's
   declaration, so two suspended tasks with a same-named formal of different
   struct types no longer read each other's layout (§13.5, PR #630). A
