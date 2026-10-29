@@ -870,3 +870,5 @@ mod member_new_owner_spec_596;
 mod super_call_formal_widths_593;
 #[path = "classes/randomize_foreach_empty_dyn_599.rs"]
 mod randomize_foreach_empty_dyn_599;
+#[path = "classes/nested_class_out_of_block_617.rs"]
+mod nested_class_out_of_block_617;
