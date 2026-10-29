@@ -562,3 +562,5 @@ mod sva_delay_count_609;
 mod cover_bin_with_611;
 #[path = "misc/restrict_property_614.rs"]
 mod restrict_property_614;
+#[path = "misc/sva_local_array_618.rs"]
+mod sva_local_array_618;
