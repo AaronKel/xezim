@@ -723,6 +723,8 @@ mod uvm_tlm_coverage;
 mod vif_member_read_nested_receiver;
 #[path = "classes/vif_null_compare_this_receiver.rs"]
 mod vif_null_compare_this_receiver;
+#[path = "classes/vif_clocking_bare_event.rs"]
+mod vif_clocking_bare_event;
 #[path = "classes/vif_null_compare_indexed_receiver.rs"]
 mod vif_null_compare_indexed_receiver;
 #[path = "classes/vif_return_own_definition_name.rs"]
