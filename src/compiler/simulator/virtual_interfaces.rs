@@ -1728,19 +1728,30 @@ impl Simulator {
     /// Whether a multi-segment name's last segment, and the one before it,
     /// can end the path of an interface instance (`nested_iface_instance`).
     fn nested_iface_gate(&self, e: &Expression) -> (bool, bool) {
-        let mut names: Vec<&str> = Vec::with_capacity(2);
+        let (tails, heads) = self.iface_path_parts();
+        if tails.is_empty() {
+            return (false, false);
+        }
+        // The last two names, without allocating: this runs for every
+        // virtual-interface-capable operand and right-hand side.
+        let mut names: [&str; 2] = [""; 2];
+        let mut n = 0;
         let mut cur = e;
         let mut multi = false;
-        while names.len() < 2 {
+        while n < 2 {
             match &cur.kind {
                 ExprKind::Ident(h) => {
                     multi |= h.path.len() > 1;
-                    names.extend(h.path.iter().rev().take(2).map(|s| s.name.name.as_str()));
+                    for s in h.path.iter().rev().take(2 - n) {
+                        names[n] = s.name.name.as_str();
+                        n += 1;
+                    }
                     break;
                 }
                 ExprKind::MemberAccess { expr, member } => {
                     multi = true;
-                    names.push(member.name.as_str());
+                    names[n] = member.name.as_str();
+                    n += 1;
                     cur = expr;
                 }
                 ExprKind::Index { expr, .. } => cur = expr,
@@ -1750,12 +1761,18 @@ impl Simulator {
         if !multi {
             return (false, false);
         }
-        let (tails, heads) = self.iface_path_parts();
-        let ends = |n: &&str| tails.contains(*n) || heads.contains(*n);
-        (
-            names.first().is_some_and(ends),
-            names.get(1).is_some_and(ends),
-        )
+        let ends = |s: &str| tails.contains(s) || heads.contains(s);
+        let last_is = n > 0 && ends(names[0]);
+        // A modport view (`o.leaf.mp`) only when the last name is a modport,
+        // so `intf.sig` costs no instance search.
+        let view_is = n > 1
+            && ends(names[1])
+            && self
+                .module
+                .modport_member_dirs
+                .keys()
+                .any(|(_, mp)| mp == names[0]);
+        (last_is, view_is)
     }
 
     fn iface_instance_by_segments(&self, mut segs: Vec<String>) -> Option<String> {
