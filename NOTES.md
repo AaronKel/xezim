@@ -10,6 +10,21 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A bit-select of a subroutine formal or local declared with a range that
+  does not start at zero (`input logic [12:1] a; a[i]`) reads the bit its
+  label names: a compiled hot function read bit `i` of the storage, and a
+  normalized select read a same-named design variable (an `initial`
+  block's static `a`) instead of the formal (§11.5.1, §7.4.1, #650,
+  reported by hevangel).
+* Parser gaps (reported by amal-khailtash): a cross bin given as a list of
+  value tuples, `'{'{1,2}, '{3,4}}` (§19.6.1.4, #651); `$changed(x, @clk)`
+  (§16.9.3, #652); property and sequence declarations at compilation-unit
+  scope (§3.12.1, #653); a class's out-of-block constraint inside its
+  package (§18.5.1, #654); an unnamed formal in a DPI import or `extern`
+  prototype (A.2.7, #655); a macro whose formal list spans lines with
+  `` `ifdef `` in its body (§22.5.1, #656); `input a[4];` as a non-ANSI port
+  (§7.4.2, #657); an empty `;` package item before `endpackage` (A.1.11,
+  #658).
 * A packed-struct assignment pattern written into a class property (`obj.p`,
   `this.p`, `super.p`, a bare `p` in a method, a property a derived class
   redeclares) or into a whole element of an instance's fixed array lays its
