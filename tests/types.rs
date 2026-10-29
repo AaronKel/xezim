@@ -593,3 +593,5 @@ mod review_nested_pattern_default;
 mod package_net_602;
 #[path = "types/package_net_kinds_610.rs"]
 mod package_net_kinds_610;
+#[path = "types/unit_wildcard_import_order_620.rs"]
+mod unit_wildcard_import_order_620;
