@@ -597,3 +597,6 @@ mod package_net_kinds_610;
 mod unit_wildcard_import_order_620;
 #[path = "types/nonzero_formal_bitselect_650.rs"]
 mod nonzero_formal_bitselect_650;
+
+#[path = "types/array_parameter_imported_dimension.rs"]
+mod array_parameter_imported_dimension;
