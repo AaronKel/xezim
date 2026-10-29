@@ -225,3 +225,5 @@ mod conditional_aggregate_659;
 mod assoc_key_enumeration_cache;
 #[path = "collections/hierarchical_whole_array_assign.rs"]
 mod hierarchical_whole_array_assign;
+#[path = "collections/inside_associative_values.rs"]
+mod inside_associative_values;
