@@ -609,8 +609,10 @@ impl Simulator {
             let Some(frag) = frags.get(idx) else {
                 continue;
             };
-            if let Some(rest) = frag.strip_prefix("virtual").filter(|r| !r.is_empty()) {
-                out.push((prop.clone(), (rest.to_string(), None)));
+            // A class whose name merely starts with "virtual" (`virtual_cfg`)
+            // is not one; only a real interface counts.
+            if let Some(vif) = self.vif_of_spec_frag(frag) {
+                out.push((prop.clone(), vif));
             }
         }
         // An inherited property typed by a base's parameter that this
