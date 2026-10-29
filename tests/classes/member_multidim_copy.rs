@@ -1,8 +1,7 @@
 //! IEEE 1800-2017 §7.6, §10.9.1: a fixed multi-dimensional class member is
 //! assigned whole (`c.m = a`, `m = x` in a method, `back = c.m`, `d.m =
 //! c.m`), by assignment pattern, and by row (`c.m[1] = '{..}`). Every one of
-//! those writes was dropped, so the member stayed 0. Expected lines are
-//! Questa's.
+//! those writes was dropped, so the member stayed 0.
 use xezim::simulate;
 
 /// The `$display` lines of `src` that start with one of `prefixes`.

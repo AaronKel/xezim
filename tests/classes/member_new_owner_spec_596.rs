@@ -3,7 +3,7 @@
 //! `T`, not the one of the specialization running the method (#596,
 //! reported by akashlevy). Also an element `other.arr[0] = new()`, a
 //! derived class of a specialization, and `T` bound to a parameterized
-//! class. Expected lines are Questa's.
+//! class.
 use xezim::simulate;
 
 fn shown(src: &str, prefixes: &[&str]) -> Vec<String> {

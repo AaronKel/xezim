@@ -1,8 +1,7 @@
 //! IEEE 1800-2017 §22.5.1, §5.2: a macro's formal argument list may span
 //! lines; white space includes newlines and no backslash is needed inside
 //! the list. The definition's header ended at its first line, so the rest of
-//! the list was read as code (#606, reported by amal-khailtash). Expected
-//! values are Questa's.
+//! the list was read as code (#606, reported by amal-khailtash).
 use xezim::simulate;
 
 fn shown(src: &str, prefixes: &[&str]) -> Vec<String> {

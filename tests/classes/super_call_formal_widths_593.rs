@@ -2,7 +2,7 @@
 //! each argument at the PARENT's formal width, as the call goes to the
 //! parent's `m`; it took the widths of the derived `m` that hides it, so
 //! `(a + b) >> 1` on 8-bit operands gave 150 (#593, reported by akashlevy,
-//! with the patch applied here). Expected value is Questa's.
+//! with the patch applied here).
 use xezim::simulate;
 
 #[test]

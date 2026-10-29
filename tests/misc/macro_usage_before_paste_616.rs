@@ -3,8 +3,7 @@
 //! `` `define JOIN(A, B) A``B `` is `unit_alpha_n`, not a use of a macro
 //! `TAG_n` (#616, reported by git-hevangel); also one level down
 //! (`` `JOIN(`OUTER, _n) ``). A name the paste itself forms (`` `ID_``n ``,
-//! `ID_` no macro) is still pasted whole. Questa agrees except that it
-//! rejects that last form.
+//! `ID_` no macro) is still pasted whole.
 use xezim::simulate;
 
 fn shown(src: &str, f: impl Fn(&str) -> bool) -> Vec<String> {
@@ -89,7 +88,7 @@ endmodule
     );
 }
 
-/// A pasted name that is itself a macro is that macro (Questa: 99 42).
+/// A pasted name that is itself a macro is that macro (99 42).
 #[test]
 fn pasted_name_that_is_a_macro() {
     assert_eq!(

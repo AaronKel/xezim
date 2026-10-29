@@ -1,6 +1,6 @@
 //! IEEE 1800-2017 §20.15.1, §20.15.2, Annex N: `$random` and the `$dist_*`
 //! functions run the standard's generators, so a seed gives the sequence
-//! every conforming simulator gives (the values below are Questa's; iverilog
+//! every conforming simulator gives (iverilog
 //! agrees on `$random`). xezim used a generator of its own.
 use xezim::simulate;
 

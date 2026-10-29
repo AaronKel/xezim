@@ -1,6 +1,6 @@
 //! IEEE 1800-2017 §14.3: reading an OUTPUT clockvar (`$display(mif.cb.addr)`
-//! after `mif.cb.addr <= a`) is not allowed by the standard, but Questa and
-//! Verilator answer with the driven net's value. xezim read x, so a
+//! after `mif.cb.addr <= a`) is not allowed by the standard, but
+//! Verilator answers with the driven net's value. xezim read x, so a
 //! testbench printing the address it had just written showed `Addr x`.
 use xezim::simulate;
 

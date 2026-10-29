@@ -2511,8 +2511,8 @@ impl Simulator {
         // 4-state net), not the live net value.
         let (_, sigs) = self.clocking_meta.get(&cb)?;
         let Some((net, _)) = sigs.iter().find(|(n, is_in)| *is_in && matches_sig(n)) else {
-            // §14.3 makes reading an OUTPUT clockvar illegal; Questa and
-            // Verilator both answer with the driven net's current value
+            // §14.3 makes reading an OUTPUT clockvar illegal;
+            // Verilator answers with the driven net's current value
             // (`$display(mif.cb.addr)` after `mif.cb.addr <= a`), so do the
             // same instead of reading x.
             let (net, _) = sigs.iter().find(|(n, _)| matches_sig(n))?;

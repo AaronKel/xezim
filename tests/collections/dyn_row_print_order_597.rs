@@ -1,11 +1,11 @@
 //! IEEE 1800-2017 §21.2.1.7, §10.9.1: `%p` prints a fixed row of a dynamic
 //! array or queue from its declared left bound, as it prints a fixed array:
 //! `int a[][1:0]` printed `'{'{10, 20}}` where `int f[1:0]` prints
-//! `'{20, 10}` (#597, reported by akashlevy; Questa prints both from the left
+//! `'{20, 10}` (#597, reported by akashlevy; both now print from the left
 //! bound). Also: a class member shadows a same-named module array in its
 //! methods (§8.10), so `a[0][1] = 20` there wrote the module's array; and
 //! `push_back('{1, 2, 3})` fills a `[3:1]` row from its left bound.
-//! Expected lines are Questa's.
+//!
 use xezim::simulate;
 
 fn shown(src: &str, prefixes: &[&str]) -> Vec<String> {

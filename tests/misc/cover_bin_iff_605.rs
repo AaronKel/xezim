@@ -1,7 +1,7 @@
 //! IEEE 1800-2017 §19.5: a coverpoint bin's own `iff (expr)` guard keeps
 //! the bin from counting while false. It was not parsed: an `inside` in it
 //! was a parse error (#605, reported by amal-khailtash), and any other guard
-//! was skipped, so the bin counted regardless. Expected values are Questa's.
+//! was skipped, so the bin counted regardless.
 use xezim::simulate;
 
 #[test]

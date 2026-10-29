@@ -2,7 +2,7 @@
 //! iterates the selected sub-array (its loop variables map onto the
 //! dimensions after the selected ones), and every loop variable runs from
 //! its dimension's left bound to its right bound (`[3:1]` visits 3, 2, 1).
-//! Expected lines are Questa's.
+//!
 use xezim::simulate;
 
 /// The `$display` lines of `src` that start with one of `prefixes`.

@@ -3,7 +3,7 @@
 //! creates the row as its declared kind, `%p` prints each row as a nested
 //! list, `foreach (aq[k][j])` walks the row, and a string-valued row takes
 //! `m[k]["x"] = "hi"` as an element write (it was a character write and was
-//! dropped). Expected values are Questa's, with the house `%p` spacing (no
+//! dropped). Expected values use the house `%p` spacing (no
 //! space before an associative array's `}`).
 use xezim::simulate;
 

@@ -2,7 +2,7 @@
 //! an undriven one reads z, a supply net its constant, a wired net resolves
 //! its drivers (a `wand` driven by `assign pkg::w` and by a port connected to
 //! `pkg::w`), and a force overrides it (#610, reported by git-hevangel; it
-//! extends #602). Expected values are Questa's.
+//! extends #602).
 use xezim::simulate;
 
 fn shown(src: &str, f: impl Fn(&str) -> bool) -> Vec<String> {

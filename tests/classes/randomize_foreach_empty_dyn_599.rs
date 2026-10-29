@@ -2,8 +2,7 @@
 //! dynamic dimension adds no constraint. The solver walked the empty
 //! dimension `(0, -1)` as the descending range -1..0, so an item on the
 //! indices failed, and a size constraint did not reach the loop (#599,
-//! reported by akashlevy, with the patch applied here). Expected values are
-//! Questa's.
+//! reported by akashlevy, with the patch applied here).
 use xezim::simulate;
 
 #[test]

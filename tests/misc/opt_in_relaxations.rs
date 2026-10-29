@@ -208,7 +208,7 @@ module t;
 endmodule
 "#;
 
-/// §3.13: a repeated declaration is ignored, the first kept (#622; Questa agrees with -suppress 2388).
+/// §3.13: a repeated declaration is ignored, the first kept (#622).
 #[test]
 fn duplicate_decls_622() {
     check(DUPLICATE_DECLS_622, &["--relax-duplicate-decls"]);
@@ -447,7 +447,7 @@ module t;
 endmodule
 "#;
 
-/// §9.4.2: `@this.ev` reads as `@(this.ev)` (#625; Questa accepts it too).
+/// §9.4.2: `@this.ev` reads as `@(this.ev)` (#625).
 #[test]
 fn event_this_625() {
     check(EVENT_THIS_625, &["--relax-event-this"]);
@@ -601,7 +601,7 @@ module t;
 endmodule
 "#;
 
-/// §22.5.1: `` ` NAME `` reads as `` `NAME `` (#627; Questa accepts it too).
+/// §22.5.1: `` ` NAME `` reads as `` `NAME `` (#627).
 #[test]
 fn macro_space_627() {
     check(MACRO_SPACE_627, &["--relax-macro-space"]);
@@ -642,7 +642,7 @@ endmodule
 <NUL>
 "#;
 
-/// §5.3: a NUL byte reads as white space (#628; Questa accepts it too).
+/// §5.3: a NUL byte reads as white space (#628).
 #[test]
 fn nul_bytes_628() {
     check(NUL_BYTES_628, &["--relax-nul-bytes"]);
@@ -743,7 +743,7 @@ module t;
 endmodule
 "#;
 
-/// §19.6: a hierarchical cross item gets an implicit coverpoint (#629; Questa accepts it too).
+/// §19.6: a hierarchical cross item gets an implicit coverpoint (#629).
 #[test]
 fn cross_hier_item_629() {
     check(CROSS_HIER_ITEM_629, &["--relax-cross-hier-item"]);

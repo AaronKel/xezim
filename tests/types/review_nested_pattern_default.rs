@@ -1,8 +1,8 @@
 //! IEEE 1800-2017 §10.9.2: a packed-struct assignment pattern with a
 //! nested struct member, compiled (`always_comb`) and interpreted
-//! (`initial`). `default:` fills each member of a nested struct member, as
-//! Questa does: the whole member took the value, so only its LSB was set.
-//! Review follow-up to #589 / PR #590; expected values are Questa's.
+//! (`initial`). `default:` fills each member of a nested struct member;
+//! the whole member took the value, so only its LSB was set.
+//! Review follow-up to #589 / PR #590.
 use xezim::simulate;
 
 fn shown(src: &str) -> Vec<String> {

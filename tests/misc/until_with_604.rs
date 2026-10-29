@@ -1,7 +1,7 @@
 //! IEEE 1800-2017 §16.12.12: `p until_with q` is `p until (p and q)`, and
 //! `s_until_with` likewise from `s_until`. Parenthesized, `until_with` was a
 //! parse error (#604, reported by amal-khailtash); without parentheses it
-//! was skipped. Expected counts are Questa's.
+//! was skipped.
 use xezim::simulate;
 
 #[test]

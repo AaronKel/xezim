@@ -4,7 +4,7 @@
 //! class member cleared every row and on a module array read each row as x
 //! (#595, reported by akashlevy); a by-value `int o[][]` argument arrived
 //! with every row empty, and a whole assignment into a class member copied
-//! no rows. Expected lines are Questa's.
+//! no rows.
 use xezim::simulate;
 
 fn shown(src: &str, prefixes: &[&str]) -> Vec<String> {

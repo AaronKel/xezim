@@ -3,7 +3,7 @@
 //! list, with any expression inside (`m inside {1, 2}`). `with` was a parse
 //! error that took the rest of the covergroup with it (#611, reported by
 //! git-hevangel); it now keeps only the values it admits, `item` bound to
-//! each. Expected values are Questa's.
+//! each.
 use xezim::simulate;
 
 fn shown(src: &str, f: impl Fn(&str) -> bool) -> Vec<String> {
@@ -115,7 +115,7 @@ endmodule
 /// §19.5.1.1: the filter selects the values before anything else uses them:
 /// an `ignore_bins`/`illegal_bins` excludes only the values it admits, a
 /// `name[N]` bin spreads only them, and a scalar bin they all fail is not a
-/// bin. Values are Questa's.
+/// bin.
 #[test]
 fn filter_applies_to_every_bin_kind() {
     let out: Vec<String> = simulate(r#"module t;

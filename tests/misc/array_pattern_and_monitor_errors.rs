@@ -1,4 +1,4 @@
-//! IEEE 1800-2017 §10.9.1 and §6.21, as Questa and iverilog reject them: an
+//! IEEE 1800-2017 §10.9.1 and §6.21, as iverilog rejects them: an
 //! ordered assignment pattern must have one item per element of the
 //! unpacked dimension it fills (`'{1,2,3}` for `[1:4]`), and `$monitor` may
 //! not take an automatic variable, which no longer exists when the monitor

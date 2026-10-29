@@ -1,8 +1,7 @@
 //! IEEE 1800-2017 §11.5.1, §7.4.1: a bit-select of a function formal
 //! declared with a range that does not start at zero (`input logic [12:1] a`)
 //! reads the bit its label names, interpreted and compiled, and whatever
-//! else in the design is named `a` (#650, reported by hevangel). Questa
-//! prints `RESULT: PASS` and the values below.
+//! else in the design is named `a` (#650, reported by hevangel).
 use xezim::simulate;
 
 fn shown(src: &str) -> Vec<String> {

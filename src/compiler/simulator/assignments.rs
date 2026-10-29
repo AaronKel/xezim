@@ -1390,7 +1390,7 @@ impl Simulator {
                 .or_else(|| ordered.get(i).copied());
             // §10.9.2: `default:` reaches into a nested struct member and
             // fills each of its members (`'{trans_id: id, default: 1}` sets
-            // `exception.cause` and `exception.valid` to 1), as Questa does;
+            // `exception.cause` and `exception.valid` to 1);
             // the whole member took the value, so only its LSB was set.
             if keyed.is_none()
                 && let Some(d) = default

@@ -50,7 +50,7 @@ fn packed_struct_pattern_class_vif_dest() {
 /// §8.14/§8.15: a pattern written to a property a derived class redeclares
 /// lands in the cell its spelling selects: `this.p` in a base method and
 /// `super.p` the base's, a bare `p` in the derived class its own, `h.p`
-/// through a base handle the base's. Values are Questa's.
+/// through a base handle the base's.
 #[test]
 fn pattern_into_a_shadowed_property() {
     let out: Vec<String> = xezim::simulate(

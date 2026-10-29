@@ -2,7 +2,7 @@
 //! the global time precision. It lexed as `1` and `step`, so `a = #1step b;`
 //! was a parse error and `#1step;` waited one time unit (#615, reported by
 //! git-hevangel). Every delay form now takes it, unrounded by a coarser
-//! scope's precision; `x = 1step;` is still an error. Values are Questa's.
+//! scope's precision; `x = 1step;` is still an error.
 use xezim::simulate;
 
 fn shown(src: &str, f: impl Fn(&str) -> bool) -> Vec<String> {
@@ -155,8 +155,7 @@ fn one_step_is_not_a_value() {
 }
 
 /// §3.14.3: in a 1ns-precision module of a design whose global precision is
-/// 1ps, `#1step` waits 1ps, through the compiled process path too. Times
-/// are Questa's.
+/// 1ps, `#1step` waits 1ps, through the compiled process path too.
 #[test]
 fn one_step_in_a_coarse_scope_is_one_global_tick() {
     let out: Vec<String> = simulate(

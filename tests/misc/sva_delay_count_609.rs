@@ -1,8 +1,8 @@
 //! IEEE 1800-2017 §16.7: `cycle_delay_range ::= ## constant_primary`. A
 //! name after `##` is the count even when `(` follows: `go ##N (x != y)[*2]`
 //! is a delay of `N` then the parenthesized sequence, not a call `N(...)`
-//! (#609, reported by git-hevangel). The second test's counts match Questa,
-//! which rejects `##pk::PN` without parentheses; xezim accepts it.
+//! (#609, reported by git-hevangel). xezim also accepts `##pk::PN`
+//! without parentheses.
 use xezim::simulate;
 
 fn shown(src: &str, f: impl Fn(&str) -> bool) -> Vec<String> {

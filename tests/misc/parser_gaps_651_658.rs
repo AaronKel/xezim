@@ -1,6 +1,5 @@
 //! Parser gaps reported by amal-khailtash (#651-#658), each now read as
-//! IEEE 1800-2023 allows. The expected lines are Questa's output for the
-//! same source.
+//! IEEE 1800-2023 allows.
 use xezim::simulate;
 
 fn shown(src: &str) -> Vec<String> {

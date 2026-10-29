@@ -1,7 +1,7 @@
 //! IEEE 1800-2017 §16.10, A.2.4: a property or sequence local may carry
 //! unpacked dimensions (`bit flags[3:0];`, `logic [3:0] words[2];`,
 //! `bit a[1:0], b[7:0];`). They were a parse error (#618, reported by
-//! git-hevangel). Expected counts are Questa's.
+//! git-hevangel).
 use xezim::simulate;
 
 #[test]

@@ -2,7 +2,7 @@
 //! or element evaluates its target when the statement executes. The object
 //! the root names then is updated, whether the root is a class property, a
 //! module or block variable, or a formal, and whatever it names afterwards
-//! (#613, reported by git-hevangel). Questa prints ALL PASS.
+//! (#613, reported by git-hevangel).
 use xezim::simulate;
 
 #[test]
@@ -130,8 +130,7 @@ endmodule
 
 /// The root's declared class picks the property (§8.14): `hb.f <= 7` with
 /// `hb` a base handle to a derived object that redeclares `f` writes the
-/// base's `f`; array and queue element roots are untouched. Questa prints
-/// the same.
+/// base's `f`; array and queue element roots are untouched.
 #[test]
 fn nba_root_uses_the_declared_class() {
     let out: Vec<String> = simulate(

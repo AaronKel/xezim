@@ -1,7 +1,7 @@
 //! IEEE 1800-2017 §26.2, A.1.11: a package may declare nets. A net with an
 //! implicit data type (`wire [p::WIDTH-1:0] tie_low;`, `wire t;`) failed to
 //! parse (#602, reported by amal-khailtash); an undriven one reads z (§6.6).
-//! Expected values are Questa's.
+//!
 use xezim::simulate;
 
 #[test]

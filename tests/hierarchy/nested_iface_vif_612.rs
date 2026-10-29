@@ -3,7 +3,7 @@
 //! one (`o.leaf.mp`), binds a virtual interface and compares as the instance
 //! it names, as a top-level instance's name does: assigned, passed as an
 //! argument, returned, or stored in a static (#612, reported by
-//! git-hevangel). Expected values are Questa's.
+//! git-hevangel).
 use xezim::simulate;
 
 fn shown(src: &str, f: impl Fn(&str) -> bool) -> Vec<String> {
