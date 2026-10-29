@@ -153,3 +153,35 @@ fn one_step_is_not_a_value() {
         .is_err()
     );
 }
+
+/// §3.14.3: in a 1ns-precision module of a design whose global precision is
+/// 1ps, `#1step` waits 1ps, through the compiled process path too. Times
+/// are Questa's.
+#[test]
+fn one_step_in_a_coarse_scope_is_one_global_tick() {
+    let out: Vec<String> = simulate(
+        r#"`timescale 1ns/1ns
+module m;
+  int n = 0;
+  initial begin
+    #1step n = 1;
+    #1step n = 2;
+    #1 n = 3;
+  end
+endmodule
+`timescale 1ns/1ps
+module t;
+  m u();
+  always @(u.n) $display("R %0d at %0.3f", u.n, $realtime);
+endmodule
+"#,
+        10_000,
+    )
+    .expect("simulate")
+    .output
+    .iter()
+    .map(|l| l.message.clone())
+    .filter(|m| m.starts_with("R "))
+    .collect();
+    assert_eq!(out, ["R 1 at 0.001", "R 2 at 0.002", "R 3 at 1.002"]);
+}

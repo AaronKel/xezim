@@ -11374,6 +11374,14 @@ impl<'a> BytecodeCompiler<'a> {
             } if self.allow_waits => {
                 match control {
                     crate::ast::stmt::TimingControl::Delay(d) => {
+                        // §3.14.3: `1step` is one global tick, not a value the
+                        // wait rounds to the scope's precision; the
+                        // interpreter's delay path handles it (#615).
+                        if matches!(&d.kind, ExprKind::SystemCall { name, .. }
+                            if name == crate::compiler::elaborate::ONE_STEP_DELAY)
+                        {
+                            return false;
+                        }
                         let Some(r) = self.compile_expr(d, 0) else {
                             return false;
                         };
