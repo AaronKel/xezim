@@ -414,6 +414,15 @@ impl Simulator {
     /// caller falls back to its non-vif path.
     pub(super) fn chain_handle(&self, expr: &Expression) -> Option<usize> {
         match &expr.kind {
+            // §8.11: `this.cfg.vif` roots the chain at the live object; with
+            // no handle the operand was unclassifiable and a bound vif
+            // compared equal to null.
+            ExprKind::This => self
+                .this_stack
+                .last()
+                .copied()
+                .flatten()
+                .filter(|&h| h != 0),
             ExprKind::Ident(h) if h.path.len() == 1 => self.eval_ident_handle(&h.path[0].name.name),
             ExprKind::Ident(h) if h.path.len() > 1 => {
                 // A packed multi-segment path (`e.d`): the head names the
