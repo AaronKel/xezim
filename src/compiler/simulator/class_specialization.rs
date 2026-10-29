@@ -613,22 +613,41 @@ impl Simulator {
                 out.push((prop.clone(), (rest.to_string(), None)));
             }
         }
+        // An inherited property typed by a base's parameter that this
+        // specialization's own parameter is forwarded to (`class d #(type W)
+        // extends base #(W)`).
+        let binds: HashMap<String, String> = cd
+            .type_param_names
+            .iter()
+            .filter_map(|tp| {
+                let i = cd.param_order.iter().position(|p| p == tp)?;
+                let f = frags.get(i).filter(|f| !f.is_empty())?;
+                Some((tp.clone(), f.clone()))
+            })
+            .collect();
+        if !binds.is_empty() {
+            let own: HashSet<String> = out.iter().map(|(p, _)| p.clone()).collect();
+            out.extend(
+                self.ancestor_param_vif_props(cd, binds)
+                    .into_iter()
+                    .filter(|(p, _)| !own.contains(p)),
+            );
+        }
         out
     }
 
     /// `(iface, modport)` of a specialization fragment spelling a virtual
-    /// interface type (`virtual bus_if`, `virtual I#(8).mp`), else `None`.
-    fn vif_of_spec_frag(frag: &str) -> Option<(String, Option<String>)> {
+    /// interface type (`virtual bus_if`, `virtual I#(8).mp`, or the
+    /// `normalize_spec_ws` form `virtualbus_if`), else `None`.
+    fn vif_of_spec_frag(&self, frag: &str) -> Option<(String, Option<String>)> {
         let rest = frag.strip_prefix("virtual")?;
-        if !rest.starts_with(char::is_whitespace) {
-            return None;
-        }
+        let spaced = rest.starts_with(char::is_whitespace);
         let rest = rest.trim();
         let end = rest
             .find(|c: char| c == '#' || c == '.' || c.is_whitespace())
             .unwrap_or(rest.len());
         let (name, tail) = rest.split_at(end);
-        if name.is_empty() {
+        if name.is_empty() || (!spaced && !self.module.interfaces.contains(name)) {
             return None;
         }
         let tail = match tail.rfind(')') {
@@ -650,17 +669,34 @@ impl Simulator {
     /// parameter's default. Unlike [`Self::param_vif_props`] the binding is
     /// fixed by the class declarations, so it holds for every object of
     /// `cname`; a binding through `cname`'s own parameters depends on the
-    /// specialization and is left out. Static properties keep their
-    /// declaring class's cell and are left out too.
+    /// specialization and is left out (see [`Self::param_vif_props`]).
+    /// Static properties keep their declaring class's cell and are left out
+    /// too.
     fn inherited_param_vif_props(&self, cname: &str) -> Vec<(String, (String, Option<String>))> {
+        match self.module.classes.get(cname) {
+            Some(cd) => self.ancestor_param_vif_props(cd, HashMap::default()),
+            None => Vec::new(),
+        }
+    }
+
+    /// The walk of [`Self::inherited_param_vif_props`] up from `leaf`, whose
+    /// own type parameters are bound as `leaf_binds` (textual fragments).
+    fn ancestor_param_vif_props(
+        &self,
+        leaf: &crate::compiler::elaborate::ElaboratedClass,
+        leaf_binds: HashMap<String, String>,
+    ) -> Vec<(String, (String, Option<String>))> {
         let mut out = Vec::new();
-        let Some(mut child) = self.module.classes.get(cname) else {
-            return out;
-        };
-        let mut seen: HashSet<&str> = child.properties.keys().map(String::as_str).collect();
+        let mut child = leaf;
+        let mut seen: HashSet<&str> = child
+            .properties
+            .keys()
+            .chain(child.virtual_iface_properties.keys())
+            .map(String::as_str)
+            .collect();
         let mut visited: Vec<&str> = vec![child.name.as_str()];
         // The textual binding of each of `child`'s type parameters.
-        let mut child_binds: HashMap<String, String> = HashMap::default();
+        let mut child_binds = leaf_binds;
         while let Some(pn) = child.extends.as_deref() {
             if visited.contains(&pn) {
                 break;
@@ -713,14 +749,14 @@ impl Simulator {
                 }
                 if let Some(vif) = binds
                     .get(name.name.name.as_str())
-                    .and_then(|b| Self::vif_of_spec_frag(b))
+                    .and_then(|b| self.vif_of_spec_frag(b))
                 {
                     out.push((prop.clone(), vif));
                 }
             }
             seen.extend(parent.properties.keys().map(String::as_str));
             child_binds = binds;
-            child = parent;
+            child = parent.as_ref();
         }
         out
     }
