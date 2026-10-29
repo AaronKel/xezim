@@ -768,6 +768,8 @@ mod static_task_bare_call;
 mod static_class_event;
 #[path = "classes/static_new_initializer_once.rs"]
 mod static_new_initializer_once;
+#[path = "classes/static_actual_caller_spec.rs"]
+mod static_actual_caller_spec;
 #[path = "classes/member_shadows_package_var.rs"]
 mod member_shadows_package_var;
 
