@@ -2041,6 +2041,13 @@ impl Simulator {
         d: &Expression,
         precision_diff: i32,
     ) -> u64 {
+        // §3.14.3: `1step` is one tick of the global precision, whatever
+        // the running scope's precision (#615).
+        if matches!(&d.kind, ExprKind::SystemCall { name, .. }
+            if name == super::elaborate::ONE_STEP_DELAY)
+        {
+            return 1;
+        }
         let raw = if v.is_real {
             let f = v.to_f64();
             // Diagnose a pathological real delay: non-finite (NaN/inf) or

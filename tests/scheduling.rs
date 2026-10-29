@@ -416,3 +416,5 @@ mod armed_edge_dynamic_offset_read;
 mod clocking_output_clockvar_read;
 #[path = "scheduling/comb_sensitivity_591_592.rs"]
 mod comb_sensitivity_591_592;
+#[path = "scheduling/one_step_delay_615.rs"]
+mod one_step_delay_615;

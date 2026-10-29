@@ -3423,6 +3423,8 @@ impl Simulator {
                 v.is_signed = true;
                 v
             }
+            // §3.14.3: a `1step` delay value, one global tick (#615).
+            n if n == super::elaborate::ONE_STEP_DELAY => Value::from_f64(1.0),
             "$isunknown" => {
                 let v = args
                     .first()
