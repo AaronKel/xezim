@@ -723,6 +723,8 @@ mod uvm_tlm_coverage;
 mod vif_member_read_nested_receiver;
 #[path = "classes/vif_null_compare_this_receiver.rs"]
 mod vif_null_compare_this_receiver;
+#[path = "classes/vif_null_compare_indexed_receiver.rs"]
+mod vif_null_compare_indexed_receiver;
 #[path = "classes/vif_property_named_like_instance.rs"]
 mod vif_property_named_like_instance;
 #[path = "classes/vif_receiver_neighbor_shapes.rs"]

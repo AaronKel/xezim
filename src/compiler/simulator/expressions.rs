@@ -3768,8 +3768,8 @@ impl Simulator {
                 // never `iface.signal` selects) so ordinary comparisons keep
                 // their value semantics.
                 if matches!(op, BinaryOp::Eq | BinaryOp::Neq) {
-                    let lv = self.vif_operand(left);
-                    let rv = self.vif_operand(right);
+                    let lv = self.vif_operand_eval(left);
+                    let rv = self.vif_operand_eval(right);
                     let engaged = lv.is_some() || rv.is_some();
                     if engaged {
                         // A bare `null` on the other side of a vif operand is
