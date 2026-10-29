@@ -127,3 +127,41 @@ endmodule
     assert!(out.iter().any(|m| m == "ALL PASS"), "{out:?}");
     assert!(!out.iter().any(|m| m.contains("FAIL")), "{out:?}");
 }
+
+/// The root's declared class picks the property (§8.14): `hb.f <= 7` with
+/// `hb` a base handle to a derived object that redeclares `f` writes the
+/// base's `f`; array and queue element roots are untouched. Questa prints
+/// the same.
+#[test]
+fn nba_root_uses_the_declared_class() {
+    let out: Vec<String> = simulate(
+        r#"class base; int f; endclass
+class derived extends base; int f; endclass
+class box; int f; endclass
+module t;
+  box objs[3];
+  box q[$];
+  base hb;
+  derived d;
+  initial begin
+    foreach (objs[i]) objs[i] = new;
+    begin box b0, b1; b0 = new; b1 = new; q.push_back(b0); q.push_back(b1); end
+    objs[1].f <= 5;
+    q[1].f = 6;
+    d = new; hb = d;
+    hb.f <= 7;
+    #1;
+    $display("R %0d %0d %0d %0d %0d %0d", objs[0].f, objs[1].f, q[0].f, q[1].f, hb.f, d.f);
+  end
+endmodule
+"#,
+        100,
+    )
+    .expect("simulate")
+    .output
+    .iter()
+    .map(|l| l.message.clone())
+    .filter(|m| m.starts_with("R "))
+    .collect();
+    assert_eq!(out, ["R 0 5 0 6 7 0"]);
+}

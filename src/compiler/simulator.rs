@@ -1645,7 +1645,9 @@ struct NbaEntry {
     /// <= v` inside a task), captured when the NBA was SCHEDULED. Resolving
     /// the name in the NBA region would consult whichever frame the event
     /// loop still holds, which with two concurrent tasks is the wrong one.
-    root_frame: Option<(String, Value)>,
+    /// With the root's declared class, which selects a property a derived
+    /// class redeclares (§8.14), when one is known.
+    root_frame: Option<(String, Value, Option<String>)>,
 }
 
 #[derive(Debug, Clone)]

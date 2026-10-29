@@ -2657,7 +2657,10 @@ impl Simulator {
     /// writes THAT object. The root may be a frame local or formal, a
     /// property of `this`, or a module or block variable (#613): any
     /// class-typed name, read as the statement executes.
-    pub(super) fn nba_root_frame(&self, lvalue: &Expression) -> Option<(String, Value)> {
+    pub(super) fn nba_root_frame(
+        &self,
+        lvalue: &Expression,
+    ) -> Option<(String, Value, Option<String>)> {
         if !matches!(
             lvalue.kind,
             ExprKind::MemberAccess { .. } | ExprKind::Index { .. } | ExprKind::RangeSelect { .. }
@@ -2682,17 +2685,21 @@ impl Simulator {
         if root == "this" {
             return None;
         }
+        // Only a class-typed root holds a handle: an integer local whose value
+        // happens to index a live object is not one.
+        let class = self.class_of_var(root)?;
         let handle = match self.local_stack.last().and_then(|f| f.get(root)) {
             Some(v) => v.to_u64()? as usize,
-            None => {
-                self.class_of_var(root)?;
-                self.eval_ident_handle(root)?
-            }
+            None => self.eval_ident_handle(root)?,
         };
         if handle == 0 || !self.heap.get(handle).is_some_and(|o| o.is_some()) {
             return None;
         }
-        Some((root.clone(), Value::from_u64(handle as u64, 64)))
+        Some((
+            root.clone(),
+            Value::from_u64(handle as u64, 64),
+            Some(class),
+        ))
     }
 
     pub(super) fn freeze_lvalue_indices(&mut self, e: &Expression) -> Expression {
@@ -3328,15 +3335,16 @@ impl Simulator {
                 if let Some(h) = entry.this_handle {
                     self.this_stack.push(Some(h));
                 }
-                // The frame declares the root's class (the object's own), so
-                // a member write resolves without whichever call frame the
-                // event loop still holds (#613).
-                let pushed_root = if let Some((name, val)) = entry.root_frame {
-                    let class = val
-                        .to_u64()
-                        .and_then(|h| self.heap.get(h as usize))
-                        .and_then(|o| o.as_ref())
-                        .map(|o| o.class_name.clone());
+                // The frame declares the root's class (its declared one, else
+                // the object's own), so a member write resolves without
+                // whichever call frame the event loop still holds (#613).
+                let pushed_root = if let Some((name, val, declared)) = entry.root_frame {
+                    let class = declared.or_else(|| {
+                        val.to_u64()
+                            .and_then(|h| self.heap.get(h as usize))
+                            .and_then(|o| o.as_ref())
+                            .map(|o| o.class_name.clone())
+                    });
                     let mut frame: HashMap<String, Value> = HashMap::default();
                     let mut types = self.take_pooled_types();
                     if let Some(c) = class {
