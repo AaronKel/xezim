@@ -2418,7 +2418,8 @@ impl Simulator {
             // class-local typedef args (e.g. `special_comp_type`) through
             // `resolve_typedef_spec`, which reads `self.current_spec`.
             let saved = self.current_spec.clone();
-            let extracted = self.resolve_call_spec_params(Self::extract_call_spec(expr), &saved);
+            let lexical = self.lexical_spec();
+            let extracted = self.resolve_call_spec_params(Self::extract_call_spec(expr), &lexical);
             if let Some((ref base, ref sig)) = extracted {
                 self.ensure_spec_statics(base, sig);
             }

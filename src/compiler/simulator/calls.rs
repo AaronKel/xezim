@@ -16,7 +16,8 @@ impl Simulator {
         // (e.g. `special_comp_type`) through the enclosing spec —
         // `resolve_typedef_spec` reads `self.current_spec`.
         let saved = self.current_spec.clone();
-        let extracted = self.resolve_call_spec_params(Self::extract_call_spec(func), &saved);
+        let lexical = self.lexical_spec();
+        let extracted = self.resolve_call_spec_params(Self::extract_call_spec(func), &lexical);
         if let Some((ref base, ref sig)) = extracted {
             self.ensure_spec_statics(base, sig);
         }

@@ -1094,6 +1094,29 @@ impl Simulator {
     /// through the ENCLOSING spec, so `resource#(T)::get_type()` invoked
     /// from inside `config_db#(int)` keys `resource#(int)` — the same
     /// per-spec cell the concrete resource uses.
+    /// §8.25: the specialization against which a `C#(T)` written in the
+    /// running code resolves its parameter names — the lexical class's. While
+    /// a specialized static call's actuals are evaluated, `current_spec` is
+    /// already the CALLEE's (`eval_call`), so `registry#(B)::add(seq#(T)::cb)`
+    /// in `drv#(byte)` read `T` as `registry`'s parameter; the caller's spec
+    /// is the nearest one on `spec_scope_stack` that applies to the lexical
+    /// class.
+    pub(super) fn lexical_spec(&self) -> Option<(String, String)> {
+        let Some(Some(lex)) = self.class_context_stack.last() else {
+            return self.current_spec.clone();
+        };
+        let applies = |(b, _): &(String, String)| b == lex || self.class_is_a(lex, b);
+        if self.current_spec.as_ref().is_none_or(|c| applies(c)) {
+            return self.current_spec.clone();
+        }
+        self.spec_scope_stack
+            .iter()
+            .rev()
+            .find(|s| applies(s))
+            .cloned()
+            .or_else(|| self.current_spec.clone())
+    }
+
     pub(super) fn resolve_call_spec_params(
         &self,
         spec: Option<(String, String)>,
