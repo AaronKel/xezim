@@ -418,3 +418,5 @@ mod clocking_output_clockvar_read;
 mod comb_sensitivity_591_592;
 #[path = "scheduling/one_step_delay_615.rs"]
 mod one_step_delay_615;
+#[path = "scheduling/clocking_select_clockvars.rs"]
+mod clocking_select_clockvars;

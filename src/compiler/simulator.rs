@@ -6615,6 +6615,9 @@ pub struct Simulator {
     /// value, defeating monitor patterns that rely on stable
     /// pre-edge sampling.
     clocking_snapshots: HashMap<String, HashMap<String, Value>>,
+    /// §14.3: leaf names of unpacked-array clockvars, whose samples are kept
+    /// per element (`ready[0]`); the prefilter of `cb.sig[i]` reads.
+    clocking_array_leaves: HashSet<String>,
     /// LRM §14.3: per-cb metadata. `(clock_signal_name, [(signal_name, is_input)])`.
     /// Populated at compile() from `module.clocking_blocks`.
     clocking_meta: HashMap<String, (String, Vec<(String, bool)>)>,
@@ -6622,7 +6625,9 @@ pub struct Simulator {
     /// value)]`. `cb.<out_sig> <= val` queues here instead of driving
     /// immediately; `tick_clocking_blocks` applies them at the next
     /// posedge of the cb's clock (output skew).
-    clocking_output_pending: HashMap<String, Vec<(String, Value)>>,
+    /// A drive of a SELECT (`cb.v[2] <= 1`) carries its target: the net with
+    /// the drive's indices frozen.
+    clocking_output_pending: HashMap<String, Vec<(String, Value, Option<Expression>)>>,
     /// Per-clocking-block previous clock bit (for edge detection).
     clocking_prev_clock: HashMap<String, u8>,
     /// Per-tick clock poll table for `tick_clocking_blocks` (see there).
@@ -6647,7 +6652,7 @@ pub struct Simulator {
     /// §14.16 `cb.out <= ##N v` drives awaiting N further clocking events:
     /// cb → [(remaining_cycles, net, value)]. Decremented at each edge of that
     /// block; applied (with output skew) when it reaches zero.
-    clocking_cycle_pending: HashMap<String, Vec<(u64, String, Value)>>,
+    clocking_cycle_pending: HashMap<String, Vec<(u64, String, Value, Option<Expression>)>>,
     /// §14.3 signal RENAMING (`input alias = net;`): cb → (clocking name →
     /// resolved net). The snapshot/meta store the NET; reads and drives use
     /// the clocking name, so they translate through this first.

@@ -2538,6 +2538,16 @@ impl Simulator {
             })
             .collect();
         for n in names {
+            // §14.3: an unpacked-array clockvar has no signal of its own;
+            // its elements are sampled one by one.
+            if let Some(elems) = self.clocking_array_elems(&n) {
+                for (_, e) in elems {
+                    if let Some(v) = self.get_signal_value_by_name(&e) {
+                        self.clocking_preponed.insert(e, v);
+                    }
+                }
+                continue;
+            }
             if let Some(v) = self.get_signal_value_by_name(&n) {
                 self.clocking_preponed.insert(n, v);
             }
