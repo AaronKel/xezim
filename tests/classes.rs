@@ -896,5 +896,7 @@ mod nested_class_out_of_block_617;
 mod nba_member_root_613;
 #[path = "classes/relax_static_out_of_block_621.rs"]
 mod relax_static_out_of_block_621;
+#[path = "classes/static_spec_actual_lexical.rs"]
+mod static_spec_actual_lexical;
 #[path = "classes/virtual_named_class_param.rs"]
 mod virtual_named_class_param;
