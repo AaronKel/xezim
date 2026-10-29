@@ -22,12 +22,19 @@ Thank you to everyone who has improved xezim and xezim-core through pull request
 - **[Akash Levy](https://github.com/akashlevy)** — expression-context and
   exponent signedness fixes, nonblocking assignment widths, assertion operand
   widths, callback-driven assertion clocks, cocotb runner arguments, VPI array
-  port writes, and extensive self-checking reports covering scheduling, types,
-  interfaces and hierarchical access.
+  port writes, a nonzero exit status for runs that end on a run-time error,
+  assertion `or` beside a pending nonvacuous operand, patches for
+  `always_comb` sensitivity, `super` call argument widths and empty
+  `foreach` constraints, and extensive self-checking reports covering
+  scheduling, types, interfaces and hierarchical access.
 - **[Dave Keeshan](https://github.com/davekeeshan)** — nested member selections
   in unpacked parameter arrays, instance-dependent array queries in local
-  declaration widths, and packed-struct parameter override layouts and
-  forwarding, with simulator and core regression tests.
+  declaration widths, packed-struct parameter override layouts and
+  forwarding, nested struct assignment patterns, port labels through
+  part-select actuals, declared index order of instance arrays, packed
+  typedef array dimensions, package-scoped typed assignment patterns and
+  package arrays of structs indexed at run time, with simulator and core
+  regression tests.
 - **Vrajesh Prakhya** — real-number modelling: Verilog-AMS `wreal` nets
   resolved by summing, user-defined nettypes across the hierarchy and in
   packages (§6.6.7, §6.6.8), real-ness of members projected from call results,
@@ -38,10 +45,14 @@ Thank you to everyone who has improved xezim and xezim-core through pull request
 - **Chen Ben Haroosh** — submodule-inline generate-for elaboration: genvar-
   dependent declarations and `parameter type` default resolution, plus the
   accompanying SystemVerilog compliance cases, constant-function evaluation,
-  nested `foreach` bounds, and parameter-dependent packed selects in child
-  instances.
+  nested `foreach` bounds, parameter-dependent packed selects in child
+  instances, casts in constant expressions and constant functions (typedef
+  width and signing, `$bits` of a cast), array parameters built from
+  replication and keyed patterns, port widths of fill-literal actuals, and
+  member resolution by static type while another process is suspended.
 - **Jayaraman RP** — cross-platform installation scripts, including the macOS
-  installer with UVM setup.
+  installer with UVM setup, and `%` and unknown conversion specifiers printed
+  literally by `$display` and `$sformatf`.
 - **Ganesh T S** — wide-number parsing for `$sscanf`/`$fscanf`/`$value$plusargs`
   and the string conversion methods (arbitrary-precision decimal in the core),
   loop-variable scoping against same-named identifiers in child instances,
@@ -49,8 +60,11 @@ Thank you to everyone who has improved xezim and xezim-core through pull request
   `%c` in `$fscanf`/`$sscanf` matching exactly one character, class and package
   array constants, deferred static and class-field initialization, hierarchical
   class-member access, virtual-interface alias storage, rollback after failed
-  randomization, static subroutine randomization targets, and detailed
-  self-checking bug reports for struct and class member access.
+  randomization, static subroutine randomization targets, class
+  specializations keyed by argument type however it is spelled, static
+  methods called through a null specialization handle, call actuals sized by
+  the callee's formal, the time-zero port handshake between instances, and
+  detailed self-checking bug reports for struct and class member access.
 - **eenky** — declared defaults for parameters a class leaves out when it
   extends a parameterized class, and virtual-interface reads through
   class-handle chains (`cfg.vif.data`).
@@ -69,6 +83,10 @@ Thank you to everyone who has improved xezim and xezim-core through pull request
   static-call specializations, so `uvm_config_db#(cfg#(AW,DW))::get` reaches
   the configuration that was set, and factory `type_id::create` through chains
   of class typedefs.
+- **[Hern](https://github.com/hernloh)** — labelled assertion and cover sites
+  named in the coverage results file.
+- **[opensource-elearning](https://github.com/opensource-elearning)** — reads
+  of an inactive tagged-union member reported as errors.
 - **[lwflwf1](https://github.com/lwflwf1)** — parser fixes for constraint
   braces, implication operands and `randomize` blocks, packed-dimension
   recovery and closing directives inside statement blocks, plus the report
@@ -80,11 +98,14 @@ Detailed, self-checking bug reports have driven much of xezim's conformance
 work. Thank you in particular to
 [AaronKel](https://github.com/AaronKel),
 [akashlevy](https://github.com/akashlevy),
+[amal-khailtash](https://github.com/amal-khailtash),
 [bharathnaruto-spec](https://github.com/bharathnaruto-spec),
 [chenbhil](https://github.com/chenbhil),
 [davekeeshan](https://github.com/davekeeshan),
 [Dragon-Git](https://github.com/Dragon-Git),
 [Ganesh-TNL](https://github.com/Ganesh-TNL),
+[git-hevangel](https://github.com/git-hevangel),
+[hernloh](https://github.com/hernloh),
 [jjts](https://github.com/jjts),
 [Lramseyer](https://github.com/Lramseyer),
 [lwflwf1](https://github.com/lwflwf1),

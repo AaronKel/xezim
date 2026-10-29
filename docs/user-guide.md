@@ -13,6 +13,7 @@ of options and environment variables is in the
 * [Native compilation](#native-compilation)
 * [Reducing a multi-file build](#reducing-a-multi-file-build)
 * [Module-timescale extension](#module-timescale-extension)
+* [Sources written for other simulators](#sources-written-for-other-simulators)
 * [Non-standard extensions](#non-standard-extensions)
 
 ## Running a simulation
@@ -263,6 +264,46 @@ mixed-timescale design; give it a source `` `timescale `` or a
 IEEE 1800 §3.14.2.2; xezim uses `1ns/1ns` for both delays and `$realtime`, so
 an untimed module's `#1` is one nanosecond — declare a timescale explicitly when
 you mean something else.)
+
+## Sources written for other simulators
+
+xezim follows IEEE 1800 strictly by default: a construct the standard does not
+allow is an error, even where another simulator accepts it. Sources that cannot
+be edited (vendor IP, generated code, testbenches shared with other teams) can
+turn on the relaxation they need, one construct at a time. Each switch is off
+by default, prints a warning naming the clause wherever it applies, and is part
+of the [design cache](#warm-design-cache) key, so a strict run never reuses a
+relaxed run's design. Every switch also has an environment variable,
+`XEZIM_RELAX_<NAME>=1` (e.g. `XEZIM_RELAX_DUPLICATE_DECLS=1`), except
+`--relax-implicit-static`, whose variable is `XEZIM_ALLOW_IMPLICIT_STATIC=1`.
+
+| Switch | Accepts | Read as |
+|---|---|---|
+| `--relax-duplicate-decls` | a name declared twice in a task, function, method or block (§3.13) | the first declaration; the second is ignored |
+| `--relax-enum-no-base` | `enum [1:0] {...}` (§6.19) | `enum bit [1:0] {...}` |
+| `--relax-static-const` | `static const int k = 3;` in a subroutine or block (§6.20.6) | `const static int k = 3;` |
+| `--relax-event-this` | `@this.ev;` (§9.4.2) | `@(this.ev);` |
+| `--relax-casex-inside` | `casex (e) inside`, `casez (e) inside` (§12.5.4) | `case (e) inside` |
+| `--relax-macro-space` | `` ` NAME `` (§22.5.1) | `` `NAME `` |
+| `--relax-nul-bytes` | a NUL byte in the source (§5.3) | white space |
+| `--relax-cross-hier-item` | `cross vif.mode, cp_a;` (§19.6) | a cross over an implicit coverpoint of `vif.mode` |
+| `--relax-implicit-static` | `int x = ...;` in a static subroutine (§6.21) | a static variable with that initializer |
+| `--relax-driver-conflicts` | a variable written by conflicting drivers (§6.5, §9.2.2) | a warning instead of an error |
+
+Code written before IEEE 1364-2001 may use later keywords as names (`instance`,
+`cell`, `use`, `generate`, `signed`, ...). `` `begin_keywords `` regions in the
+source still work; for text outside them, choose the keyword set on the command
+line:
+
+```bash
+# the ten configuration keywords (instance, cell, use, library, ...) are names
+xezim --no-config-keywords tb.sv
+# Verilog-1995 code: every word added since 1364-1995 is a name
+xezim --keywords 1364-1995 old_rtl.v
+```
+
+`--keywords` takes any §22.14 version, `1364-1995` to `1800-2023`, each also with
+`-noconfig` (environment: `XEZIM_KEYWORDS`, `XEZIM_NO_CONFIG_KEYWORDS=1`).
 
 ## Non-standard extensions
 
