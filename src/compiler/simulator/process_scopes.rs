@@ -2380,6 +2380,21 @@ impl Simulator {
                             }
                             return;
                         }
+                        // §15.5: an event with no signal-table slot — a class
+                        // event (`@ev` on `this`, `@(h.ev)`, a static class
+                        // event) — parks through `run_process_stmts`, which
+                        // knows those identities. Executed synchronously below
+                        // it never waited, and the loop never saw the trigger.
+                        let cont = self.forever_cont(pid, body, body_stmts, i, 2, s);
+                        let contp = pc.pushed_frame(cont, resume_at);
+                        if self.forever_depth >= Self::FOREVER_RECURSION_LIMIT {
+                            self.event_queue.schedule(self.time, pid, contp);
+                            return;
+                        }
+                        self.forever_depth += 1;
+                        self.run_process_stmts(pid, &contp);
+                        self.forever_depth -= 1;
+                        return;
                     }
                 }
             }
