@@ -763,11 +763,7 @@ impl Simulator {
                 ) && !b.is_wildcard
                     && b.transitions.is_empty()
             })
-            .flat_map(|b| {
-                b.values
-                    .iter()
-                    .filter_map(|r| self.cg_range_bounds(r, ctor))
-            })
+            .flat_map(|b| self.cg_bin_value_ranges(b, ctor))
             .collect();
         Self::cg_merge_ranges(v)
     }
@@ -870,11 +866,11 @@ impl Simulator {
         let mut bins = Vec::new();
         for b in &explicit {
             let key = format!("{}.{}", cp_name, b.name.name);
-            let ranges: Vec<(i64, i64)> = b
+            let constant = b
                 .values
                 .iter()
-                .filter_map(|r| self.cg_range_bounds(r, ctor))
-                .collect();
+                .all(|r| self.cg_range_bounds(r, ctor).is_some());
+            let ranges = self.cg_bin_value_ranges(b, ctor);
             if b.array_form && !b.transitions.is_empty() {
                 // §19.5.2 `name[] = (...)`: one bin per value sequence.
                 for (label, _) in self.cg_trans_sequences(b, ctor) {
@@ -911,7 +907,7 @@ impl Simulator {
                         if n >= 1 << 20 {
                             break;
                         }
-                        if !Self::cg_in_ranges(v, &excl) && self.cg_with_admits(b, v) {
+                        if !Self::cg_in_ranges(v, &excl) {
                             bins.push(CgBin {
                                 key: Some(format!("{}[{}]", key, v)),
                                 name: b.name.name.clone(),
@@ -922,14 +918,15 @@ impl Simulator {
                     }
                 }
             } else if b.values.is_empty()
-                || ranges.len() < b.values.len()
+                || !constant
                 || ranges
                     .iter()
                     .any(|&(l, h)| Self::cg_count_outside(l, h, &excl) > 0)
             {
                 // A scalar bin exists unless every one of its values is
-                // excluded (bins whose ranges are not constants, and
-                // transition/wildcard bins, always count).
+                // excluded or filtered out by its `with` (bins whose ranges
+                // are not constants, and transition/wildcard bins, always
+                // count).
                 bins.push(CgBin {
                     key: Some(key),
                     name: b.name.name.clone(),
@@ -1540,11 +1537,7 @@ impl Simulator {
         ctor: &[(String, Value)],
     ) -> Option<(u64, u64, Vec<(i64, i64)>)> {
         let n = self.cg_const_i64(bin.array_size.as_ref()?, ctor)?.max(0) as u64;
-        let segs: Vec<(i64, i64)> = bin
-            .values
-            .iter()
-            .filter_map(|r| self.cg_range_bounds(r, ctor))
-            .collect();
+        let segs = self.cg_bin_value_ranges(bin, ctor);
         let m: u64 = segs.iter().map(|&(l, h)| (h - l) as u64 + 1).sum();
         Some((n, m / n.max(1), segs))
     }
@@ -1618,6 +1611,44 @@ impl Simulator {
         );
         Self::subst_ident_expr(&mut e, "item", &lit);
         self.cg_const_bool(&e).unwrap_or(true)
+    }
+
+    /// The constant value ranges of bin `bin`, in the order written, keeping
+    /// only the values its `with` filter admits (§19.5.1.1): a filtered
+    /// bin's values, and an array bin's distribution, are those values. At
+    /// most 1 << 20 values are tried, so a wide range with a selective filter
+    /// stays bounded.
+    pub(super) fn cg_bin_value_ranges(
+        &self,
+        bin: &crate::ast::decl::CoverBin,
+        ctor: &[(String, Value)],
+    ) -> Vec<(i64, i64)> {
+        let segs = bin
+            .values
+            .iter()
+            .filter_map(|r| self.cg_range_bounds(r, ctor));
+        if bin.with_filter.is_none() {
+            return segs.collect();
+        }
+        let mut out: Vec<(i64, i64)> = Vec::new();
+        let mut tried = 0u64;
+        'segs: for (l, h) in segs {
+            let mut run: Option<(i64, i64)> = None;
+            for v in l..=h {
+                if tried >= 1 << 20 {
+                    out.extend(run);
+                    break 'segs;
+                }
+                tried += 1;
+                if self.cg_with_admits(bin, v) {
+                    run = Some(run.map_or((v, v), |(a, _)| (a, v)));
+                } else if let Some(r) = run.take() {
+                    out.push(r);
+                }
+            }
+            out.extend(run);
+        }
+        out
     }
 
     /// A constant Boolean: `inside` (values and `[lo:hi]` ranges), `&&`,

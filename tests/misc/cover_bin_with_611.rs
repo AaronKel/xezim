@@ -111,3 +111,31 @@ endmodule
         ["A 0.00", "B 25.00", "C 100.00"]
     );
 }
+
+/// §19.5.1.1: the filter selects the values before anything else uses them:
+/// an `ignore_bins`/`illegal_bins` excludes only the values it admits, a
+/// `name[N]` bin spreads only them, and a scalar bin they all fail is not a
+/// bin. Values are Questa's.
+#[test]
+fn filter_applies_to_every_bin_kind() {
+    let out: Vec<String> = simulate(r#"module t;
+  bit [3:0] v;
+  covergroup g1; cp: coverpoint v { bins b[] = {[0:15]}; ignore_bins odd = {[0:15]} with (item % 2 == 1); } endgroup
+  covergroup g2; cp: coverpoint v { bins b[4] = {[0:15]} with (item < 4); } endgroup
+  covergroup g3; cp: coverpoint v { bins lo = {[0:3]}; bins none = {[8:9]} with (item > 12); } endgroup
+  covergroup g4; cp: coverpoint v { bins b[] = {[0:15]}; illegal_bins bad = {[0:15]} with (item > 13); } endgroup
+  g1 c1 = new; g2 c2 = new; g3 c3 = new; g4 c4 = new;
+  initial begin
+    for (int i = 0; i < 4; i++) begin v = i; c1.sample(); c2.sample(); c3.sample(); c4.sample(); end
+    $display("R %0.2f %0.2f %0.2f %0.2f", c1.get_coverage(), c2.get_coverage(), c3.get_coverage(), c4.get_coverage());
+  end
+endmodule
+"#, 100)
+        .expect("simulate")
+        .output
+        .iter()
+        .map(|l| l.message.clone())
+        .filter(|m| m.starts_with("R "))
+        .collect();
+    assert_eq!(out, ["R 25.00 100.00 100.00 28.57"]);
+}
