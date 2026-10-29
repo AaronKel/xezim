@@ -4107,6 +4107,26 @@ impl Simulator {
                         // path further below. Inside a class method the
                         // elaborator rewrites `@field` to a `HierIdentifier`,
                         // so accept both shapes.
+                        // §15.5: `@(h.evs[i])` — an element of a class event
+                        // array, keyed per element.
+                        let elem_expr = match event {
+                            EventControl::HierIdentifier(e) => Some(e),
+                            EventControl::EventExpr(t) if t.len() == 1 && t[0].edge.is_none() => {
+                                Some(&t[0].expr)
+                            }
+                            _ => None,
+                        };
+                        if let Some(e) = elem_expr
+                            && let Some(key) = self.expr_instance_event_elem(e)
+                        {
+                            let cont = pc.pushed_body(body, pc.start + i + 1);
+                            self.instance_event_waiters.push(InstanceEventWaiter {
+                                key: InstanceEventKeys::One(key),
+                                pid,
+                                continuation: cont,
+                            });
+                            return;
+                        }
                         if let Some(fname) = self.event_control_field_name(event) {
                             if let Some(key) = self.resolve_this_event_field(&fname) {
                                 // Chain the caller's tail rather than copying it (ProcCont::pushed_body).
@@ -4236,6 +4256,19 @@ impl Simulator {
                                     let w = self.make_event_waiter_kind(pid, sens, cont, false);
                                     self.event_waiters.push(w);
                                 }
+                                return;
+                            }
+                            // §15.5: an event with no signal — a subroutine's
+                            // local `event e;` — waits for `fire_named_event`
+                            // by name. The signal fallback below resumed it
+                            // after the slot's NBA region, i.e. at once.
+                            if !canon.contains('.') && canon != Self::EVENT_NULL_KEY {
+                                let cont = pc.pushed_body(body, pc.start + i + 1);
+                                self.instance_event_waiters.push(InstanceEventWaiter {
+                                    key: InstanceEventKeys::One(self.unbacked_event_key(&canon)),
+                                    pid,
+                                    continuation: cont,
+                                });
                                 return;
                             }
                         }
