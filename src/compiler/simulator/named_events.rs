@@ -350,6 +350,20 @@ impl Simulator {
             let stamp = Self::instance_event_stamp_key(&k);
             return Some(self.event_triggered_time.get(stamp.as_str()) == Some(&now));
         }
+        // A bare `ce.triggered` in a method of its class is `this.ce`, the
+        // field `-> ce` stamps; looked up as a module event it never fired.
+        if let ExprKind::Ident(h) = &e.kind
+            && h.path.len() == 1
+            && h.path[0].selects.is_empty()
+            && !self
+                .local_stack
+                .last()
+                .is_some_and(|l| l.contains_key(h.path[0].name.name.as_str()))
+            && let Some(k) = self.resolve_this_event_field(&h.path[0].name.name)
+        {
+            let stamp = Self::instance_event_stamp_key(&k);
+            return Some(self.event_triggered_time.get(stamp.as_str()) == Some(&now));
+        }
         // `ev.triggered` / `C::ev.triggered` on a static class event.
         if let Some(k) = self.static_class_event_key(e) {
             let stamp = Self::instance_event_stamp_key(&k);
