@@ -566,3 +566,5 @@ mod restrict_property_614;
 mod sva_local_array_618;
 #[path = "misc/macro_usage_before_paste_616.rs"]
 mod macro_usage_before_paste_616;
+#[path = "misc/undef_followed_by_text_619.rs"]
+mod undef_followed_by_text_619;
