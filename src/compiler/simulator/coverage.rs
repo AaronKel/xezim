@@ -2016,17 +2016,22 @@ impl Simulator {
                                 let e = Expression::new(
                                     ExprKind::Ident(crate::ast::expr::HierarchicalIdentifier {
                                         root: None,
-                                        path: id
-                                            .name
-                                            .split('.')
-                                            .map(|n| crate::ast::expr::HierPathSegment {
-                                                name: crate::ast::Identifier {
-                                                    name: n.to_string(),
-                                                    span: id.span,
-                                                },
-                                                selects: Vec::new(),
-                                            })
-                                            .collect(),
+                                        // An escaped name (`\a.b`) keeps its dot
+                                        // unless the switch made it a path.
+                                        path: (if sv_parser::RELAX_CROSS_HIER_ITEM.get() {
+                                            id.name.split('.').collect::<Vec<_>>()
+                                        } else {
+                                            vec![id.name.as_str()]
+                                        })
+                                        .into_iter()
+                                        .map(|n| crate::ast::expr::HierPathSegment {
+                                            name: crate::ast::Identifier {
+                                                name: n.to_string(),
+                                                span: id.span,
+                                            },
+                                            selects: Vec::new(),
+                                        })
+                                        .collect(),
                                         span: id.span,
                                         cached_signal_id: std::cell::Cell::new(None),
                                         cached_resolved_name: std::cell::OnceCell::new(),
