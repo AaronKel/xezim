@@ -5718,7 +5718,11 @@ impl Simulator {
                 // against the signal's full packed dims, normalizing indices
                 // for ascending / non-zero-based / negative ranges (§7.4.1).
                 if let Some((base, lo_opt, w)) = self.packed_nested_select(expr, index) {
-                    if let Some(base_v) = self.get_signal_value_by_name(&base) {
+                    // §13.5, §6.21: a formal or local of the running frame
+                    // shadows a design signal of its name (an `initial`
+                    // block's static `a` beside a function's `a`, #650).
+                    let frame_v = self.frame_get(&base).cloned();
+                    if let Some(base_v) = frame_v.or_else(|| self.get_signal_value_by_name(&base)) {
                         return match lo_opt {
                             Some(lo) => base_v.range_select(lo + w as usize - 1, lo),
                             None => {
