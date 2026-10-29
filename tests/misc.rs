@@ -574,3 +574,5 @@ mod opt_in_relaxations;
 mod parser_gaps_651_658;
 #[path = "misc/macro_empty_actual.rs"]
 mod macro_empty_actual;
+#[path = "misc/package_ref_signature.rs"]
+mod package_ref_signature;
