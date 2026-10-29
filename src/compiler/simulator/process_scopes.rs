@@ -2524,6 +2524,14 @@ impl Simulator {
     /// that collection (§11.4.12). None when the base is not an indexable
     /// collection, in which case there is no bound to install.
     pub(super) fn dollar_bound_for_base(&mut self, base: &Expression) -> Option<i64> {
+        // §7.10.1: an object's queue is stored under its handle, not the
+        // source spelling (`list.contents`). Resolve that store before
+        // looking up the last index, including for a class-handle formal.
+        if let Some(n) = self.expr_assoc_name(base) {
+            if self.module.dynamic_arrays.contains(&n) {
+                return Some(self.get_queue_size(&n) as i64 - 1);
+            }
+        }
         let n = match &base.kind {
             ExprKind::Ident(h) => Some(self.resolve_hier_name(h)),
             _ => self.flat_member_name(base).map(std::borrow::Cow::Owned),
@@ -2639,6 +2647,21 @@ impl Simulator {
                     e.span,
                 )
             }
+            // §7.10.1/§11.4.12: the queue select may be the receiver of
+            // a property write (`list.contents[$].flags = v`). The scan
+            // above detects it; descend here too so the bound is installed
+            // before the assignment paths evaluate the object handle.
+            ExprKind::MemberAccess { expr, member } => Expression::new(
+                ExprKind::MemberAccess {
+                    expr: Box::new(self.resolve_dollar_in_lvalue(expr)),
+                    member: member.clone(),
+                },
+                e.span,
+            ),
+            ExprKind::Paren(expr) => Expression::new(
+                ExprKind::Paren(Box::new(self.resolve_dollar_in_lvalue(expr))),
+                e.span,
+            ),
             _ => e.clone(),
         }
     }
