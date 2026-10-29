@@ -910,3 +910,5 @@ mod static_spec_actual_lexical;
 mod virtual_named_class_param;
 #[path = "classes/vif_type_param_module_var.rs"]
 mod vif_type_param_module_var;
+#[path = "classes/queue_last_member.rs"]
+mod queue_last_member;
