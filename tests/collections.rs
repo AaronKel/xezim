@@ -214,3 +214,6 @@ mod assoc_coll_rows;
 mod dyn_rows_copy_595;
 #[path = "collections/dyn_row_print_order_597.rs"]
 mod dyn_row_print_order_597;
+
+#[path = "collections/row_of_2d_array_assign.rs"]
+mod row_of_2d_array_assign;
