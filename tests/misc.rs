@@ -560,3 +560,5 @@ mod config_declaration_603;
 mod sva_delay_count_609;
 #[path = "misc/cover_bin_with_611.rs"]
 mod cover_bin_with_611;
+#[path = "misc/restrict_property_614.rs"]
+mod restrict_property_614;
