@@ -595,3 +595,5 @@ mod package_net_602;
 mod package_net_kinds_610;
 #[path = "types/unit_wildcard_import_order_620.rs"]
 mod unit_wildcard_import_order_620;
+#[path = "types/nonzero_formal_bitselect_650.rs"]
+mod nonzero_formal_bitselect_650;
