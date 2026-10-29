@@ -1013,10 +1013,9 @@ impl Simulator {
         for r in ranges {
             match r {
                 ConstraintRange::Value(e) => {
-                    if let Some(nm) = self.array_operand_name(e) {
-                        for i in 0..self.get_queue_size(&nm) {
-                            if let Some(ev) =
-                                self.get_signal_value_by_name(&format!("{}[{}]", nm, i))
+                    if let Some(keys) = self.inside_operand_keys(e) {
+                        for key in keys {
+                            if let Some(ev) = self.get_signal_value_by_name(&key)
                                 && let Some(raw) = ev.to_u64()
                             {
                                 let b = Bound {

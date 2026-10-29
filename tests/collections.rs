@@ -220,3 +220,5 @@ mod row_of_2d_array_assign;
 
 #[path = "collections/conditional_aggregate_659.rs"]
 mod conditional_aggregate_659;
+#[path = "collections/inside_associative_values.rs"]
+mod inside_associative_values;
