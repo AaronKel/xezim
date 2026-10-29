@@ -57,6 +57,16 @@ how to use them together, see the [user guide](user-guide.md).
 | `--xtrace-scope <hier>` | Restrict the XTrace dump to signals under `<hier>` (repeatable) |
 | `--relax-implicit-static` | Accept `int x = ...;` inside a static task/function (§6.21) with a warning instead of an error — for third-party sources you cannot edit |
 | `--relax-driver-conflicts` | Report a variable with conflicting drivers — two continuous assigns, a continuous assign plus procedural writes, or an `always_comb`/`always_latch`/`always_ff` variable also written by another process (§6.5, §9.2.2) — as a warning instead of an error, so existing designs (e.g. an `initial` block that initializes an `always_ff` register) still run |
+| `--relax-duplicate-decls` | Ignore a second declaration of a name in a task, function, class method or `begin`/`fork` block, keeping the first's type and initializer (§3.13), with a warning — for sources written against tools that accept it |
+| `--relax-enum-no-base` | Read `enum [N:0] {...}`, a packed dimension with no base type, as `enum bit [N:0]` (§6.19), with a warning — for sources written against tools that accept it |
+| `--relax-static-const` | Read `static const` / `automatic const` in a task, function or block as `const static` (§6.20.6), with a warning — for sources written against tools that accept it |
+| `--relax-event-this` | Read `@this.ev` without parentheses as `@(this.ev)` (§9.4.2), with a warning — for sources written against tools that accept it |
+| `--relax-casex-inside` | Read `casex (e) inside` and `casez (e) inside` as `case (e) inside` (§12.5.4), with a warning — for sources written against tools that accept it |
+| `--relax-macro-space` | Read white space between a backtick and a macro or directive name (`` ` NAME ``) as none (§22.5.1), with a warning — for sources written against tools that accept it |
+| `--relax-nul-bytes` | Read a NUL byte in the source as white space (§5.3), with a warning — for sources written against tools that accept it |
+| `--relax-cross-hier-item` | Accept a hierarchical reference as a cross item (`cross vif.mode, cp;`), with an implicit coverpoint (§19.6), with a warning — for sources written against tools that accept it |
+| `--keywords <ver>` | Keyword set outside `` `begin_keywords `` regions (§22.14): `1364-1995`, `1364-2001`, `1364-2005`, `1800-2005` … `1800-2023`, each also with `-noconfig`; an explicit region still wins |
+| `--no-config-keywords` | Read the ten configuration keywords (`instance`, `cell`, `use`, `library`, …) as names outside `` `begin_keywords `` regions |
 | `--error-exit` | Exit nonzero if any `$error` was reported (`$fatal` always does) |
 | `--code-coverage[=<kinds>]` | Collect code coverage: `stmt`, `branch`, `toggle` (comma-separated) or `all` (the default). Results go to `xezim_cov.json` next to the functional coverage; `--verbose` adds a per-instance summary. See the [coverage guide](coverage-guide.md#code-coverage) |
 | `--code-coverage-scope=<path>[,<path>...]` | Only cover these instance subtrees (`tb.dut`) and packages (repeatable) |
@@ -94,6 +104,16 @@ unless noted.
 | `XEZIM_COMPILE_PHASES=1` | Report detailed simulator compilation phase timings |
 | `XEZIM_ALLOW_IMPLICIT_STATIC=1` | Same as `--relax-implicit-static` |
 | `XEZIM_RELAX_DRIVER_CONFLICTS=1` | Same as `--relax-driver-conflicts` |
+| `XEZIM_RELAX_DUPLICATE_DECLS=1` | Same as `--relax-duplicate-decls` |
+| `XEZIM_RELAX_ENUM_NO_BASE=1` | Same as `--relax-enum-no-base` |
+| `XEZIM_RELAX_STATIC_CONST=1` | Same as `--relax-static-const` |
+| `XEZIM_RELAX_EVENT_THIS=1` | Same as `--relax-event-this` |
+| `XEZIM_RELAX_CASEX_INSIDE=1` | Same as `--relax-casex-inside` |
+| `XEZIM_RELAX_MACRO_SPACE=1` | Same as `--relax-macro-space` |
+| `XEZIM_RELAX_NUL_BYTES=1` | Same as `--relax-nul-bytes` |
+| `XEZIM_RELAX_CROSS_HIER_ITEM=1` | Same as `--relax-cross-hier-item` |
+| `XEZIM_KEYWORDS=<ver>` | Same as `--keywords <ver>` |
+| `XEZIM_NO_CONFIG_KEYWORDS=1` | Same as `--no-config-keywords` |
 | `XEZIM_PROFILE_REPORT=1` | Same as `--profile` |
 | `XEZIM_VERBOSE=1` | Same as `--verbose` (for scripts that grep `[PHASE]`/`[PROF]` lines without adding a flag) |
 | `XEZIM_CODE_COVERAGE=<kinds>` | Same as `--code-coverage=<kinds>`; the flag wins |

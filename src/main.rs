@@ -227,6 +227,16 @@ fn print_usage() {
                    another process; §6.5, §9.2.2) as a warning instead of an
                    error. Also enabled by XEZIM_RELAX_DRIVER_CONFLICTS=1."
     );
+    for f in sv_parser::relax_flags() {
+        eprintln!("  --relax-{}  Accept, with a warning: {}.", f.name, f.help);
+        eprintln!("                   Also enabled by {}=1.", f.env);
+    }
+    eprintln!("  --keywords <ver> Keyword set outside `begin_keywords` regions (§22.14):");
+    eprintln!("                   1364-1995 ... 1800-2023, each also with -noconfig.");
+    eprintln!("                   Also XEZIM_KEYWORDS=<ver>.");
+    eprintln!("  --no-config-keywords  Read the configuration keywords (`instance`, `cell`,");
+    eprintln!("                   `use`, ...) as names outside `begin_keywords` regions.");
+    eprintln!("                   Also XEZIM_NO_CONFIG_KEYWORDS=1.");
     eprintln!("  --code-coverage[=<kinds>]  Collect code coverage: <kinds> is a comma list of");
     eprintln!("                   stmt, branch, toggle (or all, the default). Counts go to");
     eprintln!("                   xezim_cov.json (XEZIM_COV_DB) with the functional coverage;");
@@ -618,6 +628,35 @@ fn push_plus_libext(arg: &str, lib_exts: &mut Option<Vec<String>>) {
         if !e.is_empty() {
             list.push(e.to_string());
         }
+    }
+}
+
+/// The opt-in parser relaxations (`--relax-<name>`, one per
+/// `sv_parser::RelaxFlag`), `--no-config-keywords` and `--keywords=<ver>`
+/// (#608, #622-#629). True when `flag` is one of them.
+fn handle_relax_flag(flag: &str) -> bool {
+    if let Some(name) = flag.strip_prefix("--relax-")
+        && let Some(f) = sv_parser::relax_flags().into_iter().find(|f| f.name == name)
+    {
+        f.set(true);
+        return true;
+    }
+    if flag == "--no-config-keywords" {
+        sv_parser::lexer::scanner::set_no_config_keywords(true);
+        return true;
+    }
+    if let Some(v) = flag.strip_prefix("--keywords=") {
+        set_keywords(v);
+        return true;
+    }
+    false
+}
+
+/// `--keywords <version>`: the §22.14 keyword set outside `begin_keywords`.
+fn set_keywords(version: &str) {
+    if let Err(e) = sv_parser::lexer::scanner::set_default_keywords(version) {
+        eprintln!("Error: --keywords: {e}");
+        std::process::exit(1);
     }
 }
 
@@ -1046,6 +1085,14 @@ fn process_command_file(
                     push_plus_define(t, defines);
                 }
                 _ if handle_gls_flag(t) => {}
+                _ if handle_relax_flag(t) => {}
+                "--keywords" => {
+                    i += 1;
+                    let v = toks
+                        .get(i)
+                        .ok_or_else(|| format!("--keywords requires a version (in args file '{}')", path))?;
+                    set_keywords(v);
+                }
                 // `--module-timescale <v>` / `--module-timescale=<v>` inside an
                 // args file (a customer args file used the `=` form; it was
                 // silently ignored and every no-`timescale module fell back to
@@ -2345,6 +2392,17 @@ fn run_main() -> i32 {
                 xezim::compiler::simulator::set_no_timing_checks(true);
             }
             _ if handle_gls_flag(arg) => {}
+            _ if handle_relax_flag(arg) => {}
+            "--keywords" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => set_keywords(v),
+                    None => {
+                        eprintln!("Error: --keywords requires a version (IEEE 1800-2023 §22.14)");
+                        std::process::exit(1);
+                    }
+                }
+            }
             _ if arg.starts_with('+') => {
                 // `+X_WARN` is both a plusarg (so `$test$plusargs` can see it)
                 // and the switch itself — this arm runs before the explicit
