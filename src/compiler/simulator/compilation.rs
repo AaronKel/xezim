@@ -568,7 +568,37 @@ impl Simulator {
                     .collect::<Vec<_>>()
             })
             .collect();
+        // §6.8 / §8.9: a package class is listed under `pkg::C` and `C`.
+        // Its initializer runs once, and every spelling's cell holds the
+        // result. Keyed by declaration (name, property, initializer span) so
+        // cached designs, which rebuild separate Arcs, dedupe too.
+        let decl_of =
+            |classes: &HashMap<String, Arc<crate::compiler::elaborate::ElaboratedClass>>,
+             cn: &String,
+             prop: &String,
+             init: &Expression| {
+                let name = classes
+                    .get(cn)
+                    .map_or_else(|| cn.clone(), |cd| cd.name.clone());
+                (name, prop.clone(), init.span.start, init.span.end)
+            };
+        let mut spellings: HashMap<(String, String, usize, usize), Vec<String>> =
+            HashMap::default();
+        for (cn, prop, init) in &static_call_inits {
+            spellings
+                .entry(decl_of(&self.module.classes, cn, prop, init))
+                .or_default()
+                .push(cn.clone());
+        }
         for (cn, prop, init) in static_call_inits {
+            let decl = decl_of(&self.module.classes, &cn, &prop, &init);
+            let Some(names) = spellings.remove(&decl) else {
+                continue;
+            };
+            // Run under the class's own name when it is registered: other
+            // static cells the initializer writes (`m_policy_names[...]` in
+            // uvm_reg_field) are read through that spelling.
+            let cn = if names.contains(&decl.0) { decl.0 } else { cn };
             // A parameterized class's static initializers must NOT run here
             // with no active specialization (`current_spec` is None at
             // startup). Doing so collapses every value specialization
@@ -605,6 +635,29 @@ impl Simulator {
                 }
                 _ => (false, Vec::new()),
             };
+            // Seed before evaluating: a constructor or initializer function
+            // can read this static while it still holds its default. Unseeded,
+            // the lazy read ran the initializer again (a second constructor
+            // call, whose own read of the handle saw x).
+            let seed = self
+                .module
+                .classes
+                .get(&cn)
+                .and_then(|cd| cd.properties.get(&prop))
+                .map(|p| p.value.clone())
+                .unwrap_or_else(|| Value::zero(32));
+            let cells: Vec<String> = names
+                .iter()
+                .flat_map(|n| {
+                    std::iter::once(format!("{}::{}", n, prop))
+                        .chain(self.static_prop_key(n, &prop))
+                })
+                .collect();
+            for key in &cells {
+                if !self.class_statics.contains_key(key) {
+                    self.class_statics.insert(key.clone(), seed.clone());
+                }
+            }
             let v = if let (Some(kind), true) = (cont_kind, is_new) {
                 // §15.3.1/§15.4.1: the constructor argument is the initial
                 // key count / the bound — allocating a zero-key semaphore
@@ -631,7 +684,9 @@ impl Simulator {
                 self.class_context_stack.pop();
                 v
             };
-            self.class_statics.insert(format!("{}::{}", cn, prop), v);
+            for key in cells {
+                self.class_statics.insert(key, v.clone());
+            }
         }
 
         // §6.8/§8.25: a referenced specialization's static initialization

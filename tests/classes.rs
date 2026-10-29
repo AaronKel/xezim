@@ -762,6 +762,8 @@ mod class_in_module_instance;
 mod static_task_bare_call;
 #[path = "classes/static_class_event.rs"]
 mod static_class_event;
+#[path = "classes/static_new_initializer_once.rs"]
+mod static_new_initializer_once;
 #[path = "classes/member_shadows_package_var.rs"]
 mod member_shadows_package_var;
 
