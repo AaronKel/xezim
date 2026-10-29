@@ -872,3 +872,5 @@ mod super_call_formal_widths_593;
 mod randomize_foreach_empty_dyn_599;
 #[path = "classes/nested_class_out_of_block_617.rs"]
 mod nested_class_out_of_block_617;
+#[path = "classes/nba_member_root_613.rs"]
+mod nba_member_root_613;
