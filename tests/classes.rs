@@ -914,3 +914,5 @@ mod vif_type_param_module_var;
 mod queue_last_member;
 #[path = "classes/package_constructor_scope.rs"]
 mod package_constructor_scope;
+#[path = "classes/class_ref_signature.rs"]
+mod class_ref_signature;
