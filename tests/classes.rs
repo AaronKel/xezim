@@ -874,3 +874,5 @@ mod randomize_foreach_empty_dyn_599;
 mod nested_class_out_of_block_617;
 #[path = "classes/nba_member_root_613.rs"]
 mod nba_member_root_613;
+#[path = "classes/relax_static_out_of_block_621.rs"]
+mod relax_static_out_of_block_621;
