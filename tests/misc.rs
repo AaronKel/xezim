@@ -570,3 +570,5 @@ mod macro_usage_before_paste_616;
 mod undef_followed_by_text_619;
 #[path = "misc/opt_in_relaxations.rs"]
 mod opt_in_relaxations;
+#[path = "misc/parser_gaps_651_658.rs"]
+mod parser_gaps_651_658;
