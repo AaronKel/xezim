@@ -345,6 +345,28 @@ impl Simulator {
     /// `e` is not recognizably an event reference.
     pub(super) fn event_triggered_now(&mut self, e: &Expression) -> Option<bool> {
         let now = self.time;
+        // `e.triggered` on a subroutine's local `event e;`: its own
+        // activation's stamp (see `fire_named_event`), not the name's.
+        if let ExprKind::Ident(h) = &e.kind
+            && h.path.len() == 1
+            && h.path[0].selects.is_empty()
+        {
+            let n = h.path[0].name.name.as_str();
+            if self.module.events.contains(n)
+                && self.local_stack.iter().any(|f| f.contains_key(n))
+                && !self
+                    .signal_name_to_id
+                    .contains_key(self.resolve_event_key(n).as_str())
+            {
+                let k = self.unbacked_event_key(n);
+                return Some(self.event_triggered_time.get(k.1.as_str()) == Some(&now));
+            }
+        }
+        // `h.evs[i].triggered` — an element of a class event array.
+        if let Some(k) = self.expr_instance_event_elem(e) {
+            let stamp = Self::instance_event_stamp_key(&k);
+            return Some(self.event_triggered_time.get(stamp.as_str()) == Some(&now));
+        }
         // `h.ce.triggered` / `this.ce.triggered` — a per-instance class event.
         if let Some(k) = self.expr_handle_event_field(e) {
             let stamp = Self::instance_event_stamp_key(&k);
@@ -424,8 +446,21 @@ impl Simulator {
     /// module-scope named-event path (`signal_table`-backed). Per SV §8.16 a
     /// class member name shadows a same-named module signal inside a method,
     /// so the this-relative field wins when present.
+    /// §6.21: does a local of the running method (`event e;` in a task)
+    /// shadow the class member `name`? Only the method's own frames count,
+    /// not its callers'.
+    pub(super) fn method_local_shadows(&self, name: &str) -> bool {
+        let base = self.method_local_base.last().copied().unwrap_or(0);
+        self.local_stack
+            .get(base..)
+            .is_some_and(|frames| frames.iter().any(|f| f.contains_key(name)))
+    }
+
     pub(super) fn resolve_this_event_field(&self, name: &str) -> Option<(usize, String)> {
         let handle = self.this_stack.last().copied().flatten()?;
+        if self.method_local_shadows(name) {
+            return None;
+        }
         let inst = self.heap.get(handle).and_then(|o| o.as_ref())?;
         if inst.properties.contains_key(name) && self.class_prop_is_event(handle, name) {
             Some((handle, name.to_string()))
@@ -584,7 +619,9 @@ impl Simulator {
         event: &EventControl,
     ) -> Option<Expression> {
         let expr = Self::event_control_single_expr(event)?;
-        let on_class_prop = if let Some(fname) = self.event_control_field_name(event) {
+        let on_class_prop = if let Some(fname) = self.event_control_field_name(event)
+            && !self.method_local_shadows(&fname)
+        {
             self.this_stack
                 .last()
                 .copied()
@@ -869,6 +906,83 @@ impl Simulator {
         self.class_prop_is_event(key.0, &key.1).then_some(key)
     }
 
+    /// §15.5, §7.4: an element of a class event-ARRAY property (`evs[i]` in a
+    /// method of its class, `this.evs[i]`, `h.evs[i]`), keyed `(handle,
+    /// "evs[i]")` with the index evaluated now. Waits, triggers and
+    /// `.triggered` all use this key. `None` for anything else, decided by
+    /// the expression's shape before anything is evaluated.
+    pub(super) fn expr_instance_event_elem(&mut self, e: &Expression) -> Option<(usize, String)> {
+        let mut e = e;
+        while let ExprKind::Paren(inner) = &e.kind {
+            e = inner;
+        }
+        let (base, index): (std::borrow::Cow<'_, Expression>, &Expression) = match &e.kind {
+            ExprKind::Index { expr, index } => (std::borrow::Cow::Borrowed(&**expr), &**index),
+            ExprKind::Ident(h)
+                if h.root.is_none()
+                    && h.path.last().is_some_and(|s| s.selects.len() == 1)
+                    && h.path[..h.path.len() - 1]
+                        .iter()
+                        .all(|s| s.selects.is_empty()) =>
+            {
+                let mut b = h.clone();
+                b.path.last_mut()?.selects.clear();
+                b.cached_signal_id = std::cell::Cell::new(None);
+                b.cached_resolved_name = std::cell::OnceCell::new();
+                let base = Expression::new(ExprKind::Ident(b), e.span);
+                (std::borrow::Cow::Owned(base), &h.path.last()?.selects[0])
+            }
+            _ => return None,
+        };
+        let (handle, field) = match &base.kind {
+            ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
+                let n = h.path[0].name.name.as_str();
+                if self.local_stack.last().is_some_and(|l| l.contains_key(n)) {
+                    return None;
+                }
+                (self.this_stack.last().copied().flatten()?, n.to_string())
+            }
+            _ => self.expr_instance_prop_field_general(&base)?,
+        };
+        if !self.class_event_array_prop(handle, &field) {
+            return None;
+        }
+        let iv = self.eval_expr(index);
+        let i = iv.to_i64().filter(|_| !iv.has_xz())?;
+        Some((handle, format!("{}[{}]", field, i)))
+    }
+
+    /// Is `field` a fixed-size array of `event` declared by the class of
+    /// object `handle` or an ancestor?
+    pub(super) fn class_event_array_prop(&self, handle: usize, field: &str) -> bool {
+        let Some(inst) = self.heap.get(handle).and_then(|o| o.as_ref()) else {
+            return false;
+        };
+        let mut cur = Some(inst.class_name.as_str());
+        let mut hops = 0;
+        while let Some(cn) = cur {
+            let Some(cd) = self.module.classes.get(cn) else {
+                return false;
+            };
+            if let Some(dt) = cd.property_types.get(field) {
+                return matches!(
+                    dt,
+                    DataType::Simple {
+                        kind: crate::ast::types::SimpleType::Event,
+                        ..
+                    }
+                ) && (cd.array_properties.contains_key(field)
+                    || cd.array_nd_properties.contains_key(field));
+            }
+            hops += 1;
+            if hops > 64 {
+                return false;
+            }
+            cur = cd.extends.as_deref();
+        }
+        false
+    }
+
     /// Resolve a property through a nested or selected object receiver.
     /// Classification is separate so ordinary properties cannot accidentally
     /// fall through to the unsuspendable event fallback.
@@ -1136,6 +1250,23 @@ impl Simulator {
     /// waiters arm on) and stamp `event_triggered_time` for `.triggered`.
     /// Shared by the blocking `-> e` statement and the NBA-region flush of
     /// deferred `->> e` triggers.
+    /// The `instance_event_waiters` key of a declared event that has no
+    /// signal (a subroutine's local `event e;`): handle 0 and the event's
+    /// canonical name, which no class property spells, qualified by the
+    /// generation of the frame declaring it so that two activations' locals
+    /// stay apart. A forked child shares its parent's frame generations.
+    pub(super) fn unbacked_event_key(&self, canon: &str) -> (usize, String) {
+        let fgen = self
+            .local_stack
+            .iter()
+            .rposition(|f| f.contains_key(canon))
+            .and_then(|i| self.local_gen_stack.get(i));
+        match fgen {
+            Some(g) => (0, format!("\u{3}ev#{}@{}", canon, g)),
+            None => (0, format!("\u{3}ev#{}", canon)),
+        }
+    }
+
     pub(super) fn fire_named_event(&mut self, raw_name: &str) {
         // §15.5.5: resolve the live handle at delivery, before consulting the
         // cache. Rebinding an alias must never reuse its previous object's plan.
@@ -1143,6 +1274,9 @@ impl Simulator {
         if canon == Self::EVENT_NULL_KEY {
             return;
         }
+        let unbacked = (!self.instance_event_waiters.is_empty()
+            || self.local_stack.iter().any(|f| f.contains_key(canon)))
+        .then(|| self.unbacked_event_key(canon));
         if self.in_pre_process_settle {
             // §9.2.2.2: waiters register during the time-0 active region.
             // Keep the name, so deferred delivery follows the existing rules.
@@ -1179,6 +1313,27 @@ impl Simulator {
         }
         // Unregistered and dynamic names still have a .triggered stamp.
         self.event_triggered_time.mark(event, self.time);
+        // §15.5: wake `@e` on an event with no signal (a subroutine's local
+        // `event e;`), parked by name in `run_process_stmts`.
+        if plan.targets.is_empty()
+            && let Some(key) = unbacked
+        {
+            let now = self.time;
+            // Its `.triggered` stamp, kept apart per activation like the wait.
+            self.event_triggered_time.insert(key.1.clone(), now);
+            let mut woken = Vec::new();
+            self.instance_event_waiters.retain(|w| {
+                if w.key.contains(&key) {
+                    woken.push((w.pid, w.continuation.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            for (pid, cont) in woken {
+                self.event_queue.schedule(now, pid, cont);
+            }
+        }
         // Preserve scheduler, force, VPI and combinational checkpoints. A
         // listener-only guard would skip work unrelated to this event's fanout.
         self.settle_combinatorial();

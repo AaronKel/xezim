@@ -6189,6 +6189,18 @@ impl Simulator {
                 target,
                 ..
             } => {
+                // §15.5: `-> h.evs[i]` — an element of a class event array.
+                if let Some(key) = target
+                    .as_deref()
+                    .and_then(|t| self.expr_instance_event_elem(t))
+                {
+                    if *nonblocking {
+                        self.pending_nba_instance_triggers.push(key);
+                    } else {
+                        self.fire_instance_event(key);
+                    }
+                    return;
+                }
                 if *nonblocking {
                     // §15.5.2: defer to the NBA region of the current slot.
                     // Resolve a class-field instance key NOW (while `this` is
