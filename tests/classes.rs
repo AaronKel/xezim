@@ -918,3 +918,5 @@ mod queue_last_member;
 mod package_constructor_scope;
 #[path = "classes/class_ref_signature.rs"]
 mod class_ref_signature;
+#[path = "classes/package_class_constraint.rs"]
+mod package_class_constraint;
