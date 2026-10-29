@@ -26,8 +26,8 @@ use xezim::simulate;
 
 #[test]
 fn rand_wide_elem_draw_sum() {
-    let sim = simulate(include_str!("rand_wide_elem_draw_sum_588.sv"), 100)
-        .expect("simulate failed");
+    let sim =
+        simulate(include_str!("rand_wide_elem_draw_sum_588.sv"), 100).expect("simulate failed");
     let failures = sim
         .get_signal("failures")
         .or_else(|| sim.get_signal("tb_top.failures"))
@@ -42,4 +42,39 @@ fn rand_wide_elem_draw_sum() {
         sim.output.iter().any(|o| o.message.trim() == "TEST_PASS"),
         "SVTEST_PASSFAIL must print TEST_PASS"
     );
+}
+
+/// §18.5.8.2: `a.sum() == K` over elements of 127 bits or more, whose domain
+/// cap is i128::MAX, solves: the distributor's bounds saturate instead of
+/// overflowing (a panic with overflow checks, an infeasible target without).
+#[test]
+fn sum_over_elements_of_128_bits_and_more() {
+    let out: Vec<String> = simulate(
+        r#"class c;
+  rand bit [127:0] a[];
+  rand bit [145:0] b[];
+  constraint k { a.size() == 4; a.sum() == 5; b.size() == 3; b.sum() == 7; }
+endclass
+module t;
+  initial begin
+    c x = new;
+    bit [127:0] sa; bit [145:0] sb;
+    if (!x.randomize()) $display("R fail");
+    else begin
+      foreach (x.a[i]) sa += x.a[i];
+      foreach (x.b[i]) sb += x.b[i];
+      $display("R %0d %0d %0d %0d", x.a.size(), sa, x.b.size(), sb);
+    end
+  end
+endmodule
+"#,
+        100,
+    )
+    .expect("simulate")
+    .output
+    .iter()
+    .map(|l| l.message.clone())
+    .filter(|m| m.starts_with("R "))
+    .collect();
+    assert_eq!(out, ["R 4 5 3 7"]);
 }

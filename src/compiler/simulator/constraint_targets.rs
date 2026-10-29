@@ -2079,7 +2079,7 @@ impl Simulator {
                 // `to_u64` would count only the low word and the residual
                 // handed to the free elements would be wrong.
                 let v = self.read_coll_elem(k).map(|v| v.to_u128()).unwrap_or(0);
-                fixed_sum += v as i128;
+                fixed_sum = fixed_sum.saturating_add(v as i128);
             } else {
                 free.push(k.clone());
             }
@@ -2088,12 +2088,15 @@ impl Simulator {
             return;
         }
         let n = free.len() as i128;
-        let want = target - fixed_sum;
-        if want < n * lo || want > n * hi {
+        let want = target.saturating_sub(fixed_sum);
+        // An element of 127 bits or more has the domain cap i128::MAX, so
+        // `n * hi` overflows: the bounds saturate, which only says the true
+        // bound is further out still.
+        if want < n.saturating_mul(lo) || want > n.saturating_mul(hi) {
             return; // infeasible — leave for the trial checker to reject
         }
-        let cap = hi - lo;
-        let mut rem = want - n * lo; // 0 ..= n*cap
+        let cap = hi.saturating_sub(lo);
+        let mut rem = want.saturating_sub(n.saturating_mul(lo)); // 0 ..= n*cap
         let mut order: Vec<usize> = (0..free.len()).collect();
         for i in (1..order.len()).rev() {
             let j = self.cur_rng().gen_range(0..=i);
@@ -2105,7 +2108,9 @@ impl Simulator {
                 rem
             } else {
                 // Keep the residual absorbable by the still-unassigned elements.
-                let lo_b = (rem - remaining_after * cap).max(0);
+                let lo_b = rem
+                    .saturating_sub(remaining_after.saturating_mul(cap))
+                    .max(0);
                 let hi_b = rem.min(cap);
                 if hi_b <= lo_b {
                     lo_b
