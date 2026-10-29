@@ -2498,6 +2498,37 @@ impl Simulator {
                         .or(self.current_spec.as_ref())
                         .cloned()
                         .or_else(|| self.derive_static_spec(start_class, &cname));
+                    // §8.25 / §13.5: the actuals of `D#(X)::m(cb)` are
+                    // evaluated in the caller's scope, but the callee's
+                    // specialization is already active. A static of the
+                    // caller's own parameterized class (`cb` read inside
+                    // `C#(int)`) keys by the caller's specialization, the
+                    // innermost enclosing one of `cname`; keyed generically,
+                    // the callee received null.
+                    let active_spec = match active_spec {
+                        Some((b, s))
+                            if spec_override.is_none()
+                                && b != cname
+                                && self.class_is_parameterized(&cname)
+                                && !self.class_extends(&self.spec_entry_cow(&b, &s), &cname)
+                                && self
+                                    .class_context_stack
+                                    .last()
+                                    .and_then(|c| c.as_deref())
+                                    .is_some_and(|ctx| self.class_is_a(ctx, &cname)) =>
+                        {
+                            self.spec_scope_stack
+                                .iter()
+                                .rev()
+                                .find(|(sb, ss)| {
+                                    *sb == cname
+                                        || self.class_extends(&self.spec_entry_cow(sb, ss), &cname)
+                                })
+                                .cloned()
+                                .or(Some((b, s)))
+                        }
+                        other => other,
+                    };
                     let key = match active_spec {
                         Some((base, sig))
                             if (base == cname
