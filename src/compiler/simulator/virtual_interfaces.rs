@@ -130,7 +130,7 @@ impl Simulator {
                             .map(|v| v.0),
                     );
                 }
-                None
+                self.nested_iface_operand(e)
             }
             ExprKind::Ident(h) if h.path.len() == 1 => {
                 let raw = &h.path[0].name.name;
@@ -255,6 +255,7 @@ impl Simulator {
                     return Some(Some(h.path[1].name.name.clone()));
                 }
                 self.vif_operand_obj_prop(&h.path[0].name.name, &h.path[1].name.name)
+                    .or_else(|| self.nested_iface_operand(e))
             }
             ExprKind::Ident(h) if h.path.len() > 2 => {
                 // `e.d.vif` — a NESTED receiver spelled as one hierarchical
@@ -274,7 +275,7 @@ impl Simulator {
                         return self.vif_operand_handle_prop(oh, &prop);
                     }
                 }
-                None
+                self.nested_iface_operand(e)
             }
             ExprKind::MemberAccess { expr, member } => {
                 // §8.26/§25.10: `C#(T)::svif` — a static virtual interface of a
@@ -303,7 +304,9 @@ impl Simulator {
                         {
                             return Some(Some(member.name.clone()));
                         }
-                        return self.vif_operand_obj_prop(&bh.path[0].name.name, &member.name);
+                        return self
+                            .vif_operand_obj_prop(&bh.path[0].name.name, &member.name)
+                            .or_else(|| self.nested_iface_operand(e));
                     }
                 }
                 // `this.svif` parses as `MemberAccess { expr: This, .. }`, not
@@ -336,10 +339,28 @@ impl Simulator {
                         return self.vif_operand_handle_prop(oh, &member.name);
                     }
                 }
-                None
+                self.nested_iface_operand(e)
             }
             _ => None,
         }
+    }
+
+    /// `vif_operand` for a hierarchical name of a nested interface instance
+    /// (`o.leaf`, `o.arr[1]`, #612): unless its head is a data object other
+    /// than an interface instance, which makes it a member select.
+    fn nested_iface_operand(&self, e: &Expression) -> Option<Option<String>> {
+        let mut cur = e;
+        let head = loop {
+            match &cur.kind {
+                ExprKind::Ident(h) => break h.path.first()?.name.name.as_str(),
+                ExprKind::MemberAccess { expr, .. } | ExprKind::Index { expr, .. } => cur = expr,
+                _ => return None,
+            }
+        };
+        if !self.is_interface_instance(head) && self.names_data_object(head) {
+            return None;
+        }
+        self.nested_iface_instance(e).map(Some)
     }
 
     /// `obj.prop` classification for `vif_operand` — engages only when the
@@ -1625,7 +1646,10 @@ impl Simulator {
                         }
                     }
                 }
-                if let Some(p) = self.iface_instance_by_path(rvalue) {
+                if let Some(p) = self
+                    .iface_instance_by_path(rvalue)
+                    .or_else(|| self.nested_iface_instance(rvalue))
+                {
                     return Some(p);
                 }
                 let oh = self.eval_handle_expr(expr).unwrap_or(0);
@@ -1634,7 +1658,9 @@ impl Simulator {
                     .map(|(b, _)| b.clone())
             }
             // `a.b.d` / `g[0].a.d` — a nested interface instance.
-            ExprKind::Ident(_) => self.iface_instance_by_path(rvalue),
+            ExprKind::Ident(_) => self
+                .iface_instance_by_path(rvalue)
+                .or_else(|| self.nested_iface_instance(rvalue)),
             // `INT[i]` — an element of an interface-instance array
             // (`interrupt_if INT[N]()`). Bind to the element's name so
             // `vif.member` resolves to `INT[<i>].member` (interrupt examples set
@@ -1646,7 +1672,8 @@ impl Simulator {
                         return Some(format!("{}[{}]", h.path[0].name.name, idx));
                     }
                 }
-                None
+                // `o.arr[1]`: an element of an array nested in an instance.
+                self.nested_iface_instance(rvalue)
             }
             _ => None,
         }
@@ -1659,7 +1686,79 @@ impl Simulator {
     /// modport view), so `px.vif = a.d` bound nothing and every call through
     /// the handle returned at once.
     pub(super) fn iface_instance_by_path(&self, e: &Expression) -> Option<String> {
+        let segs = self.hier_segments(e)?;
+        self.iface_instance_by_segments(segs)
+    }
+
+    /// §23.6/§25.9/§25.5 (#612): the interface instance a hierarchical name
+    /// in a virtual-interface position names: an instance nested in another
+    /// (`o.leaf`, `o.arr[1]`), or a modport view of one (`o.leaf.mp`), which
+    /// binds the instance itself. Asked only when the name's last segment
+    /// (or, for a modport view, the one before it) can end the path of an
+    /// interface instance, so an ordinary hierarchical operand costs a set
+    /// lookup.
+    pub(super) fn nested_iface_instance(&self, e: &Expression) -> Option<String> {
+        let (last_is, view_is) = self.nested_iface_gate(e);
+        if !last_is && !view_is {
+            return None;
+        }
         let mut segs = self.hier_segments(e)?;
+        if segs.len() < 2 {
+            return None;
+        }
+        if last_is && let Some(p) = self.iface_instance_by_segments(segs.clone()) {
+            return Some(p);
+        }
+        let mp = segs.pop()?;
+        let inst = self.iface_instance_by_segments(segs.clone()).or_else(|| {
+            (segs.len() == 1 && self.is_interface_instance(&segs[0])).then(|| segs[0].clone())
+        })?;
+        let def = &self
+            .module
+            .instances
+            .iter()
+            .find(|i| i.path == inst)?
+            .def_name;
+        self.module
+            .modport_member_dirs
+            .contains_key(&(def.clone(), mp))
+            .then_some(inst)
+    }
+
+    /// Whether a multi-segment name's last segment, and the one before it,
+    /// can end the path of an interface instance (`nested_iface_instance`).
+    fn nested_iface_gate(&self, e: &Expression) -> (bool, bool) {
+        let mut names: Vec<&str> = Vec::with_capacity(2);
+        let mut cur = e;
+        let mut multi = false;
+        while names.len() < 2 {
+            match &cur.kind {
+                ExprKind::Ident(h) => {
+                    multi |= h.path.len() > 1;
+                    names.extend(h.path.iter().rev().take(2).map(|s| s.name.name.as_str()));
+                    break;
+                }
+                ExprKind::MemberAccess { expr, member } => {
+                    multi = true;
+                    names.push(member.name.as_str());
+                    cur = expr;
+                }
+                ExprKind::Index { expr, .. } => cur = expr,
+                _ => return (false, false),
+            }
+        }
+        if !multi {
+            return (false, false);
+        }
+        let (tails, heads) = self.iface_path_parts();
+        let ends = |n: &&str| tails.contains(*n) || heads.contains(*n);
+        (
+            names.first().is_some_and(ends),
+            names.get(1).is_some_and(ends),
+        )
+    }
+
+    fn iface_instance_by_segments(&self, mut segs: Vec<String>) -> Option<String> {
         if segs.len() < 2 {
             return None;
         }
@@ -3093,6 +3192,10 @@ impl Simulator {
                 return true;
             }
         }
+        // `o.leaf.mp`, `o.arr[1]`: a nested interface instance (#612).
+        if !matches!(self.nested_iface_gate(e), (false, false)) {
+            return true;
+        }
         match &e.kind {
             ExprKind::Ident(h) if h.path.len() == 1 => self.vif_name_possible(&h.path[0].name.name),
             ExprKind::Ident(h) => {
@@ -3156,7 +3259,8 @@ impl Simulator {
     }
 
     /// Every `.`-separated tail of an interface-instance path (the path
-    /// included), and every prefix of one that ends before a `[`.
+    /// included), and every prefix of one that ends before a `[` (with its
+    /// last segment alone).
     pub(super) fn iface_path_parts(&self) -> &(HashSet<String>, HashSet<String>) {
         self.iface_path_parts.get_or_init(|| {
             let mut tails: HashSet<String> = HashSet::default();
@@ -3176,6 +3280,10 @@ impl Simulator {
                         }
                         '[' => {
                             heads.insert(p[..k].to_string());
+                            // The array's own name, for `o.arr[1]` (#612).
+                            if let Some(leaf) = p[..k].rsplit('.').next() {
+                                heads.insert(leaf.to_string());
+                            }
                         }
                         _ => {}
                     }
