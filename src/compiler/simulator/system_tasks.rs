@@ -1577,7 +1577,15 @@ impl Simulator {
                             || self.member_chain_is_string(expr);
                     }
                 }
-                self.string_signals.contains(&*self.resolve_hier_name(h))
+                // A bare name asks the running task frame first: its non-string
+                // formal overrides a string flag another frame left on the name.
+                let name = self.resolve_hier_name(h);
+                let flagged = if h.path.len() == 1 {
+                    self.frame_name_is_string(&name)
+                } else {
+                    self.string_signals.contains(&*name)
+                };
+                flagged
                     || self.class_member_is_string(expr)
                     || self.ident_type_is_string(h, expr)
                     || self.local_struct_member_is_string(h)

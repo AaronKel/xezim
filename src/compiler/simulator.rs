@@ -4590,6 +4590,9 @@ struct DeclShadowFrame {
     frame_gen: u64,
     epoch: u64,
     saves: Vec<DeclShadow>,
+    /// §6.21: fresh names a `string` declaration of this activation added
+    /// to `string_signals`, taken back out when it ends.
+    fresh_strings: Vec<String>,
 }
 
 /// §6.21: the scope of a `begin…end` block that declares variables, opened

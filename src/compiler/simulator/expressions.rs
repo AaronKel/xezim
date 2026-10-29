@@ -5703,7 +5703,9 @@ impl Simulator {
                 // the empty leading bytes and always returned 0.
                 if let ExprKind::Ident(_hier) = &expr.kind {
                     let nm = base_nm.as_deref().unwrap_or("");
-                    if self.string_signals.contains(nm) {
+                    // The running task frame decides for its own formals: a
+                    // string flag another frame left on the name is not it.
+                    if self.frame_name_is_string(nm) {
                         let content = self.eval_expr(expr).sv_string_bytes();
                         let i = self.eval_expr(index).to_u64().unwrap_or(0) as usize;
                         let byte = content.get(i).copied().unwrap_or(0);
