@@ -87,3 +87,53 @@ endmodule
         ]
     );
 }
+
+/// The derived class FORWARDS its own type parameter to the base (`class
+/// fwd_c #(type W = virtual bus_if) extends base_c #(W)`): whether the
+/// inherited `vif` is a virtual interface depends on the specialization.
+#[test]
+fn forwarded_type_param_vif_binds_per_specialization() {
+    const SRC: &str = r#"
+interface bus_if(input bit clk);
+  clocking cb @(posedge clk);
+  endclocking
+endinterface
+class base_c #(type V = virtual bus_if);
+  V vif;
+  function new(V v);
+    vif = v;
+  endfunction
+  virtual task sample(string tag);
+    @vif.cb;
+    $display("T|%s t=%0t clk=%0d", tag, $time, vif.clk);
+  endtask
+endclass
+class fwd_c #(type W = virtual bus_if) extends base_c #(W);
+  function new(W v);
+    super.new(v);
+  endfunction
+endclass
+module top;
+  bit clk = 0;
+  always #5 clk = ~clk;
+  bus_if bus(clk);
+  initial begin
+    fwd_c #() d = new(bus);
+    fwd_c #(virtual bus_if) e = new(bus);
+    fwd_c #(int) i = new(9);
+    $display("T|int vif=%0d", i.vif);
+    d.sample("default");
+    #1 e.sample("explicit");
+    $finish;
+  end
+endmodule
+"#;
+    assert_eq!(
+        t_lines(SRC),
+        [
+            "T|int vif=9",
+            "T|default t=5 clk=1",
+            "T|explicit t=15 clk=1",
+        ]
+    );
+}
