@@ -727,6 +727,8 @@ mod vif_null_compare_this_receiver;
 mod vif_clocking_bare_event;
 #[path = "classes/vif_inherited_type_param.rs"]
 mod vif_inherited_type_param;
+#[path = "classes/class_event_bare_triggered.rs"]
+mod class_event_bare_triggered;
 #[path = "classes/vif_null_compare_indexed_receiver.rs"]
 mod vif_null_compare_indexed_receiver;
 #[path = "classes/vif_return_own_definition_name.rs"]
