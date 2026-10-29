@@ -904,3 +904,5 @@ mod local_event_wait;
 mod static_spec_actual_lexical;
 #[path = "classes/virtual_named_class_param.rs"]
 mod virtual_named_class_param;
+#[path = "classes/vif_type_param_module_var.rs"]
+mod vif_type_param_module_var;
