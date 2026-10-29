@@ -568,3 +568,5 @@ mod sva_local_array_618;
 mod macro_usage_before_paste_616;
 #[path = "misc/undef_followed_by_text_619.rs"]
 mod undef_followed_by_text_619;
+#[path = "misc/opt_in_relaxations.rs"]
+mod opt_in_relaxations;
