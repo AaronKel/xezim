@@ -731,6 +731,8 @@ mod vif_inherited_type_param;
 mod class_event_bare_triggered;
 #[path = "classes/class_event_forever_wait.rs"]
 mod class_event_forever_wait;
+#[path = "classes/string_local_name_leak.rs"]
+mod string_local_name_leak;
 #[path = "classes/vif_null_compare_indexed_receiver.rs"]
 mod vif_null_compare_indexed_receiver;
 #[path = "classes/vif_return_own_definition_name.rs"]

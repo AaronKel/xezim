@@ -1495,6 +1495,7 @@ impl Simulator {
                 frame_gen,
                 epoch: self.nested_run_epoch,
                 saves: Vec::new(),
+                fresh_strings: Vec::new(),
             });
         }
     }
@@ -1512,7 +1513,20 @@ impl Simulator {
         }
         match self.module.var_decl_types.get(name) {
             Some(old) if Self::dt_trivially_equal(old, dt) => return,
-            None if !self.widths.contains_key(name) => return,
+            None if !self.widths.contains_key(name) => {
+                // §6.21: a fresh `string` local still adds its name to the
+                // global `string_signals` set, where a later task's same-named
+                // enum formal read as text (`256 >= 16` compared false). Take
+                // just that flag back when the activation ends.
+                if Self::is_string_data_type(dt)
+                    && !self.string_signals.contains(name)
+                    && let Some(top) = self.decl_shadow_log.last_mut()
+                    && !top.fresh_strings.iter().any(|n| n == name)
+                {
+                    top.fresh_strings.push(name.to_string());
+                }
+                return;
+            }
             _ => {}
         }
         if top.saves.iter().any(|d| d.meta.name == name) {
@@ -1647,6 +1661,9 @@ impl Simulator {
         };
         if frame.epoch != self.nested_run_epoch {
             return;
+        }
+        for n in &frame.fresh_strings {
+            self.string_signals.remove(n);
         }
         self.restore_decl_shadows(frame.saves);
     }
