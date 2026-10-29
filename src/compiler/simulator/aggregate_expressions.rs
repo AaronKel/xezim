@@ -507,7 +507,7 @@ impl Simulator {
         Vec<PackedHop>,
         bool,
     )> {
-        let (mut root, name, mut steps) = self.frame_packed_chain(e)?;
+        let (root, name, steps) = self.frame_packed_chain(e)?;
         if self.module.arrays.contains_key(name)
             || self.module.dynamic_arrays.contains(name)
             || self.module.associative_arrays.contains_key(name)
@@ -519,10 +519,39 @@ impl Simulator {
         // Another task may meanwhile bind a same-named formal of a different
         // type, replacing the shared var_decl_types / packed-element tables.
         // Resolve the active declaration before consulting those tables.
-        let (mut dt, unpacked, _) = self.query_root_decl_type(name)?;
+        // The frame records a local's typedef name only, which is not the
+        // whole type of a packed array of it (`e8_t [1:0] a`), so a type
+        // whose geometry does not fit the cell falls back to the module's
+        // declaration.
+        let (dt, unpacked, _) = self.query_root_decl_type(name)?;
         if !unpacked.is_empty() {
             return None;
         }
+        let (root, steps, hops, two) = self
+            .frame_packed_geometry(dt, root.clone(), name, &steps)
+            .or_else(|| {
+            let dt = self.module.var_decl_types.get(name)?.clone();
+            self.frame_packed_geometry(dt, root, name, &steps)
+        })?;
+        Some((root, name, steps, hops, two))
+    }
+
+    /// `frame_packed_target`'s layout of the selects `steps` of frame
+    /// variable `name` declared `dt`, when it fits the variable's cell.
+    #[allow(clippy::type_complexity)]
+    fn frame_packed_geometry<'e>(
+        &self,
+        mut dt: DataType,
+        mut root: std::borrow::Cow<'e, Expression>,
+        name: &'e str,
+        steps: &[PendingSel<'e>],
+    ) -> Option<(
+        std::borrow::Cow<'e, Expression>,
+        Vec<PendingSel<'e>>,
+        Vec<PackedHop>,
+        bool,
+    )> {
+        let mut steps = steps.to_vec();
         let mut cell = std::borrow::Cow::Borrowed(name);
         // Unpacked structs are stored as individual frame leaves (`req.data`),
         // not as a packed value at `req`. Walk to that leaf, then use the
@@ -556,7 +585,7 @@ impl Simulator {
         if !valid {
             return None;
         }
-        Some((root, name, steps, hops, two))
+        Some((root, steps, hops, two))
     }
 
     /// The packed layout of `dt`: its packed dimensions, outermost first and

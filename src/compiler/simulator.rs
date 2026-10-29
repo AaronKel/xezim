@@ -5887,6 +5887,7 @@ enum MemberSel {
 /// resolves the receiver/property boundary before any index expression is
 /// evaluated, so a chain rooted at no struct-valued class property never
 /// pays for its selects.
+#[derive(Clone, Copy)]
 enum PendingSel<'a> {
     Member(&'a str),
     Index(&'a Expression),
