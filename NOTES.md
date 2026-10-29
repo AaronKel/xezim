@@ -10,6 +10,35 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* A struct formal's packed geometry comes from the active call's
+  declaration, so two suspended tasks with a same-named formal of different
+  struct types no longer read each other's layout (§13.5, PR #630). A
+  packed array of a typedef'd type declared in a task (`e8_t [1:0] a;`)
+  keeps its layout, on both paths.
+* `##N (x)` and `##pkg::N (x)` read `N` as the cycle-delay count, not a
+  call (§16.7, #609); a package's nets are nets: supply nets read their
+  value and a `wand` resolves its drivers (§26.2, §6.6, #610); a coverpoint
+  bin's `with (expr)` filter keeps only the values it admits (§19.5.1.1,
+  #611); `restrict property` is read and set aside (§16.14.4, #614); `1step`
+  is a delay value, one global time step in every delay form (§3.14.3,
+  #615). Reported by git-hevangel.
+* A macro usage ends at a `` `` `` paste (`` `JOIN(unit_`TAG, _n) `` is
+  `unit_alpha_n`) unless the pasted name is itself a macro (§22.5.1, #616);
+  the text after `` `undef NAME `` on its line is kept (§22.5.2, #619); a
+  nested class's method may be defined out of block, `function int
+  outer::inner::m()` (§8.24, #617); a property or sequence local may have
+  unpacked dimensions (§16.10, #618). Reported by git-hevangel.
+* A virtual interface binds to, and compares equal with, an interface
+  instance nested in another (`o.leaf`, `o.arr[1]`) and a modport view of
+  one (`o.leaf.mp`), assigned, passed, returned or stored in a static
+  (§25.9, #612); a member nonblocking assignment updates the object its
+  root names when it runs, whether the root is a class property, a module
+  or block variable or a formal (§10.4.2, #613); a `$unit` wildcard import
+  counts from where it appears, and the first reference binds a name both
+  of two packages declare (§26.3, #620); `--relax-implicit-static` leaves
+  an out-of-block method's locals automatic (§8.6, #621). Reported by
+  git-hevangel.
+
 * A compiled assignment pattern on a packed struct with a nested struct
   member packs its direct members only (§10.9.2); a named sibling such as
   `trans_id` read 0 (#589, PR #590, contributed by davekeeshan). `default:`
@@ -343,6 +372,25 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   are rebuilt (#531, core #87).
 
 **Command line**
+
+* Opt-in switches, each off by default and warning where it applies, for
+  sources written against tools that accept what the standard does not
+  (feature requests from git-hevangel): `--relax-duplicate-decls` ignores a
+  second declaration of a name in a subroutine or block (§3.13, #622),
+  `--relax-enum-no-base` reads `enum [N:0]` as `enum bit [N:0]` (§6.19,
+  #623), `--relax-static-const` reads `static const` as `const static`
+  (§6.20.6, #624), `--relax-event-this` reads `@this.ev` as `@(this.ev)`
+  (§9.4.2, #625), `--relax-casex-inside` reads `casex (e) inside` as
+  `case (e) inside` (§12.5.4, #626), `--relax-macro-space` reads
+  `` ` NAME `` as `` `NAME `` (§22.5.1, #627), `--relax-nul-bytes` reads a
+  NUL byte as white space (§5.3, #628) and `--relax-cross-hier-item`
+  crosses a hierarchical reference through an implicit coverpoint (§19.6,
+  #629). Each has an `XEZIM_RELAX_*` environment variable and is part of
+  the design cache key.
+* `--keywords <version>` chooses the keyword set outside every
+  `` `begin_keywords `` region, any §22.14 version, also with `-noconfig`,
+  and `--no-config-keywords` reads `instance`, `cell`, `use`, ... as names
+  (#608, reported by git-hevangel).
 
 * A bare top name inside a `-f` argument file names a top, as on the
   command line (#601, reported by amal-khailtash).
