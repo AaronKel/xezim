@@ -725,6 +725,8 @@ mod vif_member_read_nested_receiver;
 mod vif_null_compare_this_receiver;
 #[path = "classes/vif_null_compare_indexed_receiver.rs"]
 mod vif_null_compare_indexed_receiver;
+#[path = "classes/vif_return_own_definition_name.rs"]
+mod vif_return_own_definition_name;
 #[path = "classes/vif_property_named_like_instance.rs"]
 mod vif_property_named_like_instance;
 #[path = "classes/vif_receiver_neighbor_shapes.rs"]
