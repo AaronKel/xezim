@@ -616,6 +616,115 @@ impl Simulator {
         out
     }
 
+    /// `(iface, modport)` of a specialization fragment spelling a virtual
+    /// interface type (`virtual bus_if`, `virtual I#(8).mp`), else `None`.
+    fn vif_of_spec_frag(frag: &str) -> Option<(String, Option<String>)> {
+        let rest = frag.strip_prefix("virtual")?;
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let rest = rest.trim();
+        let end = rest
+            .find(|c: char| c == '#' || c == '.' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let (name, tail) = rest.split_at(end);
+        if name.is_empty() {
+            return None;
+        }
+        let tail = match tail.rfind(')') {
+            Some(close) if tail.starts_with('#') => &tail[close + 1..],
+            _ => tail,
+        };
+        let modport = tail
+            .trim()
+            .strip_prefix('.')
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        Some((name.to_string(), modport))
+    }
+
+    /// §8.25/§25.9: the INHERITED properties of `cname` declared by an
+    /// ancestor as a bare type parameter (`V vif;` in `class base #(type V =
+    /// virtual bus_if)`) that `cname`'s `extends` chain binds to a virtual
+    /// interface — by an explicit `extends base #(virtual bus_if)` or the
+    /// parameter's default. Unlike [`Self::param_vif_props`] the binding is
+    /// fixed by the class declarations, so it holds for every object of
+    /// `cname`; a binding through `cname`'s own parameters depends on the
+    /// specialization and is left out. Static properties keep their
+    /// declaring class's cell and are left out too.
+    fn inherited_param_vif_props(&self, cname: &str) -> Vec<(String, (String, Option<String>))> {
+        let mut out = Vec::new();
+        let Some(mut child) = self.module.classes.get(cname) else {
+            return out;
+        };
+        let mut seen: HashSet<&str> = child.properties.keys().map(String::as_str).collect();
+        let mut visited: Vec<&str> = vec![child.name.as_str()];
+        // The textual binding of each of `child`'s type parameters.
+        let mut child_binds: HashMap<String, String> = HashMap::default();
+        while let Some(pn) = child.extends.as_deref() {
+            if visited.contains(&pn) {
+                break;
+            }
+            visited.push(pn);
+            let Some(parent) = self.module.classes.get(pn) else {
+                break;
+            };
+            let mut binds: HashMap<String, String> = HashMap::default();
+            for tp in &parent.type_param_names {
+                let frag = parent
+                    .param_order
+                    .iter()
+                    .position(|p| p == tp)
+                    .and_then(|i| child.extends_type_args.get(i))
+                    .map(|f| f.trim())
+                    .filter(|f| !f.is_empty() && *f != "<unknown>");
+                let bound = match frag {
+                    Some(f) => child_binds.get(f).cloned().or_else(|| {
+                        (!child.type_param_names.iter().any(|t| t == f)).then(|| f.to_string())
+                    }),
+                    None => parent
+                        .type_param_default_types
+                        .iter()
+                        .find(|(n, _)| n == tp)
+                        .and_then(|(_, dt)| crate::elaborate::data_type_to_spec_fragment(dt)),
+                };
+                if let Some(b) = bound {
+                    binds.insert(tp.clone(), b);
+                }
+            }
+            for (prop, dt) in &parent.property_types {
+                if seen.contains(prop.as_str())
+                    || parent.virtual_iface_properties.contains_key(prop)
+                    || parent.static_properties.contains(prop)
+                {
+                    continue;
+                }
+                let DataType::TypeReference {
+                    name,
+                    dimensions,
+                    type_args,
+                    ..
+                } = dt
+                else {
+                    continue;
+                };
+                if !dimensions.is_empty() || !type_args.is_empty() {
+                    continue;
+                }
+                if let Some(vif) = binds
+                    .get(name.name.name.as_str())
+                    .and_then(|b| Self::vif_of_spec_frag(b))
+                {
+                    out.push((prop.clone(), vif));
+                }
+            }
+            seen.extend(parent.properties.keys().map(String::as_str));
+            child_binds = binds;
+            child = parent;
+        }
+        out
+    }
+
     /// Materialize (once per specialization) a class entry for `(base, sig)`
     /// when `sig` binds a type-parameter-typed property of `base` to a
     /// virtual interface: a copy of `base` with those properties registered
@@ -1072,7 +1181,7 @@ impl Simulator {
         // `== null` test through it missed.
         let mut vif_added = false;
         for cname in &names {
-            let adds: Vec<(String, (String, Option<String>))> = self
+            let mut adds: Vec<(String, (String, Option<String>))> = self
                 .module
                 .classes
                 .get(cname)
@@ -1094,6 +1203,7 @@ impl Simulator {
                         .collect()
                 })
                 .unwrap_or_default();
+            adds.extend(self.inherited_param_vif_props(cname));
             if adds.is_empty() {
                 continue;
             }
