@@ -3806,6 +3806,7 @@ impl Simulator {
             sva_owed: false,
             sva_post_nba_busy: false,
             clocking_snapshots: HashMap::default(),
+            clocking_array_leaves: HashSet::default(),
             clocking_meta: HashMap::default(),
             clocking_output_pending: HashMap::default(),
             clocking_prev_clock: HashMap::default(),

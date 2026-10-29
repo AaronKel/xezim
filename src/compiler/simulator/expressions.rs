@@ -2473,6 +2473,24 @@ impl Simulator {
                 Value::from_string(s)
             }
             ExprKind::Ident(hier) => {
+                // §14.3: the flat spelling of `cb.sig[i]` (the select on the
+                // last segment) on an unpacked-array clockvar.
+                if !self.clocking_array_leaves.is_empty()
+                    && hier.path.len() >= 2
+                    && let Some((last, owner)) = hier.path.split_last()
+                    && let [sel] = last.selects.as_slice()
+                    && self.clocking_array_leaves.contains(last.name.name.as_str())
+                    && owner.iter().all(|s| s.selects.is_empty())
+                {
+                    let mut base = hier.clone();
+                    base.path.last_mut().unwrap().selects.clear();
+                    base.cached_signal_id = std::cell::Cell::new(None);
+                    base.cached_resolved_name = std::cell::OnceCell::new();
+                    let base = Expression::new(ExprKind::Ident(base), expr.span);
+                    if let Some(v) = self.clocking_array_elem_read(&base, sel) {
+                        return v;
+                    }
+                }
                 // §13.5.2: a selected read through a `ref` formal reads the
                 // caller's actual (see `ref_formal_redirect_hier`).
                 if self.ref_redirect_possible() {
@@ -4798,6 +4816,11 @@ impl Simulator {
                 r
             }
             ExprKind::Index { expr, index } => {
+                // §14.3: `cb.sig[i]` on an unpacked-array clockvar reads the
+                // element's sample (see `tick_clocking_blocks`).
+                if let Some(v) = self.clocking_array_elem_read(expr, index) {
+                    return v;
+                }
                 // §13.4/§7.4: an element of a function's or method's returned
                 // collection (`f()[k]`, `o.build()[k]`). Evaluating the call
                 // as a scalar and bit-selecting it read 0 or x.

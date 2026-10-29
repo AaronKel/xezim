@@ -4204,7 +4204,25 @@ impl Simulator {
                 // segment but the last, and the queued signal is the RESOLVED
                 // output net (matched from the block's signal list by exact
                 // name or `.sig` suffix) so `tick_clocking_blocks` drives it.
-                if let ExprKind::Ident(hier) = &lvalue.kind {
+                // A drive of a select (`cb.v[2]`, `vif.cb.u[1]`, `cb.x[3:2]`)
+                // is recognized through its clockvar and drives only the
+                // selected part.
+                let mut cb_sels: Vec<&Expression> = Vec::new();
+                let mut cb_base = lvalue;
+                while let ExprKind::Index { expr, .. } | ExprKind::RangeSelect { expr, .. } =
+                    &cb_base.kind
+                {
+                    cb_sels.push(cb_base);
+                    cb_base = expr;
+                }
+                let cb_base_flat;
+                if !cb_sels.is_empty()
+                    && let Some(f) = Self::member_chain_as_flat_ident(cb_base)
+                {
+                    cb_base_flat = f;
+                    cb_base = &cb_base_flat;
+                }
+                if let ExprKind::Ident(hier) = &cb_base.kind {
                     if hier.path.len() >= 2 {
                         let cb_segs: Vec<&str> = hier
                             .path
@@ -4232,13 +4250,44 @@ impl Simulator {
                             });
                             if let Some((net, _)) = out_net {
                                 let net = net.clone();
+                                let last_sels = &hier.path[hier.path.len() - 1].selects;
+                                let target = if cb_sels.is_empty() && last_sels.is_empty() {
+                                    None
+                                } else {
+                                    let mut t = Expression::new(
+                                        ExprKind::Ident(crate::ast::expr::HierarchicalIdentifier {
+                                            root: None,
+                                            path: vec![crate::ast::expr::HierPathSegment {
+                                                name: crate::ast::Identifier {
+                                                    name: net.clone(),
+                                                    span: lvalue.span,
+                                                },
+                                                selects: last_sels.clone(),
+                                            }],
+                                            span: lvalue.span,
+                                            cached_signal_id: std::cell::Cell::new(None),
+                                            cached_resolved_name: std::cell::OnceCell::new(),
+                                        }),
+                                        lvalue.span,
+                                    );
+                                    for layer in cb_sels.iter().rev() {
+                                        let mut l = (*layer).clone();
+                                        if let ExprKind::Index { expr, .. }
+                                        | ExprKind::RangeSelect { expr, .. } = &mut l.kind
+                                        {
+                                            *expr = Box::new(t);
+                                        }
+                                        t = l;
+                                    }
+                                    Some(self.freeze_lvalue_indices(&t))
+                                };
                                 // §14.16 `##N`: wait N further clocking events.
                                 if let Some(n) = intra_cycles {
                                     if n > 0 {
                                         self.clocking_cycle_pending
                                             .entry(cb)
                                             .or_default()
-                                            .push((n, net, val));
+                                            .push((n, net, val, target));
                                         return;
                                     }
                                 }
@@ -4255,6 +4304,10 @@ impl Simulator {
                                     .or_else(|| self.clocking_out_skew.get(&cb).copied())
                                     .unwrap_or(0);
                                 if self.clocking_last_edge.get(&cb).copied() == Some(self.time) {
+                                    if let Some(t) = &target {
+                                        self.drive_clocking_select(t, val, skew);
+                                        return;
+                                    }
                                     if let Some(&id) = self.signal_name_to_id.get(net.as_str()) {
                                         let w = self.signal_widths[id];
                                         self.schedule_delayed_with_delay(id, val.resize(w), skew);
@@ -4264,7 +4317,7 @@ impl Simulator {
                                 self.clocking_output_pending
                                     .entry(cb)
                                     .or_default()
-                                    .push((net, val));
+                                    .push((net, val, target));
                                 return;
                             }
                         }

@@ -2430,6 +2430,51 @@ impl Simulator {
                 .any(|k| k == last || k.strip_suffix(last).is_some_and(|p| p.ends_with('.')))
     }
 
+    /// §14.3: `cb.sig[i]` where `sig` is an unpacked-array clockvar — the
+    /// sample of element `i` taken at the block's last clocking event.
+    /// `None` for any other indexed read, before the index is evaluated.
+    pub(super) fn clocking_array_elem_read(
+        &mut self,
+        base: &Expression,
+        index: &Expression,
+    ) -> Option<Value> {
+        if self.clocking_array_leaves.is_empty() {
+            return None;
+        }
+        let leaf = match &base.kind {
+            ExprKind::MemberAccess { member, .. } => member.name.as_str(),
+            ExprKind::Ident(h) => h.path.last()?.name.name.as_str(),
+            _ => return None,
+        };
+        if !self.clocking_array_leaves.contains(leaf) {
+            return None;
+        }
+        let segs = Self::flatten_member_path(base)?;
+        let (leaf, owner) = segs.split_last()?;
+        let owner: Vec<&str> = owner.iter().map(String::as_str).collect();
+        let cb = self.resolve_clocking_key(&owner)?;
+        // Samples are keyed by the clocking-visible name, which for a block
+        // of an instance is the net's path (`bus.ready[0]`).
+        let prefix = format!("{}[", leaf);
+        let is_elem_of = |k: &str| k.rsplit('.').next().is_some_and(|l| l.starts_with(&prefix));
+        if !self
+            .clocking_snapshots
+            .get(&cb)?
+            .keys()
+            .any(|k| is_elem_of(k))
+        {
+            return None;
+        }
+        let iv = self.eval_expr(index);
+        let i = iv.to_i64().filter(|_| !iv.has_xz())?;
+        let elem = format!("{}{}]", prefix, i);
+        self.clocking_snapshots
+            .get(&cb)?
+            .iter()
+            .find(|(k, _)| k.rsplit('.').next() == Some(elem.as_str()))
+            .map(|(_, v)| v.clone())
+    }
+
     pub(super) fn try_clocking_signal_read(&self, segs: &[&str]) -> Option<Value> {
         if segs.len() < 2 {
             return None;
