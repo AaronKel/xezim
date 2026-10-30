@@ -953,3 +953,6 @@ mod inside_shift_width;
 
 #[path = "classes/random_mode_reenable.rs"]
 mod random_mode_reenable;
+
+#[path = "classes/parenthesized_collection_return.rs"]
+mod parenthesized_collection_return;

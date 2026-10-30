@@ -275,6 +275,12 @@ impl Simulator {
             let crate::ast::types::DataType::TypeReference { name: tn, .. } = cur else {
                 return None;
             };
+            // A typedef of an unpacked collection of class handles is a
+            // collection, not a handle to its element class. Following only
+            // typedef_types discards those unpacked dimensions.
+            if self.fn_ret_coll_dims(cur).is_some() {
+                return None;
+            }
             if self.module.classes.contains_key(&tn.name.name) {
                 return Some(tn.name.name.clone());
             }
