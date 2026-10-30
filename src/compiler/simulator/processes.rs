@@ -3054,7 +3054,9 @@ impl Simulator {
             // stream, and recurse. The body's waits then suspend the process via
             // the machinery below instead of running synchronously (which spins
             // to a loop cap). Non-blocking task calls keep the synchronous path.
-            if let StatementKind::Expr(expr) = &stmt.kind {
+            if let StatementKind::Expr(expr) = &stmt.kind
+                && (self.module.dpi_imports.is_empty() || self.dpi_task_callee(expr).is_none())
+            {
                 if let ExprKind::Call { func, args } = &expr.kind {
                     if let ExprKind::Ident(h) = &func.kind {
                         if h.path.len() == 1 {
@@ -3125,7 +3127,9 @@ impl Simulator {
             // these ran on the synchronous path, whose nested delay loop
             // never hands control back: a forked `pkg::t()` with a `forever`
             // body kept its parent's `#25 $finish` from ever running.
-            if let StatementKind::Expr(expr) = &stmt.kind {
+            if let StatementKind::Expr(expr) = &stmt.kind
+                && (self.module.dpi_imports.is_empty() || self.dpi_task_callee(expr).is_none())
+            {
                 if let ExprKind::Call { func, args } = &expr.kind {
                     if let Some(td) = self.package_task_target(func) {
                         if self.stmts_have_blocking(&td.items) {
@@ -3155,7 +3159,9 @@ impl Simulator {
             // path, then hint-prefixed) and inline when the body blocks; the
             // frame carries the instance scope so the body's bare interface
             // member names resolve across suspends.
-            if let StatementKind::Expr(expr) = &stmt.kind {
+            if let StatementKind::Expr(expr) = &stmt.kind
+                && (self.module.dpi_imports.is_empty() || self.dpi_task_callee(expr).is_none())
+            {
                 if let ExprKind::Call { func, args } = &expr.kind {
                     {
                         {

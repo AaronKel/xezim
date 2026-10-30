@@ -136,6 +136,27 @@ fn package_dpi_name_does_not_capture_a_class_property_676() {
     ]);
 }
 
+/// §23.9 / §26.3: a wildcard import does not displace module/class declarations.
+#[test]
+fn package_dpi_alias_does_not_capture_local_subroutines() {
+    let so = compile("tests/dpi/scoped_imports_local_shadow.c");
+    let mut lines = tagged(&so, "tests/dpi/scoped_imports_local_shadow.sv");
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            "T|import|12",
+            "T|local_task|42 1",
+            "T|local|42",
+            "T|method|93 99",
+            "T|package_task|11",
+            "T|package|12 12",
+            "T|receiver|99",
+            "T|wrapper_task|11",
+        ]
+    );
+}
+
 /// The `T|` lines with the same-time steps of different processes sorted
 /// (their order within a time slot is not defined).
 fn tagged_sorted(so: &Path, sv_file: &str) -> Vec<String> {
