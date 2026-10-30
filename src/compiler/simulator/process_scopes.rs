@@ -2267,6 +2267,7 @@ impl Simulator {
             body.span,
         ));
         let cont: Arc<[Statement]> = Arc::from(cont);
+        self.exec_cache_pids.insert(key.0);
         self.forever_cont_cache.insert(key, cont.clone());
         cont
     }
@@ -2354,6 +2355,7 @@ impl Simulator {
                                 let is_clk_ev = self.is_clocking_event(event);
                                 let resolved = self.resolve_sens_ids(&sens);
                                 if !sens.is_empty() && resolved.len() == sens.len() {
+                                    self.exec_cache_pids.insert(pid);
                                     self.forever_sens_cache
                                         .insert(key, (resolved.clone(), is_clk_ev));
                                 }

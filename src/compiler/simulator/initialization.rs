@@ -4607,6 +4607,7 @@ impl Simulator {
             blocking_cont_cache: HashMap::default(),
             class_task_frame_cache: HashMap::default(),
             forever_sens_cache: HashMap::default(),
+            exec_cache_pids: HashSet::default(),
             constraint_cmp_unsigned: false,
             stall_iters: 0,
             zero_delay_defer_pending: false,

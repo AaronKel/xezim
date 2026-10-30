@@ -5580,6 +5580,7 @@ impl Simulator {
                     {
                         for &pid in &to_kill {
                             self.killed_pids.insert(pid);
+                            self.release_process_execution_caches(pid);
                             self.vc_cancel_process(pid);
                             self.process_parents.remove(&pid);
                             self.process_contexts.remove(&pid);
@@ -5614,6 +5615,7 @@ impl Simulator {
                 if let Some(&pid) = self.disable_labels.get(&name.name) {
                     if pid != self.current_pid {
                         self.killed_pids.insert(pid);
+                        self.release_process_execution_caches(pid);
                         self.vc_cancel_process(pid);
                         self.process_parents.remove(&pid);
                         self.process_contexts.remove(&pid);
@@ -5663,6 +5665,7 @@ impl Simulator {
                     if !to_kill.is_empty() {
                         for &pid in &to_kill {
                             self.killed_pids.insert(pid);
+                            self.release_process_execution_caches(pid);
                             self.vc_cancel_process(pid);
                             self.process_parents.remove(&pid);
                             self.process_contexts.remove(&pid);
@@ -5711,6 +5714,7 @@ impl Simulator {
                     // at dispatch, and purge every place the process can be
                     // parked so it never resumes and never satisfies a join.
                     self.killed_pids.insert(pid);
+                    self.release_process_execution_caches(pid);
                     self.vc_cancel_process(pid);
                     self.process_parents.remove(&pid);
                     self.process_contexts.remove(&pid);
