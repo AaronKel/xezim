@@ -124,6 +124,18 @@ fn package_dpi_import_names_are_scoped_676() {
     ]);
 }
 
+/// §23.9: a class property receiver shadows a package with the same name.
+#[test]
+fn package_dpi_name_does_not_capture_a_class_property_676() {
+    let so = compile("tests/dpi/scoped_imports_676.c");
+    let mut lines = tagged(&so, "tests/dpi/scoped_imports_shadow_676.sv");
+    lines.sort();
+    assert_eq!(lines, [
+        "T|design|306", "T|import|105", "T|scoped|101 202", "T|shadow|99",
+        "T|tasks|11 22 2", "T|wrapper|103 204",
+    ]);
+}
+
 /// The `T|` lines with the same-time steps of different processes sorted
 /// (their order within a time slot is not defined).
 fn tagged_sorted(so: &Path, sv_file: &str) -> Vec<String> {

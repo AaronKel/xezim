@@ -170,6 +170,9 @@ impl Simulator {
             && let ExprKind::Ident(h) = &expr.kind
             && h.path.len() == 1 && h.path[0].selects.is_empty()
             && self.module.packages.contains(&h.path[0].name.name)
+            && !self.this_prop_hides(&h.path[0].name.name)
+            && !self.local_stack.last().is_some_and(|m| m.contains_key(&h.path[0].name.name))
+            && !self.signal_name_to_id.contains_key(&h.path[0].name.name)
         {
             let key = format!("{}::{}", h.path[0].name.name, member.name);
             return self.dpi_task_names.contains(&key).then_some((key, None));
@@ -184,7 +187,11 @@ impl Simulator {
         if h.path.len() == 1 {
             return Some((last.name.name.clone(), None));
         }
-        if h.path.len() == 2 && self.module.packages.contains(&h.path[0].name.name) {
+        if h.path.len() == 2 && self.module.packages.contains(&h.path[0].name.name)
+            && !self.this_prop_hides(&h.path[0].name.name)
+            && !self.local_stack.last().is_some_and(|m| m.contains_key(&h.path[0].name.name))
+            && !self.signal_name_to_id.contains_key(&h.path[0].name.name)
+        {
             let key = format!("{}::{}", h.path[0].name.name, last.name.name);
             return self.dpi_task_names.contains(&key).then_some((key, None));
         }

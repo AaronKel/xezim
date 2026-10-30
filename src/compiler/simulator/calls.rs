@@ -78,6 +78,7 @@ impl Simulator {
         };
         if let Some((pkg, name)) = package_dpi
             && self.module.packages.contains(pkg)
+            && !self.this_prop_hides(pkg)
             && !self.local_stack.last().is_some_and(|m| m.contains_key(pkg))
             && !self.signal_name_to_id.contains_key(pkg)
         {
