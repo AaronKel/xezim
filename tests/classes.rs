@@ -942,3 +942,6 @@ mod argument_binding_selected_and_output;
 
 #[path = "classes/compiled_method_scope_and_member_stores.rs"]
 mod compiled_method_scope_and_member_stores;
+
+#[path = "classes/randomize_no_parentheses.rs"]
+mod randomize_no_parentheses;
