@@ -125,3 +125,70 @@ fn disabled_fork_children_release_execution_caches() {
         .all(|(p, _)| !sim.killed_pids.contains(p)));
     assert!(sim.exec_cache_pids.iter().all(|p| !sim.killed_pids.contains(p)));
 }
+
+#[test]
+fn suspended_repeat_does_not_retain_a_body_per_iteration() {
+    fn run(n: usize) -> usize {
+        let source = r#"
+            module top;
+              int count;
+              initial begin
+                repeat (ITERATIONS) begin
+                  fork begin
+                    for (int i=0; i<8; i++) count++;
+                    #1;
+                  end join
+                end
+                if (count != ITERATIONS*8) $fatal(1, "repeat count changed");
+                $finish;
+              end
+            endmodule
+        "#
+        .replace("ITERATIONS", &n.to_string());
+        let sim = crate::simulate(&source, (n + 10) as u64).expect("repeat cache fixture");
+        assert_eq!(sim.error_count, 0);
+        assert!(sim.finished);
+        sim.blocking_cont_cache.len()
+    }
+    let small = run(20);
+    let large = run(2000);
+    assert!(
+        large <= small + 4,
+        "repeat retains iteration bodies: small={small}, large={large}"
+    );
+}
+
+#[test]
+fn suspended_repeat_keeps_nested_and_concurrent_counters_separate() {
+    let sim = crate::simulate(r#"
+        module top;
+          int evaluations;
+          int completed;
+          function int limit(); evaluations++; return 3; endfunction
+          task automatic work(input int id);
+            int seen = 0;
+            repeat (limit()) begin
+              repeat (2) begin
+                #1; seen++;
+                if (seen % 2) continue;
+              end
+              if (seen == 4) break;
+            end
+            if (seen != 4) $fatal(1,"nested repeat count changed");
+            repeat (2) begin #1; continue; end
+            completed++;
+          endtask
+          initial begin
+            fork work(0); work(1); join
+            if (evaluations != 2 || completed != 2) $fatal(1,"count reevaluated or continue leaked");
+            $display("REPEAT_PASS evaluations=%0d completed=%0d",evaluations,completed);
+            $finish;
+          end
+        endmodule
+    "#, 100).expect("nested/concurrent repeat fixture");
+    assert_eq!(sim.error_count, 0);
+    assert!(sim
+        .output
+        .iter()
+        .any(|o| o.message.contains("REPEAT_PASS evaluations=2 completed=2")));
+}

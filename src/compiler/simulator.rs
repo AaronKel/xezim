@@ -2138,6 +2138,9 @@ struct ProcCont {
     // `ForeachTail`/`ForeverTail` kinds, so their base kind is never
     // ambiguous and is never a flag consumer.
     loop_tail_at: Option<usize>,
+    /// Remaining iterations of a suspended repeat at loop_tail_at. The body
+    /// frame stays immutable and shared instead of being cloned per iteration.
+    repeat_remaining: Option<u64>,
 }
 
 /// Defense in depth for the chain length: the derived drop for a linked list
@@ -2164,6 +2167,7 @@ impl ProcCont {
             start: 0,
             next: None,
             loop_tail_at: None,
+            repeat_remaining: None,
         }
     }
 
@@ -2174,6 +2178,7 @@ impl ProcCont {
             start: 0,
             next: None,
             loop_tail_at: None,
+            repeat_remaining: None,
         }
     }
 
@@ -2187,6 +2192,7 @@ impl ProcCont {
             start: 0,
             next: None,
             loop_tail_at: None,
+            repeat_remaining: None,
         }
     }
 
@@ -2200,6 +2206,7 @@ impl ProcCont {
             start: idx.min(self.stmts.len()),
             next: self.next.clone(),
             loop_tail_at: self.loop_tail_at,
+            repeat_remaining: self.repeat_remaining,
         }
     }
 
@@ -2226,6 +2233,7 @@ impl ProcCont {
             start: 0,
             next,
             loop_tail_at: None,
+            repeat_remaining: None,
         }
     }
 
@@ -2252,6 +2260,7 @@ impl ProcCont {
                 start: 0,
                 next: None,
                 loop_tail_at: None,
+                repeat_remaining: None,
             };
         }
         self.pushed(vec![body.clone()], resume_at)
@@ -2279,6 +2288,7 @@ impl ProcCont {
             start: 0,
             next,
             loop_tail_at: None,
+            repeat_remaining: None,
         }
     }
 
@@ -2337,16 +2347,40 @@ impl ProcCont {
         None
     }
 
-    /// Flatten the chain. Diagnostics / snapshot paths only.
+    /// Flatten the chain. Diagnostics / snapshot paths only. Materialize
+    /// repeat counters that live outside the shared AST while executing.
     fn to_vec(&self) -> Vec<Statement> {
-        let mut out: Vec<Statement> = self.frame().to_vec();
-        let mut cur = self.next.clone();
-        while let Some(f) = cur {
-            out.extend_from_slice(f.frame());
-            cur = f.next.clone();
+        fn append(frame: &ProcCont, out: &mut Vec<Statement>) {
+            let offset = out.len();
+            out.extend_from_slice(frame.frame());
+            if let (Some(tail), Some(remaining)) =
+                (frame.loop_tail_at, frame.repeat_remaining)
+                && tail >= frame.start
+                && let Some(stmt) = out.get_mut(offset + tail - frame.start)
+                && let StatementKind::Repeat { count, .. } = &mut stmt.kind
+            {
+                *count = Expression::new(
+                    ExprKind::Number(NumberLiteral::Integer {
+                        size: Some(64),
+                        signed: false,
+                        base: NumberBase::Decimal,
+                        value: remaining.to_string(),
+                        cached_val: Cell::new(None),
+                    }),
+                    count.span,
+                );
+            }
+        }
+        let mut out = Vec::new();
+        append(self, &mut out);
+        let mut cur = self.next.as_ref();
+        while let Some(frame) = cur {
+            append(frame, &mut out);
+            cur = frame.next.as_ref();
         }
         out
     }
+
 }
 
 impl From<Vec<Statement>> for ProcCont {
