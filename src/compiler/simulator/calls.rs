@@ -663,31 +663,7 @@ impl Simulator {
                     } else {
                         self.eval_expr(&args[0]).to_u64().unwrap_or(0) != 0
                     };
-                    let table = if mname == "rand_mode" {
-                        &mut self.rand_mode_disabled
-                    } else {
-                        &mut self.constraint_mode_disabled
-                    };
-                    if enable {
-                        if let Some(set) = table.get_mut(&h) {
-                            if let Some(n) = &target_name {
-                                set.remove(n);
-                            } else {
-                                set.clear();
-                            }
-                        }
-                    } else {
-                        let set = table.entry(h).or_insert_with(HashSet::default);
-                        if let Some(n) = target_name {
-                            set.insert(n);
-                        }
-                        // For whole-object disable, we'd need the full list of
-                        // rand props / constraint names; insert a sentinel that
-                        // exec_randomize recognises.
-                        else {
-                            set.insert("*".to_string());
-                        }
-                    }
+                    self.set_object_random_mode(h, mname == "rand_mode", target_name.as_deref(), enable);
                     return Value::zero(32);
                 }
             }
@@ -2692,27 +2668,7 @@ impl Simulator {
                             return Value::from_u64(if disabled { 0 } else { 1 }, 32);
                         }
                         let enable = self.eval_expr(&args[0]).to_u64().unwrap_or(0) != 0;
-                        let table = if mname == "rand_mode" {
-                            &mut self.rand_mode_disabled
-                        } else {
-                            &mut self.constraint_mode_disabled
-                        };
-                        if enable {
-                            if let Some(set) = table.get_mut(&h_val) {
-                                if let Some(n) = &target_name {
-                                    set.remove(n);
-                                } else {
-                                    set.clear();
-                                }
-                            }
-                        } else {
-                            let set = table.entry(h_val).or_insert_with(HashSet::default);
-                            if let Some(n) = target_name {
-                                set.insert(n);
-                            } else {
-                                set.insert("*".to_string());
-                            }
-                        }
+                        self.set_object_random_mode(h_val, mname == "rand_mode", target_name.as_deref(), enable);
                         return Value::zero(32);
                     }
                 }
