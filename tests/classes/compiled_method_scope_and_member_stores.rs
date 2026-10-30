@@ -123,3 +123,15 @@ fn compiled_vif_copy_rebinds_and_clears() {
         .replace("bus b();", "bus b();bus second();")
         .replace("$display(\"PASS\");", "c.set(second);d.copy(c);d.vif.value=33;if(second.value!=33 || b.value!=17)$fatal(1,\"rebind failed\");c.set(null);d.copy(c);if(d.vif!=null)$fatal(1,\"clear failed\");$display(\"PASS\");"));
 }
+
+/// IEEE 1800 §8.24 / §26.3: a forward-declared package class and its
+/// imported/qualified aliases must all retain out-of-class method bodies.
+#[test]
+fn package_alias_keeps_extern_constructor_body() {
+    if !policies() {
+        return;
+    }
+    check(include_str!(
+        "../fixtures/extern_constructor_package_alias.sv"
+    ));
+}
