@@ -428,3 +428,6 @@ mod class_collection_named_wait;
 
 #[path = "scheduling/class_or_value_change.rs"]
 mod class_or_value_change;
+
+#[path = "scheduling/preprocessor_linear_join.rs"]
+mod preprocessor_linear_join;
