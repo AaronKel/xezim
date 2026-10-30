@@ -1962,7 +1962,9 @@ impl Simulator {
                 self.handle_collection_name(handle, &leaf)?
             }
             ExprKind::MemberAccess { expr, member } => {
-                let handle = self.eval_handle_expr(expr)?;
+                // Actuals are evaluated in the caller, including selected
+                // handles in local/formal collections (`q[i].data`).
+                let handle = self.eval_live_object_receiver(expr)?;
                 self.handle_collection_name(handle, &member.name)?
             }
             _ => return None,

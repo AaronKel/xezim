@@ -1672,7 +1672,12 @@ impl Simulator {
                     } else {
                         None
                     };
-                    let mut val = if arg_supplied(i) {
+                    // Class methods have automatic lifetime. An output handle
+                    // starts null on every call; it never copies in the caller's
+                    // previous object (including when the actual is a default).
+                    let mut val = if plain_class && port.direction == PortDirection::Output {
+                        Value::zero(32)
+                    } else if arg_supplied(i) {
                         let value = match actual_ctx {
                             Some(w) => self.eval_expr_ctx(&args[i], w),
                             None => self.eval_expr(&args[i]),
