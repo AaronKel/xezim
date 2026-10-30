@@ -64,3 +64,28 @@ endmodule
     let msgs: Vec<_> = sim.output.iter().map(|o| o.message.as_str()).collect();
     assert_eq!(msgs, ["11 22 33", "11 55 33"]);
 }
+
+/// §7.5.1 / §11.5.1: a dynamic outer dimension uses its live bounds.
+#[test]
+fn dynamic_rows_grow_beyond_the_initial_allocation() {
+    let sim = simulate(
+        r#"
+module top;
+  int d[][2];
+  logic[7:0] fixed_rows[2][2];
+  logic[31:0] unknown_index='x;
+  initial begin
+    d=new[100]; d[99][0]=7;
+    fixed_rows[0][0]=8'h11;
+    fixed_rows[unknown_index][0]=8'hff;
+    fixed_rows[-1][0]=8'hff;
+    $display("%0d %0d %h",d.size(),d[99][0],fixed_rows[0][0]);
+  end
+endmodule
+"#,
+        100,
+    )
+    .expect("simulate");
+    let lines: Vec<_> = sim.output.iter().map(|o| o.message.as_str()).collect();
+    assert_eq!(lines, ["100 7 11"]);
+}

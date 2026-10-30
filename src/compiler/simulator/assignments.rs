@@ -3340,7 +3340,14 @@ impl Simulator {
                         return false;
                     };
                     let &((il, ih), (jl, jh), _) = &self.module.arrays_2d[&*name];
-                    if i < il.min(ih) || i > il.max(ih) || j < jl.min(jh) || j > jl.max(jh) {
+                    let (outer_lo, outer_hi) = if self.module.dynamic_arrays.contains(&*name) {
+                        // The 2-D table's initial allocation is a placeholder;
+                        // new[N] sets the live outer dimension (§7.5.1).
+                        (0, self.queue_size(&name) as i64 - 1)
+                    } else {
+                        (il.min(ih), il.max(ih))
+                    };
+                    if i < outer_lo || i > outer_hi || j < jl.min(jh) || j > jl.max(jh) {
                         return false;
                     }
                     let elem_name = format!("{}[{}][{}]", name, i, j);
