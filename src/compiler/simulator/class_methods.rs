@@ -902,7 +902,7 @@ impl Simulator {
                 let class_ref = self.port_class_ref(port);
                 let dt = &port.data_type;
                 let fixed_width = (matches!(dt, DataType::IntegerAtom { .. })
-                    || Self::packed_dims_are_literal(dt))
+                    || Self::packed_dims_are_constant(dt))
                 .then(|| {
                     super::elaborate::resolve_type_width(
                         dt,
@@ -1698,7 +1698,7 @@ impl Simulator {
                         self.this_stack.push(Some(handle));
                         self.class_context_stack.push(Some(cname.clone()));
                         self.push_local_frame_typed(locals.clone(), frame_types.clone());
-                        let v = self.eval_expr(def);
+                        let v = self.eval_formal_default(port, def);
                         let v = self.vif_argument_value(port, def, v);
                         self.pop_local_frame();
                         self.class_context_stack.pop();

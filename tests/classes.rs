@@ -924,3 +924,6 @@ mod nonrand_handle_constraint_state;
 
 #[path = "classes/conditional_enum_exclusions.rs"]
 mod conditional_enum_exclusions;
+
+#[path = "classes/default_argument_width.rs"]
+mod default_argument_width;
