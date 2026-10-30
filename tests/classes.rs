@@ -939,3 +939,6 @@ mod state_array_size_bound;
 
 #[path = "classes/argument_binding_selected_and_output.rs"]
 mod argument_binding_selected_and_output;
+
+#[path = "classes/compiled_method_scope_and_member_stores.rs"]
+mod compiled_method_scope_and_member_stores;
