@@ -308,6 +308,9 @@ impl Simulator {
             .cloned()
             .collect();
         if !collections.is_empty() {
+            for key in &collections {
+                *self.fork_capture_refs.entry(key.clone()).or_default() += 1;
+            }
             self.fork_collection_captures.insert(pid, collections);
         }
         let trivial = ctx.this_stack.is_empty()
