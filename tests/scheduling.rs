@@ -427,3 +427,6 @@ mod clocking_select_clockvars;
 mod always_property;
 #[path = "scheduling/class_collection_named_wait.rs"]
 mod class_collection_named_wait;
+
+#[path = "scheduling/class_or_value_change.rs"]
+mod class_or_value_change;
