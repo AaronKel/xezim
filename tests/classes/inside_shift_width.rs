@@ -45,3 +45,8 @@ module top;bit[63:0] x;int width=64;initial begin
 "#,
     );
 }
+
+#[test]
+fn procedural_inside_sizes_64_and_128_bit_integer_bounds_and_preserves_reals() {
+    check(include_str!("../fixtures/inside_procedural_width.sv"));
+}
