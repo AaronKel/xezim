@@ -927,3 +927,6 @@ mod conditional_enum_exclusions;
 
 #[path = "classes/default_argument_width.rs"]
 mod default_argument_width;
+
+#[path = "classes/inline_collection_caller_handle.rs"]
+mod inline_collection_caller_handle;

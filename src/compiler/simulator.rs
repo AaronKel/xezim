@@ -4603,6 +4603,9 @@ struct DeclShadowFrame {
 /// shadowed is put back. Only shadowed names cost a copy.
 #[derive(Debug, Clone, Default)]
 struct BlockScopeSave {
+    /// Distinguishes repeated activations of flattened block declarations.
+    scope_gen: u64,
+    declared_names: Vec<String>,
     /// `frame_key` of the flattened block's frame (blocking path); 0 for a
     /// synchronous block.
     frame_key: usize,
@@ -8336,7 +8339,13 @@ pub struct Simulator {
     /// merges the child's frames back. To avoid clobbering a parent variable
     /// that the child only INHERITED (never wrote) — which the parent may have
     /// child CHANGED relative to this baseline.
-    fork_baselines: HashMap<usize, Vec<HashMap<String, Value>>>,
+    /// Immutable fork-time snapshots are shared across process resumptions.
+    fork_baselines: HashMap<usize, Arc<Vec<HashMap<String, Value>>>>,
+    /// Automatic collection storage retained by surviving fork children.
+    fork_collection_captures: HashMap<usize, HashSet<String>>,
+    /// Lexical block identities of each child's captured locals.
+    fork_local_scopes: HashMap<usize, HashMap<u64, HashMap<String, u64>>>,
+    deferred_collection_cleanup: HashSet<String>,
     /// IEEE 1800-2023 §6.21/§9.3.2: automatic variables declared in a
     /// procedural block (`initial`/`always`) with NO enclosing call frame live
     /// in the global `self.signals` map (not a `local_stack` frame). At fork
