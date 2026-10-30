@@ -1138,9 +1138,18 @@ impl Simulator {
         let sub_objs = sub_objs.unwrap_or_default();
         let mut csp_runs = 0u32;
         let mut rand_diag = rand_diag::rand_diag_enabled().then(rand_diag::RandDiag::default);
-        let array_enums: HashMap<String, String> = rand_arrays
+        // Enum domains apply to every unpacked collection, not only fixed
+        // arrays. A packed enum's unused bit patterns are not legal draws.
+        let array_enums: HashMap<String, String> = rand_colls
             .iter()
-            .filter_map(|a| a.5.clone().map(|t| (a.0.clone(), t)))
+            .filter_map(|c| {
+                let prop = c.nd_base.as_ref().map_or(c.prop.as_str(), |(p, _)| p);
+                let tn = self.class_prop_type_name(handle, prop)?;
+                self.module
+                    .enum_members
+                    .contains_key(&tn)
+                    .then(|| (c.prop.clone(), tn))
+            })
             .collect();
         // §18.5.4/§18.5.10: a set whose DISTRIBUTION the per-variable trials
         // below cannot honour (see `rand_order_sensitive`) goes to the joint
@@ -2364,7 +2373,17 @@ impl Simulator {
                     }
                     for key in self.coll_elem_keys(c) {
                         let prev = self.read_coll_elem(&key).and_then(|v| v.to_u64());
-                        let v = self.draw_elem(c.width, prev);
+                        let members = array_enums
+                            .get(&c.prop)
+                            .and_then(|tn| self.module.enum_members.get(tn))
+                            .filter(|m| !m.is_empty());
+                        let v = if let Some(members) = members {
+                            let values: Vec<u64> = members.iter().map(|m| m.1).collect();
+                            let i = self.cur_rng().gen_range(0..values.len());
+                            Value::from_u64(values[i], c.width)
+                        } else {
+                            self.draw_elem(c.width, prev)
+                        };
                         self.write_coll_elem(&key, v);
                     }
                 }
@@ -2448,6 +2467,26 @@ impl Simulator {
             let mut fe_failed = false;
             let mut all_ok =
                 self.rand_items_accept(handle, &constraints, &rand_colls, &mut fe_failed);
+            // Repairs can overwrite the baseline. Check the implicit enum
+            // domain too, including when all explicit constraints are off.
+            for c in &rand_colls {
+                if let Some(tn) = array_enums.get(&c.prop) {
+                    let values: Vec<u64> = self.module.enum_members[tn]
+                        .iter()
+                        .map(|m| m.1)
+                        .collect();
+                    for key in self.coll_elem_keys(c) {
+                        if !self
+                            .read_coll_elem(&key)
+                            .and_then(|v| v.to_u64())
+                            .is_some_and(|v| values.contains(&v))
+                        {
+                            all_ok = false;
+                            fe_failed = true;
+                        }
+                    }
+                }
+            }
             if !all_ok && let Some(diag) = rand_diag.as_mut() {
                 self.rand_diag_tally(handle, &constraints, diag);
             }

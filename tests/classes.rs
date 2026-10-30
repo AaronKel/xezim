@@ -932,3 +932,6 @@ mod default_argument_width;
 
 #[path = "classes/inline_collection_caller_handle.rs"]
 mod inline_collection_caller_handle;
+
+#[path = "classes/enum_collection_domains.rs"]
+mod enum_collection_domains;
