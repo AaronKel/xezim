@@ -2200,6 +2200,7 @@ impl Simulator {
                     // parameters against this receiver's specialization.
                     let mut local_typedef_types = HashMap::default();
                     let mut unresolved_type_names = HashSet::default();
+                    let mut method_enum_constants = HashMap::default();
                     let mut cur = Some(cname.to_string());
                     let mut seen = HashSet::default();
                     while let Some(cn) = cur {
@@ -2224,6 +2225,19 @@ impl Simulator {
                             }
                         }
                         for (name, dt) in &cd.typedef_targets {
+                            if matches!(dt, DataType::Enum(_)) {
+                                if let Some(members) = self.module.enum_members.get(name) {
+                                    for (member, _) in members {
+                                        if !instance_props.contains(member)
+                                            && !static_members.contains(member)
+                                            && !const_names.contains(member)
+                                            && let Some(value) = self.class_enum_member(cname, member)
+                                        {
+                                            method_enum_constants.entry(member.clone()).or_insert(value);
+                                        }
+                                    }
+                                }
+                            }
                             // Keep the declaring class when an inherited alias
                             // is reached by a bare name from a derived method.
                             local_typedef_types.entry(name.clone()).or_insert_with(|| {
@@ -2261,6 +2275,7 @@ impl Simulator {
                     );
                     compiler.set_typedefs(&self.module.typedefs, &self.module.typedef_elem_widths);
                     compiler.set_typedef_types(&self.module.typedef_types);
+                    compiler.method_enum_constants = method_enum_constants;
                     compiler.set_method_formal_types(ports);
                     if let CompiledBodyKind::Function(function) = kind {
                         compiler.set_method_return_type(&function.return_type);

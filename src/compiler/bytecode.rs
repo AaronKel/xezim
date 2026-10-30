@@ -1656,6 +1656,8 @@ pub struct BytecodeCompiler<'a> {
     /// the compiler as the two-segment `pkg.member` the inliner spells it
     /// with; resolving that by name landed on the bare signal twin.
     pkg_enum_consts_ref: Option<&'a HashMap<String, (u64, u32)>>,
+    /// Enum literals visible in the method's lexical class (before global names).
+    pub(crate) method_enum_constants: HashMap<String, Value>,
     /// Process-FSM mode (roadmap 11-12): statement-level `#delay` and
     /// `@(event)` compile to WaitDelayReg / WaitEdge instead of bailing.
     /// Never set for edge or comb blocks.
@@ -2145,6 +2147,7 @@ impl<'a> BytecodeCompiler<'a> {
             m_labels: Vec::new(),
             scope_hint: None,
             pkg_enum_consts_ref: None,
+            method_enum_constants: HashMap::default(),
             allow_waits: false,
             wait_specs: Vec::new(),
             for_loop_var_ids: std::collections::HashMap::default(),
@@ -9902,7 +9905,25 @@ impl<'a> BytecodeCompiler<'a> {
         None
     }
 
+    fn method_enum_constant(&self, hier: &HierarchicalIdentifier) -> Option<Value> {
+        if !self.method_mode
+            || hier.root.is_some()
+            || hier.path.len() != 1
+            || !hier.path[0].selects.is_empty()
+        {
+            return None;
+        }
+        let name = hier.path[0].name.name.as_str();
+        if self.local_var_regs.contains_key(name) || self.local_array_regs.contains_key(name) {
+            return None;
+        }
+        self.method_enum_constants.get(name).cloned()
+    }
+
     fn lookup_param_value(&self, hier: &HierarchicalIdentifier) -> Option<Value> {
+        if let Some(value) = self.method_enum_constant(hier) {
+            return Some(value);
+        }
         let params = self.params?;
         let raw = Self::hier_raw_cow(hier);
         let raw: &str = &raw;
@@ -13489,6 +13510,11 @@ impl<'a> BytecodeCompiler<'a> {
                                 self.method_this_reg.expect("this in method_mode"),
                                 bare.to_string().into_boxed_str(),
                             ));
+                            return Some(dest);
+                        }
+                        if let Some(value) = self.method_enum_constant(hier) {
+                            let dest = self.alloc_reg();
+                            self.emit(Insn::LoadConst(dest, Box::new(value)));
                             return Some(dest);
                         }
                         // Step 9g: a bare STATIC property (or class localparam)
@@ -18430,24 +18456,14 @@ impl<'a> BytecodeCompiler<'a> {
                 }
             },
             ExprKind::Concatenation(parts) => parts.iter().map(|p| self.infer_lhs_width(p)).sum(),
-            // Step 9e: a `this.member = rhs` store inside a compiled method
-            // evaluates its RHS self-determined, exactly like the bare-member
-            // rule above — the 32-bit default truncated
-            // uvm_reg_item::set_offset's 64-bit actual (6976).
+            // Heap-field stores fit the value against the receiver's declared
+            // property at runtime. This applies to every admitted receiver,
+            // not just `this`: a guessed 32-bit context truncates strings and
+            // wide values before StoreClassMember can perform that fit.
             ExprKind::MemberAccess { expr, member } if self.method_mode => {
-                let is_this = matches!(&expr.kind, ExprKind::This)
-                    || matches!(
-                        &expr.kind,
-                        ExprKind::Ident(h)
-                            if h.root.is_none()
-                                && h.path.len() == 1
-                                && h.path[0].selects.is_empty()
-                                && h.path[0].name.name.as_str() == "this"
-                    );
-                if is_this && self.bare_member_names.contains(member.name.as_str()) {
-                    0
-                } else if is_this && self.string_member_names.contains(member.name.as_str()) {
-                    // class-perf P2: a string member leaf is self-determined.
+                if self.method_handle_chain_ok(expr)
+                    && self.method_instance_field_ok(expr, &member.name)
+                {
                     0
                 } else {
                     32

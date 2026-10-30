@@ -2972,6 +2972,13 @@ impl Simulator {
                 break;
             }
             let cd = self.module.classes.get(cn)?;
+            // A nearer static/property parameter hides an ancestor's enum
+            // literal. Let the ordinary class-static lookup resolve it.
+            if cd.static_properties.contains(member)
+                || cd.param_defaults.iter().any(|(name, _)| name == member)
+            {
+                return None;
+            }
             for (td_name, dt) in &cd.typedef_targets {
                 if !matches!(dt, DataType::Enum(_)) {
                     continue;
