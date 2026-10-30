@@ -1690,6 +1690,8 @@ impl Simulator {
         let signals = SignalMap {
             map: HashMap::default(),
             elems: HashMap::default(),
+            elem_gens: HashMap::default(),
+            elem_gen_counter: 0,
         };
         let widths: HashMap<String, u32> = HashMap::default();
         let signed_signals: HashSet<String> = HashSet::default();
@@ -4688,6 +4690,7 @@ impl Simulator {
             multi_modclass: std::cell::OnceCell::new(),
             has_modclass: std::cell::Cell::new(None),
             assoc_static_keys_cache: RefCell::new(HashMap::default()),
+            assoc_keys_cache: RefCell::new(HashMap::default()),
             sampled_watches: Vec::new(),
             sampled_defaults: HashMap::default(),
             time0_settled: false,

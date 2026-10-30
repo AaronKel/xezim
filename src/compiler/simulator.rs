@@ -6013,6 +6013,11 @@ impl VcdVarKind {
 pub struct SignalMap {
     map: HashMap<String, Value>,
     elems: HashMap<String, std::collections::HashSet<String>>,
+    /// Per base name, a stamp that changes whenever an element key is added
+    /// to or removed from `elems[base]` (absent = no element keys), so a
+    /// derived view of a base's key set can be cached until it changes.
+    elem_gens: HashMap<String, u64>,
+    elem_gen_counter: u64,
 }
 
 impl SignalMap {
@@ -6028,6 +6033,8 @@ impl SignalMap {
                     .entry(b.to_string())
                     .or_default()
                     .insert(k.clone());
+                self.elem_gen_counter += 1;
+                self.elem_gens.insert(b.to_string(), self.elem_gen_counter);
             }
         }
         self.map.insert(k, v)
@@ -6042,6 +6049,10 @@ impl SignalMap {
                     set.remove(k);
                     if set.is_empty() {
                         self.elems.remove(b);
+                        self.elem_gens.remove(b);
+                    } else {
+                        self.elem_gen_counter += 1;
+                        self.elem_gens.insert(b.to_string(), self.elem_gen_counter);
                     }
                 }
             }
@@ -6089,6 +6100,14 @@ impl SignalMap {
             .into_iter()
             .flat_map(|set| set.iter().map(|k| k.as_str()))
             .filter(move |k| k.starts_with(prefix))
+    }
+
+    /// The element-key stamp of the outermost base of `prefix` (which ends
+    /// in `[`): equal stamps mean an unchanged key set under that base.
+    pub fn elem_gen_for_prefix(&self, prefix: &str) -> u64 {
+        let base = &prefix[..prefix.len().saturating_sub(1)];
+        let outer = Self::base_of(base).unwrap_or(base);
+        self.elem_gens.get(outer).copied().unwrap_or(0)
     }
 
     /// Is any key under the outermost base of `prefix` prefixed by it?
@@ -9452,6 +9471,9 @@ pub struct Simulator {
     /// call-graph profile). The live half of the enumeration (elements
     /// in `self.signals`) is NOT cached — that map mutates at runtime.
     assoc_static_keys_cache: RefCell<HashMap<String, Arc<Vec<Arc<str>>>>>,
+    /// `assoc_top_level_keys` results, valid while the array's element-key
+    /// stamp (`SignalMap::elem_gen_for_prefix`) is unchanged.
+    assoc_keys_cache: RefCell<HashMap<String, (u64, Arc<Vec<String>>)>>,
     /// §16.9.3 sampled-value function watches: per call site, a history of
     /// the operand sampled (preponed) at each matching clock edge. hist[0]
     /// is the sample at the most recent edge, hist[1] one edge earlier, …

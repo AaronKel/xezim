@@ -1857,7 +1857,31 @@ impl Simulator {
     }
 
     pub(super) fn assoc_top_level_keys(&self, obj_name: &str) -> Vec<String> {
+        self.assoc_top_level_keys_shared(obj_name).as_ref().clone()
+    }
+
+    /// `assoc_top_level_keys`, shared and cached: `first`/`next`/`num` in a
+    /// loop over an unchanged array no longer rescan and re-sort every key.
+    pub(super) fn assoc_top_level_keys_shared(&self, obj_name: &str) -> Arc<Vec<String>> {
         let prefix = format!("{}[", obj_name);
+        let stamp = self.signals.elem_gen_for_prefix(&prefix);
+        if let Some((s, keys)) = self.assoc_keys_cache.borrow().get(obj_name) {
+            if *s == stamp {
+                return Arc::clone(keys);
+            }
+        }
+        let keys = Arc::new(self.assoc_top_level_keys_uncached(obj_name, &prefix));
+        let mut cache = self.assoc_keys_cache.borrow_mut();
+        // Per-call and per-object array names come and go; bound the cache
+        // rather than track every name's lifetime.
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(obj_name.to_string(), (stamp, Arc::clone(&keys)));
+        keys
+    }
+
+    fn assoc_top_level_keys_uncached(&self, obj_name: &str, prefix: &str) -> Vec<String> {
         // A STRUCT element stores member-wise leaves (`sa[k].id`), which do
         // not end in `]` — accept any entry whose key bracket closes, else
         // struct-element assoc arrays enumerate as empty (num()/foreach).
