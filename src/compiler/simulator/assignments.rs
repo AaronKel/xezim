@@ -3331,8 +3331,18 @@ impl Simulator {
                     }
                 }
                 if self.module.arrays_2d.contains_key(&*name) {
-                    let i = self.eval_expr(inner_idx).to_u64().unwrap_or(0) as i64;
-                    let j = self.eval_expr(index).to_u64().unwrap_or(0) as i64;
+                    // §7.4.5 / §11.5.1: unpacked indices are signed;
+                    // an unknown or out-of-bounds index performs no write.
+                    let (Some(i), Some(j)) = (
+                        self.eval_expr(inner_idx).to_index(),
+                        self.eval_expr(index).to_index(),
+                    ) else {
+                        return false;
+                    };
+                    let &((il, ih), (jl, jh), _) = &self.module.arrays_2d[&*name];
+                    if i < il.min(ih) || i > il.max(ih) || j < jl.min(jh) || j > jl.max(jh) {
+                        return false;
+                    }
                     let elem_name = format!("{}[{}][{}]", name, i, j);
                     if let Some(&id) = self.signal_name_to_id.get(elem_name.as_str()) {
                         let width = self.signal_widths[id];
