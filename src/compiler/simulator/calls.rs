@@ -3268,9 +3268,15 @@ impl Simulator {
             // dispatch when the vif is re-bound.
             if hier.path.len() >= 2 && hier.path.iter().all(|s| s.selects.is_empty()) {
                 let head = hier.path[0].name.name.as_str();
-                let head_owned = self
-                    .iface_alias_for(head)
-                    .unwrap_or_else(|| head.to_string());
+                // §25.9: rebase has already resolved a rooted interface
+                // receiver. Reapplying a same-named class alias would expand
+                // `sys_if.port.get_tx()` to `sys_if.port.port.get_tx()`.
+                let head_owned = if hier.root.is_none() {
+                    self.iface_alias_for(head)
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| head.to_string());
                 let mut segs: Vec<&str> = vec![head_owned.as_str()];
                 segs.extend(hier.path[1..].iter().map(|s| s.name.name.as_str()));
                 let full = segs.join(".");
