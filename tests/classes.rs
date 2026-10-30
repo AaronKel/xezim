@@ -954,3 +954,6 @@ mod random_mode_reenable;
 
 #[path = "classes/parenthesized_collection_return.rs"]
 mod parenthesized_collection_return;
+
+#[path = "classes/class_concat_unpack.rs"]
+mod class_concat_unpack;
