@@ -3075,6 +3075,20 @@ impl Simulator {
         )
     }
 
+    /// §25.9: a resolved virtual interface denotes a physical instance, not
+    /// another class property. Root the rewritten path so a matching property
+    /// name cannot rebind it again (e.g. `vif` bound to `vif.child`).
+    fn resolved_iface_expr(
+        path: Vec<crate::ast::expr::HierPathSegment>,
+        span: crate::ast::Span,
+    ) -> Expression {
+        let mut expr = Self::hier_ident_expr(path, span);
+        if let ExprKind::Ident(h) = &mut expr.kind {
+            h.root = Some("$root".to_string());
+        }
+        expr
+    }
+
     /// The path segments of interface instance `bound` (`bus`, `top.u.bus`,
     /// `INT[1]`).
     pub(super) fn iface_path_segs(
@@ -3221,7 +3235,7 @@ impl Simulator {
             }
             let mut segs = Self::iface_path_segs(&bound, span);
             segs.extend(h.path[i + 1..].iter().cloned());
-            return Some(Self::hier_ident_expr(segs, span));
+            return Some(Self::resolved_iface_expr(segs, span));
         }
         None
     }
@@ -3252,7 +3266,7 @@ impl Simulator {
                         name: member.clone(),
                         selects: Vec::new(),
                     });
-                    return Some(Self::hier_ident_expr(segs, e.span));
+                    return Some(Self::resolved_iface_expr(segs, e.span));
                 }
                 let nb = self.vif_rebase_chain(recv)?;
                 // A plain member of a rebased instance path stays flat too
@@ -3263,7 +3277,7 @@ impl Simulator {
                         name: member.clone(),
                         selects: Vec::new(),
                     });
-                    return Some(Self::hier_ident_expr(path, e.span));
+                    return Some(Self::resolved_iface_expr(path, e.span));
                 }
                 Some(Expression::new(
                     ExprKind::MemberAccess {
