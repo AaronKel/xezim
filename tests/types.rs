@@ -600,3 +600,6 @@ mod nonzero_formal_bitselect_650;
 
 #[path = "types/unpacked_array_parameter_reference.rs"]
 mod unpacked_array_parameter_reference;
+
+#[path = "types/array_parameter_imported_dimension.rs"]
+mod array_parameter_imported_dimension;
