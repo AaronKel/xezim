@@ -3899,6 +3899,10 @@ impl Simulator {
             dpi_bind_tried: HashSet::default(),
             uvm_dpi: Default::default(),
             heap: vec![None], // index 0 is null
+            class_gc_heap_len: 0,
+            class_gc_live: 0,
+            class_gc_released: 0,
+            class_gc_runs: 0,
             virtual_iface_bindings: HashMap::default(),
             static_vif_bindings: HashMap::default(),
             static_vif_names: HashSet::default(),
