@@ -920,3 +920,9 @@ mod package_constructor_scope;
 mod class_ref_signature;
 #[path = "classes/package_class_constraint.rs"]
 mod package_class_constraint;
+
+#[path = "classes/nonrand_handle_constraint_state.rs"]
+mod nonrand_handle_constraint_state;
+
+#[path = "classes/conditional_enum_exclusions.rs"]
+mod conditional_enum_exclusions;
