@@ -234,7 +234,13 @@ impl Simulator {
                     // Unknown type (missing property_types entry): assume the
                     // safe side and refuse to lower.
                     .unwrap_or(false);
-                if unpacked || !integral_or_handle {
+                // Virtual interfaces carry an instance-name binding outside
+                // the heap Value. A typedef or type parameter may hide that
+                // shape; copying the numeric cell alone loses the binding.
+                // This admission set is shared across specializations, so a
+                // type parameter that may carry a vif must keep the AST path.
+                let vif_capable = Self::static_is_vif_capable(cd, p);
+                if unpacked || vif_capable || !integral_or_handle {
                     bad.insert(p.clone());
                 }
             }
