@@ -4368,9 +4368,38 @@ impl Simulator {
     }
 
     pub(super) fn expand_unique_slices(
+        &self,
+        handle: usize,
         constraints: &mut [ClassConstraint],
         params: &HashMap<String, Value>,
     ) {
+        // Only unpacked collections represent the array-uniqueness form.
+        // A packed part-select is one integral value, not distinct bits.
+        let mut arrays = HashSet::default();
+        let mut seen_members = HashSet::default();
+        let mut cls = self
+            .heap
+            .get(handle)
+            .and_then(|o| o.as_ref())
+            .map(|o| o.class_name.as_str());
+        while let Some(name) = cls {
+            let Some(def) = self.module.classes.get(name) else {
+                break;
+            };
+            for prop in def
+                .array_properties
+                .keys()
+                .chain(def.array_nd_properties.keys())
+                .chain(def.queue_properties.keys())
+                .chain(def.assoc_properties.keys())
+            {
+                if !seen_members.contains(prop) {
+                    arrays.insert(prop.clone());
+                }
+            }
+            seen_members.extend(def.properties.keys().cloned());
+            cls = def.extends.as_deref();
+        }
         fn idx_expr(i: i64, span: crate::ast::Span) -> Expression {
             Expression::new(
                 ExprKind::Number(NumberLiteral::Integer {
@@ -4406,15 +4435,16 @@ impl Simulator {
         fn walk(
             item: &mut ConstraintItem,
             params: &HashMap<String, Value>,
+            arrays: &HashSet<String>,
             seen: &mut HashSet<(String, i64, i64)>,
         ) {
             match item {
                 ConstraintItem::Block(items) => {
                     for it in items.iter_mut() {
-                        walk(it, params, seen);
+                        walk(it, params, arrays, seen);
                     }
                 }
-                ConstraintItem::Soft(inner) => walk(inner, params, seen),
+                ConstraintItem::Soft(inner) => walk(inner, params, arrays, seen),
                 ConstraintItem::Expr(e) => {
                     let ExprKind::Binary {
                         op: BinaryOp::Neq,
@@ -4435,7 +4465,7 @@ impl Simulator {
                         let ExprKind::Ident(h) = &expr.kind else {
                             return None;
                         };
-                        if h.path.len() != 1 {
+                        if h.path.len() != 1 || !arrays.contains(&h.path[0].name.name) {
                             return None;
                         }
                         let lo = Simulator::const_expr_u64(left, params)? as i64;
@@ -4475,7 +4505,7 @@ impl Simulator {
         let mut seen: HashSet<(String, i64, i64)> = HashSet::default();
         for con in constraints.iter_mut() {
             for it in con.items.iter_mut() {
-                walk(it, params, &mut seen);
+                walk(it, params, &arrays, &mut seen);
             }
         }
     }
