@@ -1498,6 +1498,7 @@ impl Simulator {
             ConstraintItem,
         )> = Vec::new();
         fn walk(
+            sim: &mut Simulator,
             item: &ConstraintItem,
             colls: &[RandColl],
             jobs: &mut Vec<(
@@ -1523,16 +1524,39 @@ impl Simulator {
                 }
                 ConstraintItem::Block(items) => {
                     for i in items {
-                        walk(i, colls, jobs);
+                        walk(sim, i, colls, jobs);
                     }
                 }
-                ConstraintItem::Soft(i) => walk(i, colls, jobs),
+                ConstraintItem::Soft(i) => walk(sim, i, colls, jobs),
+                // §18.5.6/§18.5.7: collect foreach repairs only from the
+                // branch active for the current scalar assignment.
+                ConstraintItem::IfElse {
+                    condition,
+                    then_item,
+                    else_item,
+                    ..
+                } => {
+                    if sim.cons_expr_true(condition) {
+                        walk(sim, then_item, colls, jobs);
+                    } else if let Some(other) = else_item {
+                        walk(sim, other, colls, jobs);
+                    }
+                }
+                ConstraintItem::Implication {
+                    condition,
+                    constraint,
+                    ..
+                } => {
+                    if sim.cons_expr_true(condition) {
+                        walk(sim, constraint, colls, jobs);
+                    }
+                }
                 _ => {}
             }
         }
         for con in constraints {
             for it in &con.items {
-                walk(it, colls, &mut jobs);
+                walk(self, it, colls, &mut jobs);
             }
         }
         for (c, vars, body) in jobs {
@@ -1726,9 +1750,19 @@ impl Simulator {
                 expr,
                 range,
                 is_dist,
+                dist_weights,
                 ..
             } => {
-                if *is_dist || self.coll_elem_expr_key(expr).as_deref() != Some(elem_key) {
+                if self.coll_elem_expr_key(expr).as_deref() != Some(elem_key) {
+                    return false;
+                }
+                // §18.5.4: the dynamic-array baseline was freshly drawn;
+                // a foreach dist item must draw from its weighted support,
+                // not rely on rejection of full-width random element values.
+                if *is_dist {
+                    if let Some(picked) = self.pick_dist_value(None, range, dist_weights) {
+                        self.write_coll_elem(elem_key, picked.resize(width));
+                    }
                     return false;
                 }
                 let cur = self
@@ -1863,21 +1897,44 @@ impl Simulator {
         pinned: &mut HashSet<String>,
     ) {
         let mut items: Vec<ConstraintItem> = Vec::new();
-        fn walk(item: &ConstraintItem, out: &mut Vec<ConstraintItem>) {
+        fn walk(sim: &mut Simulator, item: &ConstraintItem, out: &mut Vec<ConstraintItem>) {
             match item {
                 ConstraintItem::Block(is) => {
                     for i in is {
-                        walk(i, out);
+                        walk(sim, i, out);
                     }
                 }
-                ConstraintItem::Soft(i) => walk(i, out),
+                ConstraintItem::Soft(i) => walk(sim, i, out),
+                // §18.5.6/§18.5.7: the post-draw element repair must also
+                // restore equalities in the active conditional branch.
+                ConstraintItem::IfElse {
+                    condition,
+                    then_item,
+                    else_item,
+                    ..
+                } => {
+                    if sim.cons_expr_true(condition) {
+                        walk(sim, then_item, out);
+                    } else if let Some(other) = else_item {
+                        walk(sim, other, out);
+                    }
+                }
+                ConstraintItem::Implication {
+                    condition,
+                    constraint,
+                    ..
+                } => {
+                    if sim.cons_expr_true(condition) {
+                        walk(sim, constraint, out);
+                    }
+                }
                 ConstraintItem::Foreach { .. } | ConstraintItem::Unique { .. } => {}
                 other => out.push(other.clone()),
             }
         }
         for con in constraints {
             for it in &con.items {
-                walk(it, &mut items);
+                walk(self, it, &mut items);
             }
         }
         for item in items {
@@ -2293,7 +2350,11 @@ impl Simulator {
     /// §18.5.9 — an lvalue reaching THROUGH a rand class-handle member
     /// (`sub_inst.sub_data`). Returns the sub-object's handle and the member
     /// name, so a cross-object equality can be forced onto it.
-    pub(super) fn cross_obj_lvalue(&mut self, e: &Expression) -> Option<(usize, String)> {
+    pub(super) fn cross_obj_lvalue(
+        &mut self,
+        e: &Expression,
+        rand_set: &HashSet<String>,
+    ) -> Option<(usize, String)> {
         let (obj, field) = match &e.kind {
             ExprKind::Ident(h) if h.path.len() == 2 => {
                 (h.path[0].name.name.clone(), h.path[1].name.name.clone())
@@ -2307,7 +2368,12 @@ impl Simulator {
             _ => return None,
         };
         let this = self.this_stack.last().copied().flatten()?;
-        // `obj` must be a class-handle member of the enclosing object.
+        // §18.4/§18.5.9: a rand field in a non-rand (or disabled) handle
+        // remains state for this solve. Do not repair equalities by mutating
+        // configuration objects reached through such handles.
+        if !rand_set.contains(&obj) {
+            return None;
+        }
         self.prop_class_type(this, &obj)?;
         let sub = self
             .heap

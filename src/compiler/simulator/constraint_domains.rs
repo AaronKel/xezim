@@ -1393,7 +1393,7 @@ impl Simulator {
         }
         // Gather the operand expressions to exclude.
         let mut to_eval: Vec<Expression> = Vec::new();
-        fn walk(item: &ConstraintItem, field: &str, out: &mut Vec<Expression>) {
+        fn walk(sim: &mut Simulator, item: &ConstraintItem, field: &str, out: &mut Vec<Expression>) {
             match item {
                 ConstraintItem::Expr(e) => match &e.kind {
                     ExprKind::Unary {
@@ -1429,16 +1429,39 @@ impl Simulator {
                 },
                 ConstraintItem::Block(items) => {
                     for it in items {
-                        walk(it, field, out);
+                        walk(sim, it, field, out);
                     }
                 }
-                ConstraintItem::Soft(inner) => walk(inner, field, out),
+                ConstraintItem::Soft(inner) => walk(sim, inner, field, out),
+                // §18.5.6/§18.5.7: only the currently active branch excludes
+                // values. The outer repair loop rechecks after scalar changes.
+                ConstraintItem::IfElse {
+                    condition,
+                    then_item,
+                    else_item,
+                    ..
+                } => {
+                    if sim.cons_expr_true(condition) {
+                        walk(sim, then_item, field, out);
+                    } else if let Some(other) = else_item {
+                        walk(sim, other, field, out);
+                    }
+                }
+                ConstraintItem::Implication {
+                    condition,
+                    constraint,
+                    ..
+                } => {
+                    if sim.cons_expr_true(condition) {
+                        walk(sim, constraint, field, out);
+                    }
+                }
                 _ => {}
             }
         }
         for con in constraints {
             for item in &con.items {
-                walk(item, field, &mut to_eval);
+                walk(self, item, field, &mut to_eval);
             }
         }
         let mut excluded: HashSet<u64> = HashSet::default();
@@ -2168,11 +2191,11 @@ impl Simulator {
                     // are solved simultaneously per the LRM; here the enclosing
                     // object's variables are already drawn, so the sub-object's
                     // variable takes the implied value.
-                    if let Some((sub, field)) = self.cross_obj_lvalue(left) {
+                    if let Some((sub, field)) = self.cross_obj_lvalue(left, rand_set) {
                         let val = self.eval_expr(right);
                         return self.set_prop_if_changed(sub, &field, val);
                     }
-                    if let Some((sub, field)) = self.cross_obj_lvalue(right) {
+                    if let Some((sub, field)) = self.cross_obj_lvalue(right, rand_set) {
                         let val = self.eval_expr(left);
                         return self.set_prop_if_changed(sub, &field, val);
                     }
