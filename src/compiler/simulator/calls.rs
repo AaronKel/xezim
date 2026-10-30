@@ -63,6 +63,29 @@ impl Simulator {
     }
 
     pub(super) fn eval_call_inner(&mut self, func: &Expression, args: &[Expression]) -> Value {
+        // §26.3 / §35.5.4: package-local DPI names have qualified entries,
+        // just like ordinary package functions. Preserve the declaring scope.
+        let package_dpi = match &func.kind {
+            ExprKind::MemberAccess { expr, member } => match &expr.kind {
+                ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() =>
+                    Some((h.path[0].name.name.as_str(), member.name.as_str())),
+                _ => None,
+            },
+            ExprKind::Ident(h) if h.path.len() == 2
+                && h.path.iter().all(|s| s.selects.is_empty()) =>
+                Some((h.path[0].name.name.as_str(), h.path[1].name.name.as_str())),
+            _ => None,
+        };
+        if let Some((pkg, name)) = package_dpi
+            && self.module.packages.contains(pkg)
+            && !self.local_stack.last().is_some_and(|m| m.contains_key(pkg))
+            && !self.signal_name_to_id.contains_key(pkg)
+        {
+            let key = format!("{pkg}::{name}");
+            if let Some(value) = self.exec_dpi_import_call(&key, args) {
+                return value;
+            }
+        }
         // §7.5.2, §7.9.1, §7.10.2: a collection method on a function's
         // returned queue, dynamic or associative array (`f().size()`).
         if let ExprKind::MemberAccess { expr: recv, member } = &func.kind

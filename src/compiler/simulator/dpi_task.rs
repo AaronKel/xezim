@@ -166,6 +166,14 @@ impl Simulator {
             ExprKind::Ident(_) => e,
             _ => return None,
         };
+        if let ExprKind::MemberAccess { expr, member } = &func.kind
+            && let ExprKind::Ident(h) = &expr.kind
+            && h.path.len() == 1 && h.path[0].selects.is_empty()
+            && self.module.packages.contains(&h.path[0].name.name)
+        {
+            let key = format!("{}::{}", h.path[0].name.name, member.name);
+            return self.dpi_task_names.contains(&key).then_some((key, None));
+        }
         let ExprKind::Ident(h) = &func.kind else {
             return None;
         };
@@ -175,6 +183,10 @@ impl Simulator {
         }
         if h.path.len() == 1 {
             return Some((last.name.name.clone(), None));
+        }
+        if h.path.len() == 2 && self.module.packages.contains(&h.path[0].name.name) {
+            let key = format!("{}::{}", h.path[0].name.name, last.name.name);
+            return self.dpi_task_names.contains(&key).then_some((key, None));
         }
         // As the call path does (`exec_dpi_import_call_in`): a prefix that
         // names an instance is the scope the call runs in.

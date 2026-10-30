@@ -1176,6 +1176,18 @@ impl Simulator {
         args: &[Expression],
         via: Option<&str>,
     ) -> Option<Value> {
+        // §26.3: a bare call in a package subroutine resolves in that
+        // package before the design-wide compatibility alias.
+        let scoped_name = if !sv_name.contains("::") && via.is_none() {
+            self.m_scope_stack.first()
+                .and_then(|f| f.strip_prefix(M_ROOT_MARK))
+                .filter(|p| self.module.packages.contains(*p))
+                .map(|p| format!("{p}::{sv_name}"))
+                .filter(|key| self.module.dpi_imports.contains_key(key))
+        } else {
+            None
+        };
+        let sv_name = scoped_name.as_deref().unwrap_or(sv_name);
         // §13.5.3 / §13.5.4: an import call binds its actuals like any
         // subroutine call — `.name(expr)` to the named formal, an omitted
         // one from its default. They were taken by position only, so a

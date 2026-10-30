@@ -609,3 +609,6 @@ mod packed_package_parameter_element;
 
 #[path = "types/module_struct_localparam_first_instance.rs"]
 mod module_struct_localparam_first_instance;
+
+#[path = "types/enum_scope_677.rs"]
+mod enum_scope_677;
