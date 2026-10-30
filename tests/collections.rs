@@ -222,3 +222,6 @@ mod row_of_2d_array_assign;
 mod conditional_aggregate_659;
 #[path = "collections/inside_associative_values.rs"]
 mod inside_associative_values;
+
+#[path = "collections/foreach_indexed_receiver.rs"]
+mod foreach_indexed_receiver;
