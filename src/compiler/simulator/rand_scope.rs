@@ -26,6 +26,69 @@ pub(super) struct RandChildTransaction {
 }
 
 impl Simulator {
+    /// §18.8/§18.9: whole-object mode changes apply to each declared member.
+    /// Store names, so a later per-member enable can override a bulk disable.
+    pub(super) fn set_object_random_mode(
+        &mut self,
+        handle: usize,
+        rand_mode: bool,
+        target: Option<&str>,
+        enable: bool,
+    ) {
+        let mut names = HashSet::default();
+        // §18.5.11: a static block's mode is one class-wide flag, keyed by
+        // its declaring class, so a bulk change reaches it there.
+        let mut static_blocks = Vec::new();
+        if target.is_none() {
+            let mut cls = self
+                .heap
+                .get(handle)
+                .and_then(|o| o.as_ref())
+                .map(|o| o.class_name.as_str());
+            while let Some(name) = cls {
+                let Some(def) = self.module.classes.get(name) else {
+                    break;
+                };
+                if rand_mode {
+                    names.extend(def.random_properties.iter().cloned());
+                } else {
+                    for (con_name, con) in &def.constraints {
+                        if con.is_static {
+                            static_blocks.push((name.to_string(), con_name.clone()));
+                        } else {
+                            names.insert(con_name.clone());
+                        }
+                    }
+                }
+                cls = def.extends.as_deref();
+            }
+        }
+        for key in static_blocks {
+            if enable {
+                self.static_constraint_disabled.remove(&key);
+            } else {
+                self.static_constraint_disabled.insert(key);
+            }
+        }
+        let table = if rand_mode {
+            &mut self.rand_mode_disabled
+        } else {
+            &mut self.constraint_mode_disabled
+        };
+        let disabled = table.entry(handle).or_default();
+        match (target, enable) {
+            (Some(name), true) => {
+                disabled.remove(name);
+            }
+            (Some(name), false) => {
+                disabled.insert(name.to_string());
+            }
+            (None, true) => disabled.clear(),
+            (None, false) => {
+                disabled.extend(names);
+            }
+        }
+    }
     /// Budget exhaustion can occur in the parent after a child rolled back.
     /// Include active child constraints when identifying the failed solve.
     pub(super) fn failed_child_constraint_names(&mut self, handle: usize) -> Vec<String> {
