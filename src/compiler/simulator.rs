@@ -13582,3 +13582,6 @@ impl PatCmp {
 
 #[cfg(test)]
 mod event_name_tests;
+
+#[cfg(test)]
+mod class_heap_lifetime_tests;
