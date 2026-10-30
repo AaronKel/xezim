@@ -8403,6 +8403,10 @@ pub struct Simulator {
     /// Number of live children capturing each key in
     /// `fork_collection_captures`, so a cleanup check is one lookup.
     fork_capture_refs: HashMap<String, usize>,
+    /// Live fork children holding each activation (frame generation), and
+    /// the generations each child was indexed under.
+    fork_gen_pids: HashMap<u64, HashSet<usize>>,
+    fork_pid_gens: HashMap<usize, Vec<u64>>,
     /// Lexical block identities of each child's captured locals.
     fork_local_scopes: HashMap<usize, HashMap<u64, HashMap<String, u64>>>,
     deferred_collection_cleanup: HashSet<String>,

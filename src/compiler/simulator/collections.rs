@@ -3581,8 +3581,19 @@ impl Simulator {
         key
     }
 
-    /// Release a terminating child's captures; clean storage once no child needs it.
+    /// Release a terminating child's captures (cleaning storage once no child
+    /// needs it) and its entries in the activation index `fork_gen_pids`.
     pub(super) fn release_fork_collections(&mut self, pid: usize) {
+        if let Some(gens) = self.fork_pid_gens.remove(&pid) {
+            for g in gens {
+                if let Some(pids) = self.fork_gen_pids.get_mut(&g) {
+                    pids.remove(&pid);
+                    if pids.is_empty() {
+                        self.fork_gen_pids.remove(&g);
+                    }
+                }
+            }
+        }
         if let Some(keys) = self.fork_collection_captures.remove(&pid) {
             for key in keys {
                 if let Some(n) = self.fork_capture_refs.get_mut(&key) {

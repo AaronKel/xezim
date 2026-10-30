@@ -4303,6 +4303,8 @@ impl Simulator {
             fork_baselines: HashMap::default(),
             fork_collection_captures: HashMap::default(),
             fork_capture_refs: HashMap::default(),
+            fork_gen_pids: HashMap::default(),
+            fork_pid_gens: HashMap::default(),
             fork_local_scopes: HashMap::default(),
             deferred_collection_cleanup: HashSet::default(),
             fork_signal_captures: HashMap::default(),
