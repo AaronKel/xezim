@@ -945,3 +945,6 @@ mod compiled_method_scope_and_member_stores;
 
 #[path = "classes/randomize_no_parentheses.rs"]
 mod randomize_no_parentheses;
+
+#[path = "classes/inside_shift_width.rs"]
+mod inside_shift_width;
