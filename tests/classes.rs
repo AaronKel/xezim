@@ -936,3 +936,6 @@ mod enum_collection_domains;
 
 #[path = "classes/state_array_size_bound.rs"]
 mod state_array_size_bound;
+
+#[path = "classes/argument_binding_selected_and_output.rs"]
+mod argument_binding_selected_and_output;

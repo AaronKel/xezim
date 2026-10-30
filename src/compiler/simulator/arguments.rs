@@ -1865,7 +1865,9 @@ impl Simulator {
             let ExprKind::MemberAccess { expr, member } = &arg.kind else {
                 return None;
             };
-            let handle = self.eval_handle_expr(expr)?;
+            // Actuals are evaluated in the caller, including selected
+            // handles in local/formal collections (`q[i].data`).
+            let handle = self.eval_live_object_receiver(expr)?;
             let cname = self.handle_collection_name(handle, &member.name)?;
             return self.is_unpacked_array_storage(&cname).then_some(cname);
         };
