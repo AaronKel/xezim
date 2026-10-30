@@ -5347,6 +5347,10 @@ impl Simulator {
                 }
 
                 if let Some(e) = expr {
+                    // Parentheses do not change an unpacked return's shape.
+                    // Recognize the collection before falling back to a
+                    // scalar Value (which would turn an empty queue into {0}).
+                    let e = Self::unparen(e);
                     // One call for a receiver call in the returned chain
                     // (`return me().o.x;`), shared by the probes below.
                     let pinned = Self::recv_chain_call(e)
