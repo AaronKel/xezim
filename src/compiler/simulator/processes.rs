@@ -307,6 +307,12 @@ impl Simulator {
             .filter(|key| key.starts_with('@'))
             .cloned()
             .collect();
+        // Index the child under every activation it holds, for the sibling
+        // write broadcast in `run_scheduled_process_inner`.
+        for &g in &ctx.local_gen_stack {
+            self.fork_gen_pids.entry(g).or_default().insert(pid);
+        }
+        self.fork_pid_gens.insert(pid, ctx.local_gen_stack.clone());
         if !collections.is_empty() {
             for key in &collections {
                 *self.fork_capture_refs.entry(key.clone()).or_default() += 1;
@@ -1261,10 +1267,29 @@ impl Simulator {
                         .is_some_and(|old| old != *v)
                 }).map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
             if changes.iter().any(|frame| !frame.is_empty()) {
-                for (other_pid, other) in self.process_contexts.iter_mut() {
-                    if Some(*other_pid) == fork_parent || !self.fork_baselines.contains_key(other_pid) {
+                // Only a fork child holding one of the changed frames' own
+                // activations can receive a write (`merge_fork_writes`
+                // matches frames by generation), so visit just those, not
+                // every parked process.
+                let mut candidates: Vec<usize> = changes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, frame)| !frame.is_empty())
+                    .filter_map(|(i, _)| self.fork_gen_pids.get(child_frames_gen.get(i)?))
+                    .flatten()
+                    .copied()
+                    .filter(|&p| p != pid && Some(p) != fork_parent)
+                    .collect();
+                candidates.sort_unstable();
+                candidates.dedup();
+                for other_pid in candidates {
+                    let Some(other) = self.process_contexts.get_mut(&other_pid) else {
+                        continue;
+                    };
+                    if !self.fork_baselines.contains_key(&other_pid) {
                         continue;
                     }
+                    let other_pid = &other_pid;
                     let mut other_scopes = self.fork_local_scopes.get(other_pid).cloned().unwrap_or_default();
                     Self::overlay_fork_local_scopes(&mut other_scopes, &other.block_scope_saves);
                     let mut visible = changes.clone();

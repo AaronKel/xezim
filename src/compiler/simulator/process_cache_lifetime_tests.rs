@@ -224,4 +224,6 @@ fn disabled_fork_children_release_captured_collections() {
     assert!(sim.fork_capture_refs.is_empty());
     assert!(sim.deferred_collection_cleanup.is_empty());
     assert!(sim.fork_local_scopes.is_empty());
+    assert!(sim.fork_gen_pids.is_empty());
+    assert!(sim.fork_pid_gens.is_empty());
 }
