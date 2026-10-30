@@ -3963,6 +3963,19 @@ impl Simulator {
         call: &Expression,
         constraints: &[crate::ast::decl::ConstraintItem],
     ) -> Value {
+        // §18.7: the empty argument parentheses may be omitted. The parser
+        // then retains the method reference rather than a Call node; falling
+        // through to eval_expr executes randomize but discards its with block.
+        if !matches!(call.kind, ExprKind::Call { .. }) {
+            let call = Expression::new(
+                ExprKind::Call {
+                    func: Box::new(call.clone()),
+                    args: Vec::new(),
+                },
+                call.span,
+            );
+            return self.eval_randomize_with(&call, constraints);
+        }
         if let ExprKind::Call { func, args } = &call.kind {
             if let ExprKind::MemberAccess { expr, member } = &func.kind {
                 if member.name == "randomize" {
