@@ -46,3 +46,32 @@ fn packed_package_parameter_element() {
         ],
     );
 }
+
+/// §7.4.5: ascending ranges use the same element order in every context.
+#[test]
+fn ascending_package_parameter_selects() {
+    let sim = simulate(
+        r#"
+package ascending;
+  parameter logic [0:3][3:0] A = 16'h1234;
+endpackage
+module top;
+  import ascending::*;
+  localparam int FIRST = ascending::A[0];
+  localparam int LAST = A[3];
+  int i;
+  wire [3:0] v = ascending::A[i];
+  initial begin
+    $display("%0d %0d", FIRST, LAST);
+    for (i = 0; i < 4; i++) begin
+      #1 $display("%h %h", v, A[i]);
+    end
+  end
+endmodule
+"#,
+        100,
+    )
+    .expect("simulate");
+    let msgs: Vec<_> = sim.output.iter().map(|o| o.message.as_str()).collect();
+    assert_eq!(msgs, ["1 4", "1 1", "2 2", "3 3", "4 4"]);
+}

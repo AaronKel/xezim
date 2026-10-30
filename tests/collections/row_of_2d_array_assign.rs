@@ -40,3 +40,27 @@ fn row_of_2d_array_assign() {
     let msgs: Vec<String> = sim.output.iter().map(|o| o.message.clone()).collect();
     assert_eq!(msgs, ["11 22 33 | 44 55 66 | 77 88 99 | 77 88 99"]);
 }
+
+/// §7.6, §10.3: declaration order and later source changes survive expansion.
+#[test]
+fn row_assign_tracks_descending_source_updates() {
+    let sim = simulate(
+        r#"
+module top;
+  logic [7:0] src [-1:0][4:2];
+  wire [7:0] dst [10:12];
+  assign dst = src[-1];
+  initial begin
+    src[-1][4] = 8'h11; src[-1][3] = 8'h22; src[-1][2] = 8'h33;
+    #1 $display("%h %h %h", dst[10], dst[11], dst[12]);
+    src[-1][3] = 8'h55;
+    #1 $display("%h %h %h", dst[10], dst[11], dst[12]);
+  end
+endmodule
+"#,
+        100,
+    )
+    .expect("simulate");
+    let msgs: Vec<_> = sim.output.iter().map(|o| o.message.as_str()).collect();
+    assert_eq!(msgs, ["11 22 33", "11 55 33"]);
+}

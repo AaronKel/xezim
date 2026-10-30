@@ -37,3 +37,27 @@ fn unpacked_array_parameter_reference() {
         ],
     );
 }
+
+/// §6.20.2: named real-array parameters retain their element values and type.
+#[test]
+fn named_real_array_parameter_reference() {
+    let sim = simulate(
+        r#"
+package reals;
+  parameter real A[2] = '{1.5, 2.5};
+endpackage
+module leaf #(parameter real A[2] = reals::A);
+  initial $display("%m %0.1f %0.1f", A[0], A[1]);
+endmodule
+module mid #(parameter real A[2] = reals::A);
+  leaf #(.A(A)) v();
+endmodule
+module top; leaf u(); mid w(); endmodule
+"#,
+        100,
+    )
+    .expect("simulate");
+    let mut msgs: Vec<_> = sim.output.iter().map(|o| o.message.as_str()).collect();
+    msgs.sort();
+    assert_eq!(msgs, ["top.u 1.5 2.5", "top.w.v 1.5 2.5"]);
+}
