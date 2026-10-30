@@ -258,6 +258,10 @@ impl Simulator {
         let mut ctx = self.snapshot_process_context();
         // The parent's open block scopes close in the parent's stream, never
         // in the child's.
+        let mut local_scopes = self.fork_local_scopes.get(&self.current_pid)
+            .cloned().unwrap_or_default();
+        Self::overlay_fork_local_scopes(&mut local_scopes, &ctx.block_scope_saves);
+        self.fork_local_scopes.insert(pid, local_scopes);
         ctx.block_scope_saves.clear();
         // §6.21/§9.3.2: automatic block-locals (no call frame) live in
         // `self.signals` and are listed in `auto_loop_vars`. Copy their
@@ -295,6 +299,17 @@ impl Simulator {
                 }
             }
         }
+        let collections: HashSet<String> = ctx
+            .local_dyn
+            .iter()
+            .chain(ctx.formal_dyn.iter())
+            .flat_map(|frame| frame.iter().map(|(_, key)| key))
+            .filter(|key| key.starts_with('@'))
+            .cloned()
+            .collect();
+        if !collections.is_empty() {
+            self.fork_collection_captures.insert(pid, collections);
+        }
         let trivial = ctx.this_stack.is_empty()
             && ctx.local_stack.is_empty()
             && ctx.class_context_stack.is_empty()
@@ -314,7 +329,8 @@ impl Simulator {
             // child later WRITES (value changes), not keys it merely inherited
             // (which the parent may have modified in the meantime — e.g. a
             // mailbox-get delivery into `phase` while this child runs).
-            self.fork_baselines.insert(pid, ctx.local_stack.clone());
+            self.fork_baselines
+                .insert(pid, Arc::new(ctx.local_stack.clone()));
             self.fork_signal_captures.insert(pid, signal_caps);
             self.process_contexts.insert(pid, ctx);
         }
@@ -1158,6 +1174,9 @@ impl Simulator {
         // every field, so a clone bought nothing) and moved back at the end.
         let mut saved = self.take_process_context();
         let ctx = self.process_contexts.remove(&pid).unwrap_or_default();
+        let sibling_baseline = self.fork_baselines.get(&pid).cloned();
+        let mut sibling_scopes = self.fork_local_scopes.get(&pid).cloned().unwrap_or_default();
+        let fork_parent = self.process_parents.get(&pid).copied();
         self.restore_process_context(ctx);
         self.run_process_payload(pid, stmts);
         let suspended = self.is_pid_suspended(pid);
@@ -1183,7 +1202,7 @@ impl Simulator {
         //       into `self.signals`, which is what the parent reads from.
         let child_frames: &[HashMap<String, Value>] = &child_ctx.local_stack;
         let child_frames_gen: &[u64] = &child_ctx.local_gen_stack;
-        let baseline = self.fork_baselines.get(&pid);
+        let baseline = self.fork_baselines.get(&pid).map(Arc::as_ref);
         let signal_caps = self.fork_signal_captures.get(&pid);
         // Parent-frame keys the child's writes reached, for the wake below.
         let mut written: Vec<String> = Vec::new();
@@ -1226,6 +1245,38 @@ impl Simulator {
                     .is_some_and(|old| old == v);
                 if !inherited_unchanged {
                     self.signals.insert(nm.clone(), v.clone());
+                }
+            }
+        }
+        // Match both task activation and lexical block activation. Repeated
+        // loop-block declarations share a flattened frame but not storage.
+        if let Some(sibling_baseline) = &sibling_baseline {
+            Self::overlay_fork_local_scopes(&mut sibling_scopes, &child_ctx.block_scope_saves);
+            let changes: Vec<HashMap<String, Value>> = child_frames.iter().enumerate()
+                .map(|(i, frame)| frame.iter().filter(|(k, v)| {
+                    sibling_baseline.get(i).and_then(|base| base.get(*k))
+                        .is_some_and(|old| old != *v)
+                }).map(|(k, v)| (k.clone(), v.clone())).collect()).collect();
+            if changes.iter().any(|frame| !frame.is_empty()) {
+                for (other_pid, other) in self.process_contexts.iter_mut() {
+                    if Some(*other_pid) == fork_parent || !self.fork_baselines.contains_key(other_pid) {
+                        continue;
+                    }
+                    let mut other_scopes = self.fork_local_scopes.get(other_pid).cloned().unwrap_or_default();
+                    Self::overlay_fork_local_scopes(&mut other_scopes, &other.block_scope_saves);
+                    let mut visible = changes.clone();
+                    for (i, frame) in visible.iter_mut().enumerate() {
+                        let frame_generation = child_frames_gen.get(i).copied().unwrap_or(0);
+                        frame.retain(|key, _| {
+                            sibling_scopes.get(&frame_generation).and_then(|m| m.get(key))
+                                == other_scopes.get(&frame_generation).and_then(|m| m.get(key))
+                        });
+                    }
+                    let updates = Self::merge_fork_writes(
+                        &mut other.local_stack, &other.local_gen_stack,
+                        &visible, child_frames_gen, None,
+                    );
+                    written.extend(updates);
                 }
             }
         }
@@ -1913,6 +1964,19 @@ impl Simulator {
             }
         }
         self.fast_delay_always.insert(pid, fast);
+    }
+
+    /// Track lexical declarations separately from flattened frame slots.
+    fn overlay_fork_local_scopes(
+        scopes: &mut HashMap<u64, HashMap<String, u64>>,
+        blocks: &[BlockScopeSave],
+    ) {
+        for block in blocks {
+            for name in &block.declared_names {
+                scopes.entry(block.frame_gen).or_default()
+                    .insert(name.clone(), block.scope_gen);
+            }
+        }
     }
 
     /// Merge a fork child's local-frame writes into a parent's `local_stack`.

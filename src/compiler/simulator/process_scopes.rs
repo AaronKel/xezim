@@ -1270,6 +1270,7 @@ impl Simulator {
             return None;
         }
         let mut sv = BlockScopeSave {
+            scope_gen: self.next_frame_gen(),
             frame_gen: self.local_gen_stack.last().copied().unwrap_or(0),
             pid_mark: self.next_pid,
             ..Default::default()
@@ -1325,6 +1326,7 @@ impl Simulator {
             let plain = Self::type_is_plain_scalar(data_type);
             for d in declarators {
                 let nm = d.name.name.as_str();
+                sv.declared_names.push(nm.to_string());
                 if d.dimensions.is_empty() && self.is_virtual_iface_type(data_type) {
                     // §6.21 / §25.9: hiding a variable also hides its binding.
                     // Values alone cannot restore the enclosing vif after a

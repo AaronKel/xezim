@@ -189,6 +189,8 @@ impl Simulator {
             self.process_parents.remove(&p);
             self.process_contexts.remove(&p);
             self.fork_baselines.remove(&p);
+            self.fork_local_scopes.remove(&p);
+            self.release_fork_collections(p);
             self.fork_signal_captures.remove(&p);
             self.suspended_loop_frames.remove(&p);
         }
@@ -462,6 +464,8 @@ impl Simulator {
         }
         self.suspended_loop_frames.remove(&child_pid);
         self.fork_baselines.remove(&child_pid);
+        self.fork_local_scopes.remove(&child_pid);
+        self.release_fork_collections(child_pid);
         self.fork_signal_captures.remove(&child_pid);
         self.process_contexts.remove(&child_pid);
         // §9.7: wake any process awaiting this one's termination.

@@ -3581,6 +3581,17 @@ impl Simulator {
         key
     }
 
+    /// Release a terminating child's captures; clean storage once no child needs it.
+    pub(super) fn release_fork_collections(&mut self, pid: usize) {
+        if let Some(keys) = self.fork_collection_captures.remove(&pid) {
+            for key in keys {
+                if self.deferred_collection_cleanup.remove(&key) {
+                    self.cleanup_dyn_storage(&key);
+                }
+            }
+        }
+    }
+
     /// Remove all runtime signal/registration bookkeeping for a renamed
     /// local-dyn-array storage key (its `.size`, its `[i]` elements, and the
     /// `module.*` collection registrations). Used when a declaration is
@@ -3591,6 +3602,14 @@ impl Simulator {
         // removing them here would corrupt a concurrent process's queue.
         // (Identity-mapped formals and module-level arrays are bare.)
         if !key.starts_with('@') {
+            return;
+        }
+        if self
+            .fork_collection_captures
+            .values()
+            .any(|keys| keys.contains(key))
+        {
+            self.deferred_collection_cleanup.insert(key.to_string());
             return;
         }
         let mut size_key = std::mem::take(&mut self.dyn_key_scratch);

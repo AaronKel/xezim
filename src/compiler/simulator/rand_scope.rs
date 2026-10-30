@@ -802,12 +802,14 @@ impl Simulator {
                 | ExprKind::SystemCall { .. }
         );
         if operand && self.operand_bind(e, cx, bound) == Some(true) {
-            // A whole unpacked collection has no literal form; it is left
-            // as written (only its elements and methods are frozen).
-            if matches!(e.kind, ExprKind::Ident(_) | ExprKind::MemberAccess { .. })
-                && self.array_operand_name(e).is_some()
-            {
-                return;
+            // A collection stays live while its foreach index changes. Bind
+            // its storage in caller scope rather than leaving a caller handle
+            // to be looked up after the solver switches to object scope.
+            if matches!(e.kind, ExprKind::Ident(_) | ExprKind::MemberAccess { .. }) {
+                if let Some(name) = self.array_operand_name(e) {
+                    *e = Self::chain_expr(&[name], e.span);
+                    return;
+                }
             }
             let v = self.eval_expr(e);
             *e = Self::literal_of(&v, e.span);
