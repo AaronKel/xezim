@@ -300,3 +300,38 @@ endmodule
         ]
     );
 }
+
+#[test]
+fn scalar_class_formal_hides_same_named_collection_metadata() {
+    let sim = xezim::simulate(
+        r#"
+class item; int value; function new(int v); value=v; endfunction endclass
+class chooser;
+  static item original;
+  static function item make(); item result=new(22); return result; endfunction
+  static function void select(ref item q, input bit first);
+    q=first?original:make();
+  endfunction
+endclass
+module top;
+  int q[$];
+  item a;
+  initial begin
+    q.push_back(99);
+    chooser::original=new(11);
+    chooser::select(a,1); $display("T|class_then|%0d %0d",a.value,q.size());
+    chooser::select(a,0); $display("T|class_else|%0d %0d",a.value,q.size());
+  end
+endmodule
+"#,
+        100,
+    )
+    .expect("simulate");
+    let lines: Vec<_> = sim
+        .output
+        .iter()
+        .map(|o| o.message.as_str())
+        .filter(|s| s.starts_with("T|"))
+        .collect();
+    assert_eq!(lines, ["T|class_then|11 1", "T|class_else|22 1"]);
+}

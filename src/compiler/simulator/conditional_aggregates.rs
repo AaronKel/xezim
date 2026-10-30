@@ -108,6 +108,35 @@ impl Simulator {
             ExprKind::Ident(_) | ExprKind::MemberAccess { .. } | ExprKind::Index { .. } => {}
             _ => return false,
         }
+        // Frame-local scalar/class names hide unrelated collection metadata.
+        // Fixed formals have a marker; dynamic locals have a rename entry.
+        if let ExprKind::Ident(h) = &e.kind
+            && h.path.len() == 1
+            && h.path[0].selects.is_empty()
+        {
+            let name = &h.path[0].name.name;
+            let array_formal = format!("\u{1}array_formal:{name}");
+            let local_array = self.dyn_name_lookup_innermost(name).is_some()
+                || self
+                    .local_stack
+                    .last()
+                    .is_some_and(|f| f.contains_key(&array_formal));
+            if !local_array {
+                if self.local_class_type_of(name).is_some() {
+                    return false;
+                }
+                if self
+                    .local_stack
+                    .last()
+                    .is_some_and(|f| f.contains_key(name))
+                {
+                    return self
+                        .local_typedef_type_of(name)
+                        .and_then(|t| self.module.typedef_types.get(&t))
+                        .is_some_and(|dt| self.unpacked_struct_of(dt).is_some());
+                }
+            }
+        }
         // Type probes must not execute selectors in an unselected arm.
         let probe = self.freeze_conditional_path(e, false);
         let e = &probe;

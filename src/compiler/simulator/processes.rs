@@ -948,6 +948,9 @@ impl Simulator {
             &mut self.m_scope_stack,
             self.process_m_scope.remove(&pid).unwrap_or_default(),
         );
+        // §23.6: nested scheduled work must restore the caller's lexical
+        // scope, including a task body currently suspended on this stack.
+        let outer_scope = self.current_scope.clone();
 
         // A PROCESS is never "inside" an edge block, whatever stack frame it
         // happens to be serviced from. A fork child spawned by an edge block
@@ -974,6 +977,7 @@ impl Simulator {
             self.drain_timing_pending();
         }
 
+        self.current_scope = outer_scope;
         let mine = std::mem::replace(&mut self.m_scope_stack, outer_m_scope);
         // Non-empty ⇒ suspended mid-task; keep it for the resume. A process
         // that ran to completion unwound its own pushes and parks nothing.
@@ -1033,18 +1037,6 @@ impl Simulator {
             self.current_scope.clone_from(scope);
         } else {
             self.current_scope.clear();
-        }
-        // A suspended-and-resumed process running INSIDE an inlined
-        // hierarchical/interface task must keep resolving the body's bare
-        // names under the task's instance scope, not the process's own.
-        if let Some(hint) = self
-            .task_cleanup
-            .iter()
-            .rev()
-            .find_map(|c| c.frame_scope_hint.clone())
-        {
-            self.current_scope.clone_from(&hint);
-            *self.name_resolve_hint.borrow_mut() = (!hint.is_empty()).then_some(hint);
         }
         // A process is not a comb/edge block, so the scope the settle loop
         // last recorded must not leak into this process's `%m`.
@@ -2640,12 +2632,23 @@ impl Simulator {
         // &self.activation_scope would block every &mut self call in it.
         // An active free task (including a root task whose scope is the
         // empty string) takes precedence over the process's declaration scope.
-        let task_scope = self
-            .task_cleanup
-            .iter()
-            .rev()
-            .find_map(|t| t.frame_scope_hint.as_deref());
+        let task_scope = self.task_cleanup.iter().rev().find_map(|t| {
+            t.frame_scope_hint
+                .as_ref()
+                .map(|scope| (scope.clone(), t.caller_body_scope.is_some()))
+        });
+        // The scheduled process's context has been installed by this point.
+        // Looking at task_cleanup before that swap reads another process's
+        // frame and can bind both sibling instances to the first one's scope.
+        if let Some((scope, free_task)) = &task_scope {
+            *self.name_resolve_hint.borrow_mut() = (!scope.is_empty()).then(|| scope.clone());
+            if *free_task {
+                self.current_scope.clone_from(scope);
+            }
+        }
         let scope = task_scope
+            .as_ref()
+            .map(|(scope, _)| scope.as_str())
             .or_else(|| self.process_scope_hint.get(&pid).map(String::as_str))
             .unwrap_or("");
         let same_scope = self.activation_scope.borrow().as_deref() == Some(scope);
