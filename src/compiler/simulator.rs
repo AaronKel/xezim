@@ -8381,6 +8381,9 @@ pub struct Simulator {
     fork_baselines: HashMap<usize, Arc<Vec<HashMap<String, Value>>>>,
     /// Automatic collection storage retained by surviving fork children.
     fork_collection_captures: HashMap<usize, HashSet<String>>,
+    /// Number of live children capturing each key in
+    /// `fork_collection_captures`, so a cleanup check is one lookup.
+    fork_capture_refs: HashMap<String, usize>,
     /// Lexical block identities of each child's captured locals.
     fork_local_scopes: HashMap<usize, HashMap<u64, HashMap<String, u64>>>,
     deferred_collection_cleanup: HashSet<String>,

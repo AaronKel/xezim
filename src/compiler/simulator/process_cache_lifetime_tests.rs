@@ -192,3 +192,36 @@ fn suspended_repeat_keeps_nested_and_concurrent_counters_separate() {
         .iter()
         .any(|o| o.message.contains("REPEAT_PASS evaluations=2 completed=2")));
 }
+
+#[test]
+fn disabled_fork_children_release_captured_collections() {
+    let sim = crate::simulate(
+        r#"
+        class worker;
+          task step(int n);
+            int q[$];
+            for (int i = 0; i < 4; i++) q.push_back(i + n);
+            fork
+              begin #10; if (q.size() != 4) $fatal(1, "capture lost"); end
+              begin #1; end
+            join_any
+            disable fork;
+          endtask
+        endclass
+        module top;
+          initial begin
+            worker w = new();
+            for (int n = 0; n < 20; n++) w.step(n);
+            $finish;
+          end
+        endmodule
+    "#,
+        1000,
+    )
+    .expect("disable fork capture fixture");
+    assert_eq!(sim.error_count, 0);
+    assert!(sim.fork_collection_captures.is_empty());
+    assert!(sim.fork_capture_refs.is_empty());
+    assert!(sim.deferred_collection_cleanup.is_empty());
+    assert!(sim.fork_local_scopes.is_empty());
+}

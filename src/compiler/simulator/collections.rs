@@ -3561,6 +3561,12 @@ impl Simulator {
     pub(super) fn release_fork_collections(&mut self, pid: usize) {
         if let Some(keys) = self.fork_collection_captures.remove(&pid) {
             for key in keys {
+                if let Some(n) = self.fork_capture_refs.get_mut(&key) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.fork_capture_refs.remove(&key);
+                    }
+                }
                 if self.deferred_collection_cleanup.remove(&key) {
                     self.cleanup_dyn_storage(&key);
                 }
@@ -3580,11 +3586,7 @@ impl Simulator {
         if !key.starts_with('@') {
             return;
         }
-        if self
-            .fork_collection_captures
-            .values()
-            .any(|keys| keys.contains(key))
-        {
+        if self.fork_capture_refs.contains_key(key) {
             self.deferred_collection_cleanup.insert(key.to_string());
             return;
         }
