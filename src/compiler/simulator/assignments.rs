@@ -3343,7 +3343,7 @@ impl Simulator {
                     let (outer_lo, outer_hi) = if self.module.dynamic_arrays.contains(&*name) {
                         // The 2-D table's initial allocation is a placeholder;
                         // new[N] sets the live outer dimension (§7.5.1).
-                        (0, self.queue_size(&name) as i64 - 1)
+                        (0, self.get_queue_size(&name) as i64 - 1)
                     } else {
                         (il.min(ih), il.max(ih))
                     };

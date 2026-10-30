@@ -612,3 +612,6 @@ mod module_struct_localparam_first_instance;
 
 #[path = "types/enum_scope_677.rs"]
 mod enum_scope_677;
+
+#[path = "types/typedef_overlay_674.rs"]
+mod typedef_overlay_674;
