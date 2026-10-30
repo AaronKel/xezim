@@ -4648,6 +4648,8 @@ struct TaskCleanup {
     /// body would otherwise lose it), restored to `prev_hint` at unwind.
     frame_scope_hint: Option<String>,
     prev_hint: Option<String>,
+    /// Caller activation and hierarchy scope restored before free-task copy-out.
+    caller_body_scope: Option<(Option<String>, String)>,
     /// §21.2.1.7 `%m`: the m_scope_stack to restore on task return (a task
     /// call RESETS the lexical scope to just the task, since tasks are
     /// declared at module/package level — the CALLER's scope is not part of

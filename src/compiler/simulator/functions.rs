@@ -712,6 +712,19 @@ impl Simulator {
             );
             self.exec_statement(&decl);
         }
+        // §3.12.1 / §23.4: actuals bind in the caller above; the body
+        // resolves free names in its own lexical scope. In particular a
+        // root/unit helper must not inherit a child's same-named signals.
+        let body_scope = fd
+            .name
+            .name
+            .name
+            .rsplit_once('.')
+            .map(|(scope, _)| scope.to_string());
+        let saved_body_hint = self.name_resolve_hint.replace(body_scope.clone());
+        let body_scope = body_scope.unwrap_or_default();
+        let saved_body_activation = self.activation_scope.replace(Some(body_scope.clone()));
+        let saved_body_scope = std::mem::replace(&mut self.current_scope, body_scope);
         self.pkg_scope_stack.push(pkg_scope.clone());
         let m_fn_entry = self.subroutine_m_entry(
             &fd.name.name.name,
@@ -783,6 +796,9 @@ impl Simulator {
             }
         }
         self.sync_static_locals();
+        *self.name_resolve_hint.borrow_mut() = saved_body_hint;
+        *self.activation_scope.borrow_mut() = saved_body_activation;
+        self.current_scope = saved_body_scope;
         self.apply_default_formal_outputs(&default_output_bindings);
         let vif_alias_ended = self.local_iface_aliases.pop().unwrap_or_default();
         self.func_call_stack.pop();
@@ -974,6 +990,7 @@ impl Simulator {
             .take()
             .or_else(|| self.module.func_decl_scope.get(&td.name.name.name).cloned());
         let mut cleanup = self.bind_task_frame(td, args, None);
+        self.enter_free_task_scope(td, &mut cleanup);
         self.open_decl_shadow_frame();
         // §23.8/§13.3.2: an instance or free task body resolves names
         // lexically, without a class-method caller's `this`/class context.
@@ -1008,6 +1025,28 @@ impl Simulator {
         self.unwind_task_frame(cleanup);
     }
 
+    /// §13.3 / §23.4: arguments bind in the caller, then the free task
+    /// body resolves in its declaration's scope, including across suspension.
+    pub(super) fn enter_free_task_scope(
+        &mut self,
+        td: &TaskDeclaration,
+        cleanup: &mut TaskCleanup,
+    ) {
+        let scope = td
+            .name
+            .name
+            .name
+            .rsplit_once('.')
+            .map(|(scope, _)| scope.to_string())
+            .unwrap_or_default();
+        cleanup.prev_hint = self.name_resolve_hint.borrow().clone();
+        cleanup.frame_scope_hint = Some(scope.clone());
+        *self.name_resolve_hint.borrow_mut() = (!scope.is_empty()).then(|| scope.clone());
+        let activation = self.activation_scope.replace(Some(scope.clone()));
+        let current = std::mem::replace(&mut self.current_scope, scope);
+        cleanup.caller_body_scope = Some((activation, current));
+    }
+
     /// Replay the deferred teardown of an inlined (or synchronous) task call:
     /// the work that `exec_task_call` runs after the body. Mirrors the original
     /// inline cleanup exactly.
@@ -1017,6 +1056,10 @@ impl Simulator {
         self.apply_default_formal_outputs(&c.default_output_bindings);
         if c.frame_scope_hint.is_some() {
             *self.name_resolve_hint.borrow_mut() = c.prev_hint.clone();
+        }
+        if let Some((activation, scope)) = c.caller_body_scope.take() {
+            *self.activation_scope.borrow_mut() = activation;
+            self.current_scope = scope;
         }
         if let Some(tn) = &c.task_name {
             if let Some(set) = self.active_task_pids.get_mut(tn) {
@@ -1035,14 +1078,15 @@ impl Simulator {
         }
         if c.modclass.take().is_some() {
             self.modclass_depth.set(self.modclass_depth.get() - 1);
-            *self.activation_scope.borrow_mut() = Some(
-                self.task_cleanup
-                    .iter()
-                    .rev()
-                    .find_map(|t| t.modclass.clone())
-                    .or_else(|| self.process_scope_hint.get(&self.current_pid).cloned())
-                    .unwrap_or_default(),
-            );
+            let scope = self
+                .task_cleanup
+                .iter()
+                .rev()
+                .find_map(|t| t.frame_scope_hint.clone())
+                .or_else(|| self.process_scope_hint.get(&self.current_pid).cloned())
+                .unwrap_or_default();
+            *self.activation_scope.borrow_mut() = Some(scope.clone());
+            self.current_scope = scope;
         }
         // §13.5.2/§25.9: preserve output identities before removing the
         // callee's binding frame, including an explicit null result.
@@ -2538,6 +2582,7 @@ impl Simulator {
         TaskCleanup {
             frame_scope_hint: None,
             prev_hint: None,
+            caller_body_scope: None,
             saved_m_scope,
             task_name: Some(tname),
             array_writebacks,

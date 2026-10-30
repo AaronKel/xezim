@@ -615,3 +615,6 @@ mod enum_scope_677;
 
 #[path = "types/typedef_overlay_674.rs"]
 mod typedef_overlay_674;
+
+#[path = "types/unit_subroutine_usage_675.rs"]
+mod unit_subroutine_usage_675;

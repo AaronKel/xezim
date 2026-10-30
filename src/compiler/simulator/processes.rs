@@ -1039,10 +1039,12 @@ impl Simulator {
         // names under the task's instance scope, not the process's own.
         if let Some(hint) = self
             .task_cleanup
-            .last()
-            .and_then(|c| c.frame_scope_hint.clone())
+            .iter()
+            .rev()
+            .find_map(|c| c.frame_scope_hint.clone())
         {
-            *self.name_resolve_hint.borrow_mut() = Some(hint);
+            self.current_scope.clone_from(&hint);
+            *self.name_resolve_hint.borrow_mut() = (!hint.is_empty()).then_some(hint);
         }
         // A process is not a comb/edge block, so the scope the settle loop
         // last recorded must not leak into this process's `%m`.
@@ -2636,32 +2638,22 @@ impl Simulator {
         // see None, not a stale scope. The body lives in
         // run_process_stmts_inner because a Drop guard holding
         // &self.activation_scope would block every &mut self call in it.
-        let same_scope = match (
-            self.process_scope_hint.get(&pid),
-            self.activation_scope.borrow().as_deref(),
-        ) {
-            (Some(s), Some(a)) => s.as_str() == a,
-            (None, Some("")) => true,
-            _ => false,
-        };
+        // An active free task (including a root task whose scope is the
+        // empty string) takes precedence over the process's declaration scope.
+        let task_scope = self
+            .task_cleanup
+            .iter()
+            .rev()
+            .find_map(|t| t.frame_scope_hint.as_deref());
+        let scope = task_scope
+            .or_else(|| self.process_scope_hint.get(&pid).map(String::as_str))
+            .unwrap_or("");
+        let same_scope = self.activation_scope.borrow().as_deref() == Some(scope);
         if same_scope {
             return self.run_process_stmts_inner(pid, pc);
         }
-        // A method task of a class declared inside a module runs in its
-        // object's instance (`TaskCleanup::modclass`).
-        let modclass = if self.modclass_depth.get() > 0 {
-            self.task_cleanup
-                .iter()
-                .rev()
-                .find_map(|t| t.modclass.clone())
-        } else {
-            None
-        };
-        let saved_activation_scope = self.activation_scope.replace(Some(
-            modclass
-                .or_else(|| self.process_scope_hint.get(&pid).cloned())
-                .unwrap_or_default(),
-        ));
+        let scope = scope.to_string();
+        let saved_activation_scope = self.activation_scope.replace(Some(scope));
         self.run_process_stmts_inner(pid, pc);
         *self.activation_scope.borrow_mut() = saved_activation_scope;
     }
@@ -3109,16 +3101,7 @@ impl Simulator {
                                     // class). Self-guarded: only shields when
                                     // the caller actually has a `this`.
                                     self.push_instance_task_context(&mut cleanup);
-                                    // The instance task's body resolves in its
-                                    // instance across suspends, as Stage 1-hier.
-                                    if let Some((scope, _)) =
-                                        modclass_key.as_deref().and_then(|k| k.rsplit_once('.'))
-                                    {
-                                        cleanup.prev_hint = self.name_resolve_hint.borrow().clone();
-                                        cleanup.frame_scope_hint = Some(scope.to_string());
-                                        *self.name_resolve_hint.borrow_mut() =
-                                            Some(scope.to_string());
-                                    }
+                                    self.enter_free_task_scope(&td, &mut cleanup);
                                     self.task_cleanup.push(cleanup);
                                     let mut cont: Vec<Statement> = td.items.clone();
                                     cont.push(Statement::new(StatementKind::ScopePop, stmt.span));
@@ -3177,15 +3160,9 @@ impl Simulator {
                             if let Some(full) = full {
                                 let td = self.task_decl_rc(&full).unwrap();
                                 if self.stmts_have_blocking(&td.items) {
-                                    let scope = full
-                                        .rsplit_once('.')
-                                        .map(|(sc, _)| sc.to_string())
-                                        .unwrap_or_default();
                                     let mut cleanup = self.bind_task_frame(&td, args, None);
                                     self.push_instance_task_context(&mut cleanup);
-                                    cleanup.prev_hint = self.name_resolve_hint.borrow().clone();
-                                    cleanup.frame_scope_hint = Some(scope.clone());
-                                    *self.name_resolve_hint.borrow_mut() = Some(scope);
+                                    self.enter_free_task_scope(&td, &mut cleanup);
                                     self.task_cleanup.push(cleanup);
                                     let mut cont: Vec<Statement> = td.items.clone();
                                     cont.push(Statement::new(StatementKind::ScopePop, stmt.span));
