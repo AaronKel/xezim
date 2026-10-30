@@ -957,3 +957,6 @@ mod parenthesized_collection_return;
 
 #[path = "classes/class_concat_unpack.rs"]
 mod class_concat_unpack;
+
+#[path = "classes/compiled_member_store_carry.rs"]
+mod compiled_member_store_carry;

@@ -32,6 +32,10 @@ pub(crate) struct MethodAdmission {
     /// non-input formal positions inherited by a receiver's class.
     pub class_parents: HashMap<String, String>,
     pub instance_fields: HashMap<String, HashSet<String>>,
+    /// §11.6.1: declared width of each fixed-width integral instance field,
+    /// the context width of a compiled `recv.field = rhs`. Strings, reals,
+    /// handles and parameter-sized fields are absent (stored self-determined).
+    pub instance_field_widths: HashMap<String, HashMap<String, u32>>,
     /// §8.20: declared class -> method -> the class whose body a call
     /// through a handle of that declared type binds to, for every
     /// NON-virtual method that some subclass redeclares (the only case where
@@ -18470,15 +18474,26 @@ impl<'a> BytecodeCompiler<'a> {
                 }
             },
             ExprKind::Concatenation(parts) => parts.iter().map(|p| self.infer_lhs_width(p)).sum(),
-            // Heap-field stores fit the value against the receiver's declared
-            // property at runtime. This applies to every admitted receiver,
-            // not just `this`: a guessed 32-bit context truncates strings and
-            // wide values before StoreClassMember can perform that fit.
+            // §11.6.1: a heap-field store's context is the field's declared
+            // width, for every admitted receiver, not just `this`, so
+            // `d.f = a + b` keeps the carry. Fields without a fixed integral
+            // width (strings, reals, parameter-sized) stay self-determined
+            // (0) and StoreClassMember fits them; a guessed 32-bit context
+            // truncated strings and wide values.
             ExprKind::MemberAccess { expr, member } if self.method_mode => {
                 if self.method_handle_chain_ok(expr)
                     && self.method_instance_field_ok(expr, &member.name)
                 {
-                    0
+                    self.method_handle_chain_class(expr)
+                        .and_then(|class| {
+                            self.method_admission
+                                .as_ref()?
+                                .instance_field_widths
+                                .get(&class)?
+                                .get(&member.name)
+                                .copied()
+                        })
+                        .unwrap_or(0)
                 } else {
                     32
                 }

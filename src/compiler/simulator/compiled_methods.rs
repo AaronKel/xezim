@@ -2080,6 +2080,14 @@ impl Simulator {
                     for (class, declaration) in &self.module.classes {
                         let mut fields = self.class_member_access_safe_names(class);
                         fields.extend(self.class_string_member_names(class));
+                        let widths = fields
+                            .iter()
+                            .filter_map(|f| match self.class_prop_width_fixed(class, f) {
+                                Some(Some(w)) if w > 0 => Some((f.clone(), w)),
+                                _ => None,
+                            })
+                            .collect();
+                        facts.instance_field_widths.insert(class.clone(), widths);
                         facts.instance_fields.insert(class.clone(), fields);
                         // Direct superclass (spec args stripped): the
                         // writeback-hierarchy walk in
