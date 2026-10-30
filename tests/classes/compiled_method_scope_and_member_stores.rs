@@ -86,3 +86,40 @@ endmodule
 "#,
     );
 }
+
+#[test]
+fn compiled_typedef_vif_copy_keeps_binding() {
+    if !policies() {
+        return;
+    }
+    check(include_str!("../fixtures/compiled_vif_copy.sv"));
+}
+
+#[test]
+fn compiled_type_parameter_vif_copy_keeps_binding() {
+    if !policies() {
+        return;
+    }
+    check(
+        &include_str!("../fixtures/compiled_vif_copy.sv")
+            .replace(
+                "class cfg;\n typedef virtual bus VIF;",
+                "class cfg #(type VIF=int);",
+            )
+            .replace("cfg rhs", "cfg#(VIF) rhs")
+            .replace(
+                "cfg c=new();cfg d=new();",
+                "cfg#(virtual bus) c=new();cfg#(virtual bus) d=new();",
+            ),
+    );
+}
+
+#[test]
+fn compiled_vif_copy_rebinds_and_clears() {
+    if !policies() {
+        return;
+    }
+    check(&include_str!("../fixtures/compiled_vif_copy.sv")
+        .replace("bus b();", "bus b();bus second();")
+        .replace("$display(\"PASS\");", "c.set(second);d.copy(c);d.vif.value=33;if(second.value!=33 || b.value!=17)$fatal(1,\"rebind failed\");c.set(null);d.copy(c);if(d.vif!=null)$fatal(1,\"clear failed\");$display(\"PASS\");"));
+}
