@@ -704,6 +704,7 @@ enum Ae {
     Add(Box<Ae>, Box<Ae>),
     Sub(Box<Ae>, Box<Ae>),
     Mul(Box<Ae>, Box<Ae>),
+    Shl(Box<Ae>, u64),
     /// Array reduction accumulated at its own `(w, s)` (§7.12.3).
     Sum {
         terms: Vec<Ae>,
@@ -6424,25 +6425,17 @@ impl Simulator {
                 op: UnaryOp::Minus,
                 operand,
             } => return Some(Ae::Neg(Box::new(self.csp_ae(csp, operand, env)?))),
-            // `a << k` with a constant k is exactly `a * 2**k` (§11.4.10);
-            // `<<` and `<<<` agree on a left shift. The solver already models
-            // Mul, so this reuses its width/truncation handling rather than
-            // dropping the whole relation to the trial loop.
+            // Preserve the shift until comparison/cast context supplies its
+            // width. A coefficient built at the left operand's own width
+            // would truncate `1 << 48` to zero before a 64-bit comparison.
             ExprKind::Binary {
                 op: BinaryOp::ShiftLeft | BinaryOp::ArithShiftLeft,
                 left,
                 right,
             } if self.csp_free(csp, right, env) => {
-                if let Some(k) = self
-                    .csp_const(right, env)
-                    .and_then(|v| v.to_u64())
-                    .filter(|k| *k < 63)
-                {
+                if let Some(k) = self.csp_const(right, env).and_then(|v| v.to_u64()) {
                     if let Some(a) = self.csp_ae(csp, left, env) {
-                        let (w, sg) = Self::csp_ws(&a);
-                        let mut m = Value::from_u64(1u64 << k, w.max(1));
-                        m.is_signed = sg;
-                        return Some(Ae::Mul(Box::new(a), Box::new(Ae::Const(m))));
+                        return Some(Ae::Shl(Box::new(a), k));
                     }
                 }
             }
@@ -6785,7 +6778,7 @@ impl Simulator {
         match a {
             Ae::Var(_, w, s) => (*w, *s),
             Ae::Const(v) => (v.width, v.is_signed),
-            Ae::Neg(x) => Self::csp_ws(x),
+            Ae::Neg(x) | Ae::Shl(x, _) => Self::csp_ws(x),
             Ae::Add(l, r) | Ae::Sub(l, r) | Ae::Mul(l, r) => {
                 let ((a, b), (c, d)) = (Self::csp_ws(l), Self::csp_ws(r));
                 (a.max(c), b && d)
@@ -6816,6 +6809,13 @@ impl Simulator {
                 Some(Lin::konst(Self::as_ctx(raw as i128, v.width, s)))
             }
             Ae::Neg(x) => Self::csp_lin(x, w, s, fits, cx)?.scale(-1),
+            Ae::Shl(x, k) => {
+                if *k >= u64::from(w) {
+                    Some(Lin::konst(0))
+                } else {
+                    Self::csp_lin(x, w, s, fits, cx)?.scale(1i128 << *k)
+                }
+            }
             Ae::Add(l, r) => {
                 Self::csp_lin(l, w, s, fits, cx)?.plus(&Self::csp_lin(r, w, s, fits, cx)?, 1)
             }
@@ -9419,7 +9419,12 @@ impl Simulator {
                 }
                 return Some(o);
             }
-            let v = self.csp_const_any(e, env);
+            let real = Self::csp_obj_real(e);
+            let expr = real.as_ref().unwrap_or(e);
+            let frame = self.csp_frame(&env.binds);
+            self.push_local_frame(frame);
+            let v = self.eval_expr_typed(expr, w, !s);
+            self.pop_local_frame();
             if v.has_xz() || v.is_real || v.width == 0 || v.width > w {
                 return None;
             }
