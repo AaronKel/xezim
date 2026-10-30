@@ -119,3 +119,30 @@ endmodule
 fn class_parameter_bound_ignores_same_named_package_parameter() {
     check(include_str!("../fixtures/class_param_formal_name_clash.sv"));
 }
+
+#[test]
+fn wide_128_bit_constructor_arguments() {
+    for range in ["127:0", "128-1:0"] {
+        check(&format!(
+            r#"
+class C;
+ bit [127:0] bound;
+ function new(bit [{range}] value=(1<<128)-1);
+  bound=value;
+ endfunction
+endclass
+module top;
+ initial begin
+  C defaults=new();
+  C explicit_arg=new((1<<128)-1);
+  C high_bit=new(1<<100);
+  if(defaults.bound!==128'hffffffffffffffffffffffffffffffff) $fatal(1,"default width");
+  if(explicit_arg.bound!==128'hffffffffffffffffffffffffffffffff) $fatal(1,"actual width");
+  if(high_bit.bound!==(128'b1<<100)) $fatal(1,"high bit lost");
+  $display("PASS"); $finish;
+ end
+endmodule
+"#
+        ));
+    }
+}

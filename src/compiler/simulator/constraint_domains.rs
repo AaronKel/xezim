@@ -3555,6 +3555,20 @@ impl Simulator {
         if !matches!(self.heap.get(h), Some(Some(_))) {
             return None;
         }
+        // Dynamic arrays and queues of a referenced configuration object
+        // have runtime bounds; they are not fixed or packed properties.
+        if let [last] = rest {
+            let mut cn = self.heap.get(h)?.as_ref()?.class_name.clone();
+            loop {
+                let cd = self.module.classes.get(&cn)?;
+                if cd.queue_properties.contains_key(last) {
+                    let len = self.get_queue_size(&format!("{h}#{last}")) as i64;
+                    return Some(vec![(0, len - 1)]);
+                }
+                let Some(parent) = &cd.extends else { break };
+                cn = parent.clone();
+            }
+        }
         match rest {
             [last] => self
                 .fixed_foreach_dims(h, last)
@@ -4834,14 +4848,15 @@ impl Simulator {
         let Some(name) = Self::foreach_base_name(array) else {
             return true;
         };
-        // Only a plain member (`m`, `this.m`): `state_foreach_dims` checks
-        // that, and a fixed array must pass the same test.
+        // Plain members (`m`, `this.m`) use their local shape. Nested
+        // foreach loops can also name an array on another class object.
         let Some(dims) = (match self.state_foreach_dims(handle, array, &name, vars.len()) {
             Some(d) => Some(d),
             None if Self::foreach_plain_member(array) => {
                 self.fixed_foreach_dims(handle, &name).map(|d| d.0)
             }
-            None => None,
+            None => Self::foreach_member_chain(array)
+                .and_then(|(root, members)| self.sub_member_foreach_dims(handle, &root, &members)),
         }) else {
             return true;
         };

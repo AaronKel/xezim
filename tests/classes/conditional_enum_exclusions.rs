@@ -60,6 +60,7 @@ module top;
   repeat(5) begin
    if(!t.randomize() with {addr==64'h100000000;}) $fatal(1,"address failed");
    if(t.r0!=transaction::GOOD || t.r1!=transaction::GOOD || t.r2!=transaction::GOOD || t.r3!=transaction::GOOD || t.r4!=transaction::GOOD || t.r5!=transaction::GOOD || t.r6!=transaction::GOOD || t.r7!=transaction::GOOD || t.r8!=transaction::GOOD || t.r9!=transaction::GOOD || t.r10!=transaction::GOOD || t.r11!=transaction::GOOD || t.r12!=transaction::GOOD || t.r13!=transaction::GOOD || t.r14!=transaction::GOOD || t.r15!=transaction::GOOD || t.r16!=transaction::GOOD || t.r17!=transaction::GOOD || t.r18!=transaction::GOOD || t.r19!=transaction::GOOD || t.r20!=transaction::GOOD || t.r21!=transaction::GOOD || t.r22!=transaction::GOOD || t.r23!=transaction::GOOD) $fatal(1,"excluded enum value");
+   if(t.domain!=transaction::INNERSHAREABLE) $fatal(1,"wrong domain");
    if(t.addr!=64'h100000000) $fatal(1,"wrong address");
   end
   $display("PASS"); $finish;
@@ -135,4 +136,34 @@ fn conditional_foreach_dist_after_draw() {
         .replace("  data.size()==1;", "  if(cfg.lo.size()>0) { foreach(data[k]) data[k] dist {0:=1,[1:4]:/3,[5:16]:/1}; }")
         .replace("   if(t.addr!=", "   foreach(t.data[k]) if(!(t.data[k] inside {[0:16]})) $fatal(1,\"bad conditional delay\");\n   if(t.addr!=");
     check(&src);
+}
+
+#[test]
+fn nested_foreach_over_configuration_dynamic_arrays_is_checked() {
+    check(
+        r#"
+class config_t;
+ int lo[]='{10};
+ int hi[]='{20};
+endclass
+class T;
+ config_t cfg=new();
+ rand int value;
+ constraint c {
+  foreach(cfg.lo[i]) foreach(cfg.hi[j])
+   value inside {[cfg.lo[i]:cfg.hi[j]]};
+ }
+endclass
+module top;
+ initial begin
+  T t=new();
+  if(t.randomize() with {value==30;}) $fatal(1,"invalid value accepted");
+  if(!t.randomize() with {value==15;}) $fatal(1,"valid value rejected");
+  t.cfg.lo=new[0];
+  if(!t.randomize() with {value==30;}) $fatal(1,"empty foreach not vacuous");
+  $display("PASS"); $finish;
+ end
+endmodule
+"#,
+    );
 }
