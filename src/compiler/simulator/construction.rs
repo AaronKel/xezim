@@ -2909,7 +2909,7 @@ impl Simulator {
                 }
             }
         }
-        self.heap.push(Some(instance));
+        self.heap.push(Some(Box::new(instance)));
         // §8.25 / §6.20.2: the ELEMENT width of a fixed-array or queue member
         // follows this specialization too (`bit [W-1:0] a[2]`, `T q[$]`).
         // The per-instance storage registered above used the class table's
