@@ -2,6 +2,12 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
+enum AggregateContext<'a> {
+    Storage(&'a Expression),
+    Declared(&'a DataType, &'a [crate::ast::types::UnpackedDimension]),
+}
+
 #[derive(Clone)]
 struct AggregateValue {
     data_type: DataType,
@@ -190,6 +196,23 @@ impl Simulator {
         target: Option<&Expression>,
         rhs: &Expression,
     ) -> Option<Expression> {
+        self.select_aggregate_rhs(target.map(AggregateContext::Storage), rhs)
+    }
+
+    pub(super) fn selected_aggregate_formal_rhs(
+        &mut self,
+        data_type: &DataType,
+        dims: &[crate::ast::types::UnpackedDimension],
+        rhs: &Expression,
+    ) -> Option<Expression> {
+        self.select_aggregate_rhs(Some(AggregateContext::Declared(data_type, dims)), rhs)
+    }
+
+    fn select_aggregate_rhs(
+        &mut self,
+        context: Option<AggregateContext<'_>>,
+        rhs: &Expression,
+    ) -> Option<Expression> {
         let mut rhs = rhs;
         while let ExprKind::Paren(inner) = &rhs.kind {
             rhs = inner;
@@ -202,9 +225,11 @@ impl Simulator {
         else {
             return None;
         };
-        if !target.is_some_and(|e| self.is_unpacked_aggregate_operand(e))
-            && !(self.is_unpacked_aggregate_operand(then_expr)
-                && self.is_unpacked_aggregate_operand(else_expr))
+        if !context.is_some_and(|c| match c {
+            AggregateContext::Storage(e) => self.is_unpacked_aggregate_operand(e),
+            AggregateContext::Declared(_, _) => true,
+        }) && !(self.is_unpacked_aggregate_operand(then_expr)
+            && self.is_unpacked_aggregate_operand(else_expr))
         {
             return None;
         }
@@ -227,10 +252,10 @@ impl Simulator {
         // Snapshot the arms in order: either one may call a function or
         // alias storage changed by the other. The predicate runs once.
         let snapshot = if let Some(selected) = selected {
-            self.snapshot_aggregate_operand(selected, target)
+            self.snapshot_aggregate_operand(selected, context)
         } else {
-            let a = self.snapshot_aggregate_operand(then_expr, target);
-            let b = self.snapshot_aggregate_operand(else_expr, target);
+            let a = self.snapshot_aggregate_operand(then_expr, context);
+            let b = self.snapshot_aggregate_operand(else_expr, context);
             a.zip(b).map(|(a, b)| a.ambiguous(b))
         };
         let Some(value) = snapshot else {
@@ -256,7 +281,7 @@ impl Simulator {
 
     /// Freeze path selectors before querying storage or rebuilding member
     /// reads. An ambiguous condition reads each operand once (§11.4.11).
-    fn freeze_conditional_path(&mut self, e: &Expression, evaluate: bool) -> Expression {
+    pub(super) fn freeze_conditional_path(&mut self, e: &Expression, evaluate: bool) -> Expression {
         let literal = |value: Value, span| {
             Expression::new(
                 ExprKind::Number(NumberLiteral::Integer {
@@ -308,8 +333,14 @@ impl Simulator {
                 }
             }
             ExprKind::MemberAccess { expr, member } => {
-                let base = if matches!(expr.kind, ExprKind::Call { .. }) && evaluate {
-                    literal(self.eval_expr(expr), expr.span)
+                let memo = matches!(expr.kind, ExprKind::Call { .. })
+                    .then(|| self.recv_call_memo_hit(expr))
+                    .flatten();
+                let base = if let Some(value) = memo {
+                    self.conditional_receiver_expr(value, expr.span)
+                } else if matches!(expr.kind, ExprKind::Call { .. }) && evaluate {
+                    let value = self.eval_expr(expr);
+                    self.conditional_receiver_expr(value, expr.span)
                 } else {
                     self.freeze_conditional_path(expr, evaluate)
                 };
@@ -323,15 +354,34 @@ impl Simulator {
         Expression::new(kind, e.span)
     }
 
+    fn conditional_receiver_expr(&mut self, value: Value, span: crate::ast::Span) -> Expression {
+        // Receiver resolvers use handle variables. Keep the held result in
+        // private storage so repeated type/leaf probes share one invocation.
+        let handle = value.to_u64().unwrap_or(0) as usize;
+        let name = format!("__xz_cond_receiver_{handle}__");
+        if let Some(instance) = self.heap.get(handle).and_then(|o| o.as_ref()) {
+            self.var_class_types
+                .insert(name.clone(), instance.class_name.clone());
+        }
+        self.signals.insert(name.clone(), value);
+        Self::hier_ident_expr(
+            vec![crate::ast::expr::HierPathSegment {
+                name: crate::ast::Identifier { name, span },
+                selects: Vec::new(),
+            }],
+            span,
+        )
+    }
+
     fn snapshot_aggregate_operand(
         &mut self,
         e: &Expression,
-        context: Option<&Expression>,
+        context: Option<AggregateContext<'_>>,
     ) -> Option<AggregateValue> {
         if let ExprKind::Paren(inner) = &e.kind {
             return self.snapshot_aggregate_operand(inner, context);
         }
-        if let Some(selected) = self.selected_aggregate_rhs(context, e) {
+        if let Some(selected) = self.select_aggregate_rhs(context, e) {
             return self.snapshot_aggregate_operand(&selected, context);
         }
         let frozen = self.freeze_conditional_path(e, true);
@@ -341,7 +391,7 @@ impl Simulator {
     fn snapshot_aggregate_operand_body(
         &mut self,
         e: &Expression,
-        context: Option<&Expression>,
+        context: Option<AggregateContext<'_>>,
     ) -> Option<AggregateValue> {
         if let ExprKind::Call { func, .. } = &e.kind {
             let dt = self.call_return_type(func)?;
@@ -380,9 +430,29 @@ impl Simulator {
             }
             return None;
         }
+        if let ExprKind::AssignmentPattern(items) = &e.kind {
+            let declared = match context {
+                Some(AggregateContext::Declared(dt, dims)) => Some((dt.clone(), dims.to_vec())),
+                Some(AggregateContext::Storage(_)) => None,
+                None => None,
+            };
+            if let Some((dt, dims)) = declared {
+                use crate::ast::types::UnpackedDimension as UD;
+                let dynamic = matches!(dims.first(), Some(UD::Unsized(_) | UD::Queue { .. }));
+                let indices = if dynamic {
+                    vec![(0..self.pattern_ordered(items).len() as i64).collect()]
+                } else {
+                    self.member_dim_indices(&dims).unwrap_or_default()
+                };
+                return Some(self.snapshot_aggregate_shape(e, &dt, &indices, dynamic));
+            }
+        }
         // A pattern takes its type from the assignment context. Inspect a
         // harmless path of that type; the real lvalue is evaluated on write.
-        let context_probe = context.map(|e| self.freeze_conditional_path(e, false));
+        let context_probe = context.and_then(|c| match c {
+            AggregateContext::Storage(e) => Some(self.freeze_conditional_path(e, false)),
+            AggregateContext::Declared(_, _) => None,
+        });
         let probe = if matches!(e.kind, ExprKind::AssignmentPattern(_)) {
             context_probe.as_ref()?
         } else {
@@ -406,7 +476,7 @@ impl Simulator {
             .is_some_and(|n| self.module.dynamic_arrays.contains(n));
         let mut dims: Vec<Vec<i64>> = if dynamic {
             let n = if let ExprKind::AssignmentPattern(items) = &e.kind {
-                items.len() as u64
+                self.pattern_ordered(items).len() as u64
             } else {
                 self.get_queue_size(name.as_deref()?)
             };
@@ -498,10 +568,12 @@ impl Simulator {
             AggregateKind::Struct(fields)
         } else {
             let resolved = self.resolve_dt(dt);
-            let raw = self.eval_expr(e);
             let value = match Self::ret_conv_of(&resolved, &self.module.typedef_types) {
-                RetConv::Keep => raw,
-                RetConv::Real => Self::ret_convert(raw, RetConv::Real, 64, None),
+                RetConv::Keep => self.eval_expr(e),
+                RetConv::Real => {
+                    let raw = self.eval_expr(e);
+                    Self::ret_convert(raw, RetConv::Real, 64, None)
+                }
                 RetConv::Int { two_state } => {
                     let width = super::elaborate::resolve_type_width(
                         &resolved,
@@ -509,6 +581,11 @@ impl Simulator {
                         Some(&self.module.typedefs),
                     )
                     .max(1);
+                    let signed = super::elaborate::is_type_signed_resolved(
+                        &resolved,
+                        &self.module.typedef_types,
+                    );
+                    let raw = self.eval_expr_typed(e, width, !signed);
                     let value = self.fit_pattern_item_value(raw, width);
                     let mut value = if two_state {
                         value.to_two_state()

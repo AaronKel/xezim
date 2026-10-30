@@ -1228,7 +1228,15 @@ impl Simulator {
         if (Self::recv_chain_call(rvalue).is_some() || Self::recv_chain_call(lvalue).is_some())
             && let Some(base) = self.pin_stmt_recv_calls(&[rvalue, lvalue])
         {
-            self.exec_stmt_blocking_assign_body(stmt, lvalue, rvalue);
+            // Rebuilt aggregate paths must retain the held receiver too;
+            // cloning a call would give it a new memo key (§11.4.11).
+            if self.is_unpacked_aggregate_operand(lvalue) || self.is_unpacked_aggregate_operand(rvalue) {
+                let rvalue = self.freeze_conditional_path(rvalue, true);
+                let lvalue = self.freeze_conditional_path(lvalue, true);
+                self.exec_stmt_blocking_assign_body(stmt, &lvalue, &rvalue);
+            } else {
+                self.exec_stmt_blocking_assign_body(stmt, lvalue, rvalue);
+            }
             self.recv_call_memo.truncate(base);
             return;
         }

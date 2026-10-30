@@ -2098,7 +2098,9 @@ impl Simulator {
             &self.module.parameters,
             &self.module.typedef_types,
         );
-        if let Some(selected) = self.selected_aggregate_rhs(None, arg) {
+        if matches!(dims.first(), Some(UD::Range { .. } | UD::Expression { .. }))
+            && let Some(selected) = self.selected_aggregate_formal_rhs(&port.data_type, &dims, arg)
+        {
             return self.bind_array_arg(port, &selected);
         }
         let params = Some(&self.module.parameters);

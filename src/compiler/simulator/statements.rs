@@ -3955,11 +3955,19 @@ impl Simulator {
         // §10.4.2 / §25.9: evaluate receiver calls once while capturing an
         // NBA target, before rebasing it to the interface instance. Re-enter
         // with those calls pinned so callbacks still fire once below.
-        if let StatementKind::NonblockingAssign { lvalue, rvalue, .. } = &stmt.kind
+        if let StatementKind::NonblockingAssign { lvalue, rvalue, delay } = &stmt.kind
             && (Self::recv_chain_call(rvalue).is_some() || Self::recv_chain_call(lvalue).is_some())
             && let Some(base) = self.pin_stmt_recv_calls(&[rvalue, lvalue])
         {
-            self.exec_statement(stmt);
+            if self.is_unpacked_aggregate_operand(lvalue) || self.is_unpacked_aggregate_operand(rvalue) {
+                let rvalue = self.freeze_conditional_path(rvalue, true);
+                let lvalue = self.freeze_conditional_path(lvalue, true);
+                self.exec_statement(&Statement::new(StatementKind::NonblockingAssign {
+                    lvalue, rvalue, delay: delay.clone(),
+                }, stmt.span));
+            } else {
+                self.exec_statement(stmt);
+            }
             self.recv_call_memo.truncate(base);
             return;
         }

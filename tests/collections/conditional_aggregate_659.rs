@@ -335,3 +335,59 @@ endmodule
         .collect();
     assert_eq!(lines, ["T|class_then|11 1", "T|class_else|22 1"]);
 }
+
+#[test]
+fn contextual_patterns_bind_receiver_targets_and_array_formals() {
+    let sim=xezim::simulate(r#"
+class holder; int a[2]; int q[$]; int value; endclass
+module top;
+  holder h;
+  int calls;
+  logic sel;
+  function automatic holder get(); calls++; return h; endfunction
+  function automatic int fixed_total(input int a[2]); return a[0]+a[1]; endfunction
+  function automatic int dynamic_total(input int a[]); return a[0]+a[1]; endfunction
+  initial begin
+    h=new; sel=1;
+    get().a=sel ? '{1,2} : '{3,4};
+    $display("T|receiver|%0d %0d %0d",calls,h.a[0],h.a[1]);
+    sel=1'bx;
+    get().a=sel ? '{1,2} : '{1,8};
+    $display("T|receiver_unknown|%0d %0d %0d",calls,h.a[0],h.a[1]);
+    get().q=sel ? '{1,2} : '{1,8};
+    $display("T|receiver_queue|%0d %0d %0d %0d",calls,h.q.size(),h.q[0],h.q[1]);
+    $display("T|formal_known|%0d %0d",fixed_total(1 ? '{1,2} : '{3,4}),dynamic_total(0 ? '{1,2} : '{3,4}));
+    $display("T|formal_unknown|%0d %0d",fixed_total(sel ? '{1,2} : '{1,8}),dynamic_total(sel ? '{1,2} : '{1,8}));
+    $display("T|formal_width|%0d",fixed_total(sel ? '{4'hf+4'h1,2} : '{16,2}));
+    $display("T|formal_replication|%0d %0d",dynamic_total(1 ? '{2{3}} : '{4,5}),dynamic_total(sel ? '{2{3}} : '{3,5}));
+    get().a='{5,6};
+    $display("T|plain_receiver|%0d %0d %0d",calls,h.a[0],h.a[1]);
+    get().a<=sel ? '{1,2} : '{1,8};
+    #1 $display("T|receiver_nba|%0d %0d %0d",calls,h.a[0],h.a[1]);
+    get().value=7;
+    $display("T|scalar_receiver|%0d %0d",calls,h.value);
+  end
+endmodule
+"#,100).expect("simulate");
+    let lines: Vec<_> = sim
+        .output
+        .iter()
+        .map(|o| o.message.as_str())
+        .filter(|s| s.starts_with("T|"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "T|receiver|1 1 2",
+            "T|receiver_unknown|2 1 0",
+            "T|receiver_queue|3 2 1 0",
+            "T|formal_known|3 7",
+            "T|formal_unknown|1 1",
+            "T|formal_width|18",
+            "T|formal_replication|6 3",
+            "T|plain_receiver|4 5 6",
+            "T|receiver_nba|5 1 0",
+            "T|scalar_receiver|6 7"
+        ]
+    );
+}

@@ -1703,7 +1703,7 @@ impl Simulator {
         ) {
             return None;
         }
-        if let Some(selected) = self.selected_aggregate_rhs(None, arg) {
+        if let Some(selected) = self.selected_aggregate_formal_rhs(queue_data_type, dims, arg) {
             return self.bind_queue_param(pname, dims, &selected, queue_data_type, dir);
         }
         // A queue literal / assignment pattern (`{"a", "b"}` or `'{...}`) passed
@@ -1711,7 +1711,7 @@ impl Simulator {
         // entry.
         let literal_elems: Option<Vec<&Expression>> = match &arg.kind {
             ExprKind::Concatenation(parts) => Some(parts.iter().collect()),
-            ExprKind::AssignmentPattern(items) => Some(items.iter().map(|it| it.expr()).collect()),
+            ExprKind::AssignmentPattern(items) => Some(self.pattern_ordered(items)),
             _ => None,
         };
         // When the queue's element type is a struct, copy the struct's
