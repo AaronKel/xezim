@@ -6984,7 +6984,7 @@ pub struct Simulator {
     /// State of the built-in UVM DPI-C helpers (`uvm_dpi.rs`).
     uvm_dpi: uvm_dpi::UvmDpiState,
     /// Class instance heap (index 0 is null).
-    heap: Vec<Option<ClassInstance>>,
+    heap: Vec<Option<Box<ClassInstance>>>,
     /// Class reclamation bookkeeping (`heap_gc`): heap length at the last
     /// collection, live objects it left, and running totals.
     class_gc_heap_len: usize,

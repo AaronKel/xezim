@@ -1936,13 +1936,13 @@ impl Simulator {
                 // Allocate here, before the class walk.
                 if let Some(kind) = self.lvalue_container_kind(lvalue) {
                     let handle = self.heap.len();
-                    self.heap.push(Some(ClassInstance {
+                    self.heap.push(Some(Box::new(ClassInstance {
                         class_name: kind.to_string(),
                         properties: PropMap::default(),
                         type_bindings: HashMap::default(),
                         spec: None,
                         creation_scope: self.active_instance_scope(),
-                    }));
+                    })));
                     let cargs: &[Expression] = match &rvalue.kind {
                         ExprKind::Call { args, .. } => args,
                         _ => &[],
@@ -3639,13 +3639,13 @@ impl Simulator {
                     if let Some(tname) = type_name {
                         if tname == "semaphore" {
                             let handle = self.heap.len();
-                            self.heap.push(Some(ClassInstance {
+                            self.heap.push(Some(Box::new(ClassInstance {
                                 class_name: tname.clone(),
                                 properties: PropMap::default(),
                                 type_bindings: HashMap::default(),
                                 spec: None,
                                 creation_scope: self.active_instance_scope(),
-                            }));
+                            })));
                             let initial_count = args
                                 .first()
                                 .map(|a| self.eval_expr(a).to_u64().unwrap_or(0) as i64)
@@ -3654,13 +3654,13 @@ impl Simulator {
                             Value::from_u64(handle as u64, 32)
                         } else if tname == "mailbox" {
                             let handle = self.heap.len();
-                            self.heap.push(Some(ClassInstance {
+                            self.heap.push(Some(Box::new(ClassInstance {
                                 class_name: tname.clone(),
                                 properties: PropMap::default(),
                                 type_bindings: HashMap::default(),
                                 spec: None,
                                 creation_scope: self.active_instance_scope(),
-                            }));
+                            })));
                             self.mailboxes
                                 .insert(handle, std::collections::VecDeque::new());
                             self.record_mailbox_bound(handle, args);
@@ -3718,13 +3718,13 @@ impl Simulator {
                                 // (`id_actions = new();`) recurses
                                 // new -> initialize -> new … forever.
                                 let h = self.heap.len();
-                                self.heap.push(Some(ClassInstance {
+                                self.heap.push(Some(Box::new(ClassInstance {
                                     class_name: tname.clone(),
                                     properties: PropMap::default(),
                                     type_bindings: HashMap::default(),
                                     spec: None,
                                     creation_scope: self.active_instance_scope(),
-                                }));
+                                })));
                                 Value::from_u64(h as u64, 32)
                             }
                         }
@@ -3745,13 +3745,13 @@ impl Simulator {
                             // enclosing class's constructor and
                             // recurses.
                             let h = self.heap.len();
-                            self.heap.push(Some(ClassInstance {
+                            self.heap.push(Some(Box::new(ClassInstance {
                                 class_name: String::new(),
                                 properties: PropMap::default(),
                                 type_bindings: HashMap::default(),
                                 spec: None,
                                 creation_scope: self.active_instance_scope(),
-                            }));
+                            })));
                             Value::from_u64(h as u64, 32)
                         }
                     }

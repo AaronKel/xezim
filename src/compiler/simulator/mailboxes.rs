@@ -52,13 +52,13 @@ impl Simulator {
     /// constructor arguments (bound / initial key count).
     pub(super) fn alloc_builtin_container(&mut self, kind: &str, args: &[Expression]) -> usize {
         let handle = self.heap.len();
-        self.heap.push(Some(ClassInstance {
+        self.heap.push(Some(Box::new(ClassInstance {
             class_name: kind.to_string(),
             properties: PropMap::default(),
             type_bindings: HashMap::default(),
             spec: None,
             creation_scope: self.active_instance_scope(),
-        }));
+        })));
         if kind == "semaphore" {
             let n = args
                 .first()
