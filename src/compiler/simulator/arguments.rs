@@ -752,7 +752,7 @@ impl Simulator {
     ///
     /// `None` — keep the self-determined path — whenever the rule does not
     /// cover the port or the width tables cannot answer it statically: bounds
-    /// that are not literals (`[W-1:0]`, whose width needs the specialization
+    /// that depend on parameters (`[W-1:0]`, whose width needs the specialization
     /// to be known) or a type whose width is not a plain integral one.
     pub(super) fn actual_context_width(
         &self,
@@ -762,7 +762,7 @@ impl Simulator {
             return None;
         }
         let dt = &port.data_type;
-        let fixed = matches!(dt, DataType::IntegerAtom { .. }) || Self::packed_dims_are_literal(dt);
+        let fixed = matches!(dt, DataType::IntegerAtom { .. }) || Self::packed_dims_are_constant(dt);
         fixed
             .then(|| {
                 super::elaborate::resolve_type_width(
@@ -772,6 +772,68 @@ impl Simulator {
                 )
             })
             .filter(|w| *w > 0)
+    }
+
+    /// Parameter-free arithmetic bounds (including macro-expanded `[64-1:0]`)
+    /// have a fixed width just like literal bounds.
+    pub(super) fn packed_dims_are_constant(dt: &DataType) -> bool {
+        use crate::ast::types::PackedDimension;
+        // A name in a bound may be a class or callee parameter that the
+        // global evaluator would resolve to a same-named package parameter.
+        fn name_free(e: &Expression) -> bool {
+            match &e.kind {
+                ExprKind::Number(_) => true,
+                ExprKind::Paren(inner) => name_free(inner),
+                ExprKind::Unary { operand, .. } => name_free(operand),
+                ExprKind::Binary { left, right, .. } => name_free(left) && name_free(right),
+                ExprKind::Conditional { condition, then_expr, else_expr } => {
+                    name_free(condition) && name_free(then_expr) && name_free(else_expr)
+                }
+                _ => false,
+            }
+        }
+        match dt {
+            DataType::IntegerVector { dimensions, .. } => dimensions.iter().all(|d| match d {
+                PackedDimension::Range { left, right, .. } => {
+                    name_free(left)
+                        && name_free(right)
+                        && crate::elaborate::const_eval_i64_with_params(left, None).is_some()
+                        && crate::elaborate::const_eval_i64_with_params(right, None).is_some()
+                }
+                PackedDimension::Unsized(_) => false,
+            }),
+            _ => false,
+        }
+    }
+
+    /// Defaults are assignment-context expressions too. Called with the
+    /// callee's scope active so parameterized packed bounds resolve there.
+    pub(super) fn eval_formal_default(
+        &mut self,
+        port: &crate::ast::decl::FunctionPort,
+        default: &Expression,
+    ) -> Value {
+        let mut width = self.actual_context_width(port);
+        if width.is_none() && Self::actual_ctx_shape(port) {
+            if let DataType::IntegerVector { dimensions, .. } = &port.data_type {
+                if let [crate::ast::types::PackedDimension::Range { left, right, .. }] =
+                    dimensions.as_slice()
+                {
+                    let left = self.eval_expr(left);
+                    let right = self.eval_expr(right);
+                    if let (Some(left), Some(right)) = (left.to_i64(), right.to_i64()) {
+                        width = left
+                            .abs_diff(right)
+                            .checked_add(1)
+                            .and_then(|w| u32::try_from(w).ok());
+                    }
+                }
+            }
+        }
+        match width {
+            Some(w) if w > 0 => self.eval_expr_ctx(default, w),
+            _ => self.eval_expr(default),
+        }
     }
 
     /// A declared type with no packed-array, struct, enum or typedef layout

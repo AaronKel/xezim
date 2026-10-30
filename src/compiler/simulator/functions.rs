@@ -394,7 +394,7 @@ impl Simulator {
                 // evaluated bare, `a` was unknown and the default was x.
                 self.in_subroutine_default_scope(None, None, |sim| {
                     sim.push_local_frame_typed(locals.clone(), frame_types.clone());
-                    let value = sim.eval_expr(def);
+                    let value = sim.eval_formal_default(port, def);
                     let value = sim.vif_argument_value(port, def, value);
                     sim.pop_local_frame();
                     value
@@ -2387,7 +2387,7 @@ impl Simulator {
                             default_spec.clone(),
                             |sim| {
                                 sim.push_local_frame_typed(locals.clone(), frame_types.clone());
-                                let value = sim.eval_expr(def);
+                                let value = sim.eval_formal_default(port, def);
                                 let value = sim.vif_argument_value(port, def, value);
                                 sim.pop_local_frame();
                                 value
