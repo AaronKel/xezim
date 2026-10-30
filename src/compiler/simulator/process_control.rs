@@ -182,6 +182,7 @@ impl Simulator {
         to_kill.extend(self.collect_fork_descendants(pid));
         for &p in &to_kill {
             self.killed_pids.insert(p);
+            self.release_process_execution_caches(p);
             self.vc_cancel_process(p);
             self.finished_pids.remove(&p);
             self.suspended_pids.remove(&p);
@@ -449,8 +450,21 @@ impl Simulator {
         }
     }
 
+    /// Process ids are never reused. Compiled loops and prepared forever
+    /// continuations belonging to a terminated process cannot run again.
+    pub(super) fn release_process_execution_caches(&mut self, pid: usize) {
+        if !self.exec_cache_pids.remove(&pid) {
+            return;
+        }
+        self.process_loop_bytecode.retain(|&(p, _, _), _| p != pid);
+        self.process_cond_bytecode.retain(|&(p, _, _), _| p != pid);
+        self.forever_cont_cache.retain(|&(p, _, _, _, _), _| p != pid);
+        self.forever_sens_cache.retain(|&(p, _), _| p != pid);
+    }
+
     pub(super) fn child_finished(&mut self, child_pid: usize) {
         self.finished_pids.insert(child_pid);
+        self.release_process_execution_caches(child_pid);
         // A fork child's inherited `%m` chain (`inherit_fork_m_scope`) is
         // never unwound by its own statements.
         if !self.process_m_scope.is_empty() {

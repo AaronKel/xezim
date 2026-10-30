@@ -8017,6 +8017,10 @@ pub struct Simulator {
     /// Bytecode cached for non-suspending process loops after their enclosing
     /// local frame is known.
     process_loop_bytecode: HashMap<(usize, usize, usize), Option<super::bytecode::CompiledBlock>>,
+    /// Processes owning an entry in the four per-process execution caches
+    /// (`process_loop_bytecode`, `process_cond_bytecode`, `forever_cont_cache`,
+    /// `forever_sens_cache`), so releasing one that owns none skips the scan.
+    exec_cache_pids: HashSet<usize>,
     /// Bytecode cached for the CONDITION of a per-cycle self-check `if` whose
     /// statement as a whole cannot compile (e.g. its fail branch touches a
     /// name-keyed initial-scope variable). The condition — typically a wide
@@ -13613,3 +13617,6 @@ impl PatCmp {
 
 #[cfg(test)]
 mod event_name_tests;
+
+#[cfg(test)]
+mod process_cache_lifetime_tests;

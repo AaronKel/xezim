@@ -2401,6 +2401,7 @@ impl Simulator {
                 );
             }
             let compiled = ok.then(|| compiler.finish());
+            self.exec_cache_pids.insert(key.0);
             self.process_loop_bytecode.insert(key, compiled);
         }
         let Some(Some(compiled)) = self.process_loop_bytecode.remove(&key) else {
@@ -2570,6 +2571,7 @@ impl Simulator {
         }
         let key = (pid, cond.span.start, cond.span.end);
         if !self.process_cond_bytecode.contains_key(&key) {
+            self.exec_cache_pids.insert(pid);
             // Side effects would DOUBLE-FIRE during the self-audit below —
             // only cache conditions that provably have none.
             if !Self::cond_expr_is_effect_free(cond, true) {
