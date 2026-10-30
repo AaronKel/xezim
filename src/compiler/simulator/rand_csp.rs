@@ -6573,6 +6573,19 @@ impl Simulator {
                         v.is_signed = true;
                         return Some(Ae::Const(v));
                     }
+                    // A collection reached through a state handle has a
+                    // fixed size too. Do not treat its built-in size query
+                    // as an opaque method reading every rand member.
+                    if self.csp_free(csp, expr, env) {
+                        let frame = self.csp_frame(&env.binds);
+                        self.push_local_frame(frame);
+                        let is_array = self.array_operand_name(expr).is_some()
+                            || self.expr_assoc_name(expr).is_some();
+                        self.pop_local_frame();
+                        if is_array {
+                            return self.csp_const(e, env).map(Ae::Const);
+                        }
+                    }
                     // §7.4.5: a row's size (`a[1].size()`), and the number
                     // of rows of a member over rows (`a.size()`).
                     let n = match self.csp_row_of(csp, expr, env) {
@@ -10194,5 +10207,64 @@ impl Simulator {
                 VarKey::Sub(..) | VarKey::Aux => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod state_collection_tests {
+    use super::*;
+
+    #[test]
+    fn joint_solver_bounds_index_by_referenced_state_array_size() {
+        let mut sim = crate::simulate(
+            r#"class config_t;
+                int ranges[];
+                function new(); ranges=new[1]; endfunction
+            endclass
+            class txn;
+                config_t cfg=new();
+                rand int unsigned idx;
+                rand bit[63:0] unrelated;
+                constraint c { if(cfg.ranges.size()>0) idx<cfg.ranges.size(); }
+            endclass
+            module top; initial begin txn t=new(); $finish; end endmodule"#,
+            1,
+        )
+        .unwrap();
+        let (handle, class_name) = sim
+            .heap
+            .iter()
+            .enumerate()
+            .find_map(|(h, o)| {
+                o.as_ref()
+                    .filter(|o| o.class_name.ends_with("txn"))
+                    .map(|o| (h, o.class_name.clone()))
+            })
+            .unwrap();
+        let constraints: Vec<_> = sim.module.classes[&class_name]
+            .constraints
+            .values()
+            .cloned()
+            .collect();
+        sim.this_stack.push(Some(handle));
+        sim.class_context_stack.push(Some(class_name));
+        let mut csp = sim
+            .csp_vars(
+                handle,
+                &[("idx".into(), 32), ("unrelated".into(), 64)],
+                &HashSet::default(),
+                &HashMap::default(),
+                &[],
+                &HashMap::default(),
+                &HashSet::default(),
+                false,
+                &HashSet::default(),
+            )
+            .unwrap();
+        sim.csp_translate(&mut csp, &constraints, &[]).unwrap();
+        let state = sim
+            .csp_find(&csp)
+            .expect("state-array size must narrow the index without search exhaustion");
+        assert_eq!(state.fixed(csp.scalars["idx"]), Some(0));
     }
 }

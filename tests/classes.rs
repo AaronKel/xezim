@@ -933,3 +933,6 @@ mod inline_collection_caller_handle;
 
 #[path = "classes/enum_collection_domains.rs"]
 mod enum_collection_domains;
+
+#[path = "classes/state_array_size_bound.rs"]
+mod state_array_size_bound;
