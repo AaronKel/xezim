@@ -1509,6 +1509,13 @@ impl Simulator {
                 if let Some(w) = self.packed_field_width(&n) {
                     return (w, stable);
                 }
+                // Class properties have no signal entry. In particular a
+                // concatenation lvalue must split its RHS using each declared
+                // property width, not the one-bit unknown-name fallback.
+                // Receiver/parameter-dependent widths cannot be node-cached.
+                if let Some(w) = self.lrm_self_width(expr) {
+                    return (w, false);
+                }
                 (1, false)
             }
             ExprKind::Number(NumberLiteral::Integer { size, .. }) => (size.unwrap_or(32), true),

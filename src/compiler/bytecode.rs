@@ -16946,6 +16946,13 @@ impl<'a> BytecodeCompiler<'a> {
                 let mut part_widths = Vec::with_capacity(parts.len());
                 for p in parts {
                     let w = self.infer_lhs_width(p);
+                    // A heap-field store uses width 0 to defer sizing to its
+                    // receiver. Splitting a concatenation requires concrete
+                    // widths; leave this assignment to the interpreter.
+                    if w == 0 {
+                        self.bail("concat_lhs_dynamic_width");
+                        return false;
+                    }
                     part_widths.push(w);
                 }
                 let mut bit_offset: u32 = 0;
@@ -18247,6 +18254,13 @@ impl<'a> BytecodeCompiler<'a> {
                 let mut part_widths = Vec::with_capacity(parts.len());
                 for p in parts {
                     let w = self.infer_lhs_width(p);
+                    // A heap-field store uses width 0 to defer sizing to its
+                    // receiver. Splitting a concatenation requires concrete
+                    // widths; leave this assignment to the interpreter.
+                    if w == 0 {
+                        self.bail("concat_lhs_dynamic_width");
+                        return false;
+                    }
                     part_widths.push(w);
                 }
                 let mut bit_offset: u32 = 0;
