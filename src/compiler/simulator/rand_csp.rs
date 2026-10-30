@@ -5840,7 +5840,7 @@ impl Simulator {
         self.csp_add_carries(csp, carries);
         let frame = self.csp_frame(&env.binds);
         self.push_local_frame(frame);
-        let mut set = dom_norm(self.cons_ranges_i128_at(ranges, w));
+        let mut set = dom_norm(self.cons_ranges_i128_typed(ranges, w, s && !mixed).0);
         self.pop_local_frame();
         if mixed {
             let half = 1i128 << (w - 1);

@@ -3479,7 +3479,7 @@ impl Simulator {
                     _ => ConstraintRange::Value(r.clone()),
                 })
                 .collect();
-            let (choices, ws) = self.cons_ranges_i128_ws(&cr, target.width);
+            let (choices, ws) = self.cons_ranges_i128_typed(&cr, target.width, target.is_signed);
             if ws.is_some() {
                 let choices =
                     Self::fit_cons_ranges_for_target(choices, ws, target.width, target.is_signed);

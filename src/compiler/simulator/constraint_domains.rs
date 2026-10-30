@@ -853,7 +853,22 @@ impl Simulator {
                     // §11.4.10: the amount is always read as unsigned.
                     let (a, aw, _) = self.exact_int(right)?;
                     let r = Self::bits_at(a, aw);
-                    if r >= 64 {
+                    // §11.4.10: an oversized shift is defined, not an
+                    // unsupported bound. Logical shifts fill with zero;
+                    // signed arithmetic right shifts fill with the sign bit.
+                    if r >= u128::from(w) {
+                        return Some(
+                            if *op == BinaryOp::ArithShiftRight
+                                && s
+                                && Self::as_ctx(l, w, true) < 0
+                            {
+                                -1
+                            } else {
+                                0
+                            },
+                        );
+                    }
+                    if r >= 128 {
                         return None;
                     }
                     return Some(match op {
@@ -977,6 +992,18 @@ impl Simulator {
         ranges: &[ConstraintRange],
         ctx_w: u32,
     ) -> (Vec<(i128, i128)>, Option<(u32, bool)>) {
+        self.cons_ranges_i128_typed(ranges, ctx_w, true)
+    }
+
+    /// §11.4.13: the tested operand also participates in the comparison
+    /// signedness. Compute bounds in that joint type before rejecting a
+    /// reversed range (`unsigned64 inside {[0:(1<<64)-1]}`).
+    pub(super) fn cons_ranges_i128_typed(
+        &mut self,
+        ranges: &[ConstraintRange],
+        ctx_w: u32,
+        ctx_signed: bool,
+    ) -> (Vec<(i128, i128)>, Option<(u32, bool)>) {
         struct Bound<'a> {
             expr: Option<&'a Expression>,
             leaves: Vec<(u64, u32, bool)>,
@@ -998,7 +1025,7 @@ impl Simulator {
             })
         }
         let mut bounds: Vec<(Bound<'_>, Option<Bound<'_>>)> = Vec::new();
-        let mut ws: Option<(u32, bool)> = Some((1, true));
+        let mut ws: Option<(u32, bool)> = Some((1, ctx_signed));
         let note = |ws: &mut Option<(u32, bool)>, b: &Bound<'_>| {
             if !b.dollar
                 && let Some((aw, as_)) = ws
@@ -1095,7 +1122,7 @@ impl Simulator {
         width: u32,
         signed: bool,
     ) -> Vec<(i128, i128)> {
-        let (rs, items_ws) = self.cons_ranges_i128_ws(ranges, width);
+        let (rs, items_ws) = self.cons_ranges_i128_typed(ranges, width, signed);
         Self::fit_cons_ranges_for_target(rs, items_ws, width, signed)
     }
 
@@ -1148,7 +1175,7 @@ impl Simulator {
 
     /// Exact-signed membership test used by every `inside`/`dist` solve path.
     pub(super) fn value_in_ranges(&mut self, val: &Value, ranges: &[ConstraintRange]) -> bool {
-        let (rs, items_ws) = self.cons_ranges_i128_ws(ranges, val.width);
+        let (rs, items_ws) = self.cons_ranges_i128_typed(ranges, val.width, val.is_signed);
         let Some(raw) = val.to_u64() else {
             return false;
         };
