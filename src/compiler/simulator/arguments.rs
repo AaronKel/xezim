@@ -2098,6 +2098,9 @@ impl Simulator {
             &self.module.parameters,
             &self.module.typedef_types,
         );
+        if let Some(selected) = self.selected_aggregate_rhs(None, arg) {
+            return self.bind_array_arg(port, &selected);
+        }
         let params = Some(&self.module.parameters);
         let (lo, hi) = match dims.first()? {
             UD::Range { left, right, .. } => {

@@ -2314,6 +2314,40 @@ impl Simulator {
         name: &String,
         args: &Vec<Expression>,
     ) -> Value {
+        if matches!(
+            name.as_str(),
+            "$bits"
+                | "$size"
+                | "$left"
+                | "$right"
+                | "$low"
+                | "$high"
+                | "$increment"
+                | "$dimensions"
+                | "$unpacked_dimensions"
+        ) && let Some(first) = args.first()
+        {
+            let mut operand = first;
+            while let ExprKind::Paren(inner) = &operand.kind {
+                operand = inner;
+            }
+            if let ExprKind::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } = &operand.kind
+                && self.is_unpacked_aggregate_operand(then_expr)
+                && self.is_unpacked_aggregate_operand(else_expr)
+            {
+                let mut args = args.clone();
+                // §20.7 queries the current value of a dynamic dimension;
+                // fixed dimensions and §20.6.2 $bits are type-only probes.
+                args[0] = if matches!(name.as_str(), "$size" | "$left" | "$right" | "$low" | "$high" | "$increment") && self.aggregate_query_needs_value(operand) {
+                    self.selected_aggregate_rhs(None, operand).unwrap_or_else(|| (**then_expr).clone())
+                } else { (**then_expr).clone() };
+                return self.eval_expr_system_call_body(expr, ctx_width, name, &args);
+            }
+        }
         match name.as_str() {
             COV_COND_FN => return self.cov_cond(args),
             // §9.4.5: retrieve a pre-evaluated intra-assignment RHS

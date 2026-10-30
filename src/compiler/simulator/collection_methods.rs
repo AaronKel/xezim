@@ -1703,6 +1703,9 @@ impl Simulator {
         ) {
             return None;
         }
+        if let Some(selected) = self.selected_aggregate_rhs(None, arg) {
+            return self.bind_queue_param(pname, dims, &selected, queue_data_type, dir);
+        }
         // A queue literal / assignment pattern (`{"a", "b"}` or `'{...}`) passed
         // directly as the actual: bind each top-level element as one queue
         // entry.

@@ -1438,6 +1438,12 @@ impl Simulator {
         for (target, source) in targets.into_iter().zip(sources) {
             let lhs = Self::append_leaf_path(lvalue, &target[dst.len()..]);
             let rhs = Self::append_leaf_path(rvalue, &source[src.len()..]);
+            if self.queue_elem_struct(&src).is_some()
+                && let Some(member_leaves) = self.unpacked_struct_nba_leaves(&lhs, &rhs)
+            {
+                leaves.extend(member_leaves);
+                continue;
+            }
             let value = self.eval_expr(&rhs);
             leaves.push((lhs, value));
         }

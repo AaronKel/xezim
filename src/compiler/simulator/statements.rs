@@ -3964,6 +3964,23 @@ impl Simulator {
             return;
         }
         // §38.36.1 cbStmt, before the statement runs (interpreted code only).
+        if let StatementKind::NonblockingAssign {
+            lvalue,
+            delay,
+            rvalue,
+        } = &stmt.kind
+            && let Some(selected) = self.selected_aggregate_rhs(Some(lvalue), rvalue)
+        {
+            self.exec_statement(&Statement::new(
+                StatementKind::NonblockingAssign {
+                    lvalue: lvalue.clone(),
+                    delay: delay.clone(),
+                    rvalue: selected,
+                },
+                stmt.span,
+            ));
+            return;
+        }
         if self.vpi_cb_mask & vpi_cb::m(vpi_cb::CB_STMT) != 0 {
             self.vpi_stmt_hook(stmt, false);
         }
@@ -5311,6 +5328,16 @@ impl Simulator {
                 self.continue_flag = true;
             }
             StatementKind::Return(expr) => {
+                if let Some(rhs) = expr
+                    && let Some(selected) = self.selected_aggregate_rhs(None, rhs)
+                {
+                    self.exec_statement(&Statement::new(
+                        StatementKind::Return(Some(selected)),
+                        stmt.span,
+                    ));
+                    return;
+                }
+
                 if let Some(e) = expr {
                     // One call for a receiver call in the returned chain
                     // (`return me().o.x;`), shared by the probes below.

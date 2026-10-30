@@ -2536,6 +2536,7 @@ mod property_initialization;
 mod clocking;
 mod collection_methods;
 mod collections;
+mod conditional_aggregates;
 mod comb_compilation;
 mod compilation;
 mod compiled_methods;

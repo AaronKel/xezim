@@ -1352,6 +1352,10 @@ impl Simulator {
         lvalue: &Expression,
         rvalue: &Expression,
     ) {
+        if let Some(selected) = self.selected_aggregate_rhs(Some(lvalue), rvalue) {
+            self.exec_stmt_blocking_assign(stmt, lvalue, &selected);
+            return;
+        }
         // §25.9: a static virtual-interface property binds by name before
         // any value path below stores (and returns).
         self.bind_static_vif(lvalue, rvalue);
@@ -3979,6 +3983,23 @@ impl Simulator {
                 let (rlo, rhi, _) = self.module.arrays[&*rname];
                 let lsize = (lhi - llo + 1) as usize;
                 let rsize = (rhi - rlo + 1) as usize;
+                // §7.2 / §7.6: an unpacked struct element consists of
+                // member leaves; its container scalar carries no value.
+                if let Some(su) = self.queue_elem_struct(&rname) {
+                    let dynamic_dst = self.module.dynamic_arrays.contains(&*lname);
+                    let count = if dynamic_dst { self.get_queue_size(&rname) as usize }
+                        else { lsize.min(rsize) };
+                    let l_desc = self.module.descending_arrays.contains(&*lname);
+                    let r_desc = self.module.descending_arrays.contains(&*rname);
+                    for i in 0..count {
+                        let li = if dynamic_dst { i as i64 } else if l_desc { lhi-i as i64 } else { llo+i as i64 };
+                        let ri = if r_desc { rhi-i as i64 } else { rlo+i as i64 };
+                        self.copy_unpacked_struct(&format!("{lname}[{li}]"), &format!("{rname}[{ri}]"), &su);
+                    }
+                    if dynamic_dst { self.set_queue_size(&lname, count as u64); }
+                    self.settle_after_proc_write();
+                    return;
+                }
                 // §7.6: assigning a FIXED array to a DYNAMIC array
                 // resizes the destination to the source's size —
                 // the placeholder (0,63) registration made this look

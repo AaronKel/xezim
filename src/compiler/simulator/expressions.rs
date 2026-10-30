@@ -4817,6 +4817,17 @@ impl Simulator {
                 r
             }
             ExprKind::Index { expr, index } => {
+                if let Some(selected) = self.selected_aggregate_rhs(None, expr) {
+                    let selected = Expression::new(
+                        ExprKind::Index {
+                            expr: Box::new(selected),
+                            index: index.clone(),
+                        },
+                        expr.span,
+                    );
+                    return self.eval_expr_ctx(&selected, ctx_width);
+                }
+
                 // §14.3: `cb.sig[i]` on an unpacked-array clockvar reads the
                 // element's sample (see `tick_clocking_blocks`).
                 if let Some(v) = self.clocking_array_elem_read(expr, index) {
