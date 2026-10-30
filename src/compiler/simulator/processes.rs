@@ -4474,7 +4474,13 @@ impl Simulator {
 
             // Check for repeat with event waits inside
             if let StatementKind::Repeat { count, body } = &stmt.kind {
-                let n = self.repeat_count(count);
+                let reentry = pc.loop_tail_at == Some(pc.start + i)
+                    && pc.repeat_remaining.is_some();
+                let n = if reentry {
+                    pc.repeat_remaining.unwrap()
+                } else {
+                    self.repeat_count(count)
+                };
                 // Mirror the While/For arms: unroll not only when the body has
                 // a direct `@event`/`#delay`, but also when it blocks via a
                 // CALL to a task whose own body contains a `wait`/`#delay`/
@@ -4484,7 +4490,7 @@ impl Simulator {
                 // inlined (Stage 1b), and their nested `wait`s fall through
                 // (IEEE 1800-2023 §9.7.4: a false `wait(cond)` must suspend)
                 // instead of parking the process, busy-spinning the loop.
-                if self.stmt_has_event_wait(body) || self.stmt_is_blocking(body) {
+                if reentry || self.stmt_has_event_wait(body) || self.stmt_is_blocking(body) {
                     // n == 0 (initial count zero, or the natural-exhaustion
                     // sentinel re-entering after the final iteration's body):
                     // clear any loop-control flag left by that body — a
@@ -4570,37 +4576,21 @@ impl Simulator {
                             }
                         }
                     }
-                    // Unroll: execute body once, then schedule rest
-                    let remaining_n = n - 1;
-                    let mut cont = Vec::new();
-                    // Expand body (may contain @event)
-                    let body_stmts = Self::spliced_body(body);
-                    cont.extend(body_stmts);
-                    // Always re-schedule a Repeat tail — at remaining 0 it
-                    // becomes the exhaustion sentinel whose n==0 arm above
-                    // clears a trailing continue/break before `after` runs.
-                    cont.push(Statement::new(
-                        StatementKind::Repeat {
-                            count: Expression::new(
-                                ExprKind::Number(NumberLiteral::Integer {
-                                    size: None,
-                                    signed: false,
-                                    base: NumberBase::Decimal,
-                                    value: remaining_n.to_string(),
-                                    cached_val: Cell::new(None),
-                                }),
-                                body.span,
-                            ),
-                            body: body.clone(),
-                        },
-                        stmt.span,
-                    ));
-                    // Chain the caller's tail rather than copying it (ProcCont::pushed).
-                    // The just-appended Repeat IS this frame's genuine re-entry
-                    // tail (see `loop_tail_at`'s doc comment) — it sits at the
-                    // last index of `cont`.
-                    let tail_idx = cont.len() - 1;
-                    let cont = pc.pushed_with_tail(cont, pc.start + i + 1, tail_idx);
+                    // Keep one immutable body/tail frame per loop activation.
+                    // Re-cloning the body on each resume gives its statements
+                    // fresh addresses, so address-keyed execution caches retain
+                    // every iteration's AST. Only the remaining count changes.
+                    let mut cont = if reentry {
+                        pc.resume_at(0)
+                    } else {
+                        let mut frame = Self::spliced_body(body);
+                        frame.push(stmt.clone());
+                        let tail_idx = frame.len() - 1;
+                        pc.pushed_with_tail(frame, pc.start + i + 1, tail_idx)
+                    };
+                    // Zero is an exhaustion sentinel: it still clears a final
+                    // continue/break before the caller's continuation executes.
+                    cont.repeat_remaining = Some(n - 1);
                     self.continue_stmts_or_trampoline(pid, cont);
                     return;
                 }
