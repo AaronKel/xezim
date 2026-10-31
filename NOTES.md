@@ -10,6 +10,39 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* Randomization, arguments, compiled methods, fork state, interfaces and
+  process memory (#698-#719, PR #720, contributed by AaronKel):
+  associative-array values in `inside` constraints, fallback repairs of
+  conditional and collection constraints, enum domains of rand dynamic
+  collections, `$` subscripts through queue element member writes, formal
+  widths for default and constant-bound arguments (`bit [64-1:0]`),
+  selected array actuals and class-handle output formals (null at entry),
+  caller collections and automatic variables shared by fork children,
+  lexical enums and full object fields in compiled methods, `randomize`
+  with inline constraints and no parentheses, `@(s.a or s.b)` on class
+  properties, a user method named like a queue builtin in a `wait`,
+  class field widths in a concatenation assignment, definition-qualified
+  interface accesses in methods, and the execution caches and captured
+  state of finished or killed processes released (memory no longer grows
+  per process or per suspended `repeat` iteration). A whole-object
+  `constraint_mode(0)` also turns off static blocks.
+* Out-of-block methods and package scopes (xezim-core #115-#122, PR #123,
+  contributed by AaronKel): an empty macro actual counts as one when the
+  macro has formals, `ref` actuals are checked against the callee's own
+  package signature, spaced implicit event controls survive attribute
+  stripping, extern methods link through every package-class alias (now
+  in place, not by copying the class per body), and macro line joining
+  stays linear with backticks in strings ignored.
+* Associative-array `first`/`next`/`last`/`prev`/`num` reuse the sorted
+  key list until a key is added or removed, instead of rebuilding it per
+  call (#723, PR #725, contributed by AaronKel).
+* A relative instance reference inside nested generate scopes (#726), a
+  directive-less package delay under `-timescale` (#728), a whole-array
+  continuous assign with a hierarchical side (#730), a bind actual the
+  target does not declare, an implicit net of the target (#732), and an
+  associative array keyed by a class typedef over a class parameter
+  (#734) (xezim-core #124-#128 and PRs #727-#735, contributed by auty1395).
+
 * A bit-select of a subroutine formal or local declared with a range that
   does not start at zero (`input logic [12:1] a; a[i]`) reads the bit its
   label names: a compiled hot function read bit `i` of the storage, and a
