@@ -7249,6 +7249,13 @@ pub struct Simulator {
     /// SUCCESSFUL randomize(). `Some(prev)` records the pre-reset used-set of
     /// a pick that wrapped the cycle, so the rollback can restore it.
     randc_pending: HashMap<(usize, String), (u64, Option<HashSet<u64>>)>,
+    /// §18.4.2 randc wider than 16 bits (to 32): the cycle is a keyed
+    /// bijection over `[0, 2^w)` walked by a counter, so it needs no set of
+    /// drawn values. Per (instance, prop): (key, next index, width).
+    randc_wide: HashMap<(usize, String), (u64, u64, u32)>,
+    /// The `randc_wide` state before this call's tentative pick, for
+    /// `randc_rollback` (None: the variable had no cycle yet).
+    randc_wide_pending: HashMap<(usize, String), Option<(u64, u64, u32)>>,
     /// §18.5.4/§18.10 dist schedules, keyed by (instance handle, variable):
     /// one (weight signature, item schedule, next slot) per weight set. See
     /// `pick_dist_value`.

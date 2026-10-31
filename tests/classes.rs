@@ -966,3 +966,5 @@ mod compiled_member_store_carry;
 mod review_pr720_followups;
 #[path = "classes/class_param_local_width_681.rs"]
 mod class_param_local_width_681;
+#[path = "classes/randc_wide_699.rs"]
+mod randc_wide_699;

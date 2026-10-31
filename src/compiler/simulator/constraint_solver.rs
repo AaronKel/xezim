@@ -566,6 +566,7 @@ impl Simulator {
         // dropping the tentative record, so this call's trials only ever roll
         // back their OWN picks.
         self.randc_pending.clear();
+        self.randc_wide_pending.clear();
         use rand::Rng;
         let class_name = if let Some(Some(inst)) = self.heap.get(handle) {
             inst.class_name.clone()
@@ -1822,8 +1823,28 @@ impl Simulator {
                                 enum_prop_types.get(name).map(|s| s.as_str()),
                                 prop_allowed_ranges.get(name).map(|v| v.as_slice()),
                             );
-                            if !domain.is_empty() {
-                                let pick = self.pick_randc(handle, name, &domain);
+                            let pick = if !domain.is_empty() {
+                                Some(self.pick_randc(handle, name, &domain))
+                            } else if (17..=32).contains(width)
+                                && !enum_prop_types.contains_key(name)
+                            {
+                                self.pick_randc_wide(
+                                    handle,
+                                    name,
+                                    *width,
+                                    prop_allowed_ranges.get(name).map(|v| v.as_slice()),
+                                )
+                            } else {
+                                if *width > 32 {
+                                    self.warn_system_task_once(
+                                        "randc>32",
+                                        "Warning: a randc variable wider than 32 bits is \
+                                         randomized as rand (IEEE 1800-2017 §18.4.2)",
+                                    );
+                                }
+                                None
+                            };
+                            if let Some(pick) = pick {
                                 val = Value::from_u64(pick, *width);
                                 solved_props.insert(name.clone(), val.clone());
                                 if let Some(Some(inst)) = self.heap.get_mut(handle) {

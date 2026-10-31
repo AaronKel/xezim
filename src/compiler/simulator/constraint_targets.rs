@@ -8,8 +8,9 @@ impl Simulator {
     /// §18.4.3 Compute the domain of a randc property: every value the
     /// variable could possibly take, intersected with any `inside` ranges
     /// from constraints. For enum-typed props the domain is the enum
-    /// members; for bit/integer types it's `0 .. 2^width - 1`. Width > 16
-    /// is capped to avoid materialising huge domains.
+    /// members; for bit/integer types it's `0 .. 2^width - 1`. A wider type
+    /// is enumerated only when an `inside` range narrows it; otherwise it
+    /// cycles through `pick_randc_wide` (empty domain here).
     pub(super) fn randc_domain(
         &self,
         _name: &str,
@@ -23,6 +24,22 @@ impl Simulator {
                 .get(et)
                 .map(|m| m.iter().map(|x| x.1).collect())
                 .unwrap_or_default()
+        } else if width > 16
+            && let Some(rs) = ranges
+            && rs.iter().map(|(lo, hi)| (hi - lo + 1).max(0)).sum::<i128>() <= 1 << 16
+        {
+            // A wide randc held to a narrow `inside` range: enumerate the
+            // range itself (the counter walk of `pick_randc_wide` would
+            // skip most of the width per value).
+            let max = (1i128 << width.min(64)) - 1;
+            let mut vs: Vec<u64> = rs
+                .iter()
+                .flat_map(|&(lo, hi)| lo.max(0)..=hi.min(max))
+                .map(|v| v as u64)
+                .collect();
+            vs.sort_unstable();
+            vs.dedup();
+            return vs;
         } else if width > 0 && width <= 16 {
             let max = if width >= 64 {
                 u64::MAX
@@ -81,7 +98,84 @@ impl Simulator {
         pick
     }
 
+    /// §18.4.2: the next value of a 17- to 32-bit randc cycle, by a keyed
+    /// bijection over `[0, 2^width)` and a counter: every value once per
+    /// cycle, a fresh key (from the object's generator) per cycle. Values
+    /// outside `ranges` are skipped (a narrow range is enumerated exactly by
+    /// `randc_domain` instead). Recorded tentatively, like `pick_randc`.
+    /// None when no value of the width lies in the ranges.
+    pub(super) fn pick_randc_wide(
+        &mut self,
+        handle: usize,
+        name: &str,
+        width: u32,
+        ranges: Option<&[(i128, i128)]>,
+    ) -> Option<u64> {
+        use rand::Rng;
+        let key = (handle, name.to_string());
+        self.randc_rollback(&key);
+        let size = 1u64 << width;
+        let state = self.randc_wide.get(&key).copied();
+        let (mut perm_key, mut next) = match state {
+            Some((k, n, w)) if w == width => (k, n),
+            _ => (self.cur_rng().r#gen::<u64>(), 0),
+        };
+        self.randc_wide_pending.insert(key.clone(), state);
+        let mut steps = 0u64;
+        loop {
+            if next >= size {
+                perm_key = self.cur_rng().r#gen::<u64>();
+                next = 0;
+            }
+            let v = Self::randc_permute(next, perm_key, width);
+            next += 1;
+            steps += 1;
+            if ranges.is_none_or(|rs| {
+                rs.iter()
+                    .any(|&(lo, hi)| (v as i128) >= lo && (v as i128) <= hi)
+            }) {
+                self.randc_wide.insert(key, (perm_key, next, width));
+                return Some(v);
+            }
+            if steps > size {
+                self.randc_rollback(&key);
+                return None;
+            }
+        }
+    }
+
+    /// A bijection of `[0, 2^width)` chosen by `key`: xor with the key,
+    /// odd multiplications and xor-shifts, each invertible modulo 2^width.
+    fn randc_permute(x: u64, key: u64, width: u32) -> u64 {
+        let mask = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let half = width.div_ceil(2).max(1);
+        let third = (width / 3).max(1);
+        let mut v = (x ^ key) & mask;
+        v = v.wrapping_mul(0x9E37_79B9_7F4A_7C15) & mask;
+        v ^= v >> half;
+        v = v.wrapping_mul(0xBF58_476D_1CE4_E5B9) & mask;
+        v ^= (key >> 32) & mask;
+        v ^= v >> third;
+        v = v.wrapping_mul(0x94D0_49BB_1331_11EB) & mask;
+        v ^= v >> half;
+        v
+    }
+
     pub(super) fn randc_rollback(&mut self, key: &(usize, String)) {
+        if let Some(prev) = self.randc_wide_pending.remove(key) {
+            match prev {
+                Some(st) => {
+                    self.randc_wide.insert(key.clone(), st);
+                }
+                None => {
+                    self.randc_wide.remove(key);
+                }
+            }
+        }
         if let Some((pick, prev)) = self.randc_pending.remove(key) {
             if let Some(p) = prev {
                 self.randc_used.insert(key.clone(), p);
@@ -92,7 +186,8 @@ impl Simulator {
     }
 
     pub(super) fn randc_rollback_all(&mut self) {
-        let keys: Vec<(usize, String)> = self.randc_pending.keys().cloned().collect();
+        let mut keys: Vec<(usize, String)> = self.randc_pending.keys().cloned().collect();
+        keys.extend(self.randc_wide_pending.keys().cloned());
         for k in &keys {
             self.randc_rollback(k);
         }
@@ -3168,5 +3263,24 @@ impl Simulator {
         }
         self.randomize_budget_remaining -= 1;
         true
+    }
+}
+
+#[cfg(test)]
+mod randc_permute_tests {
+    use super::Simulator;
+
+    /// The wide-randc cycle visits every value of its width exactly once.
+    #[test]
+    fn permute_is_a_bijection() {
+        for width in 17..=20u32 {
+            let n = 1usize << width;
+            let mut seen = vec![false; n];
+            for x in 0..n as u64 {
+                let v = Simulator::randc_permute(x, 0x1234_5678_9abc_def1, width) as usize;
+                assert!(v < n && !seen[v], "width {width}: {x} -> {v}");
+                seen[v] = true;
+            }
+        }
     }
 }

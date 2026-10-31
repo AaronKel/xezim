@@ -4005,6 +4005,8 @@ impl Simulator {
             rand_child_snapshots: Vec::new(),
             randc_used: HashMap::default(),
             randc_pending: HashMap::default(),
+            randc_wide: HashMap::default(),
+            randc_wide_pending: HashMap::default(),
             dist_decks: HashMap::default(),
             semaphores: HashMap::default(),
             cg_heap: vec![None],
