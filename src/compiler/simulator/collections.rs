@@ -1593,25 +1593,29 @@ impl Simulator {
         k: usize,
         name: &str,
     ) -> Option<String> {
-        Self::carried_type_binding_rec(bindings, chain, k, name, 0)
+        Self::carried_type_binding_rec(bindings, chain, k, name, &[])
     }
 
-    /// `carried_type_binding`. `depth` counts only defaults that name another
-    /// parameter of the same class (`type RSP = REQ`), so those cannot cycle.
-    /// Each step up the `extends` chain lowers `k`, which bounds the rest.
+    /// Defaults may name several earlier parameters. Track their declaration
+    /// path to reject a cycle without cutting off a valid long alias chain.
     fn carried_type_binding_rec(
         bindings: &HashMap<String, String>,
         chain: &[&super::elaborate::ElaboratedClass],
         k: usize,
         name: &str,
-        depth: u32,
+        path: &[(usize, String)],
     ) -> Option<String> {
-        if depth > 8 {
+        if path
+            .iter()
+            .any(|(level, param)| *level == k && param == name)
+        {
             return None;
         }
         if k == 0 {
             return bindings.get(name).cloned();
         }
+        let mut path = path.to_vec();
+        path.push((k, name.to_string()));
         let child = chain[k - 1];
         let parent = chain[k];
         let i = parent.param_order.iter().position(|p| p == name)?;
@@ -1631,7 +1635,7 @@ impl Simulator {
                     .find(|(n, _)| n == name)
                     .map(|(_, d)| d.clone())?;
                 if parent.type_param_names.iter().any(|p| p == &def) {
-                    return Self::carried_type_binding_rec(bindings, chain, k, &def, depth + 1);
+                    return Self::carried_type_binding_rec(bindings, chain, k, &def, &path);
                 }
                 // A default is written in the parent's scope, not the child's.
                 return Some(def);
@@ -1639,10 +1643,10 @@ impl Simulator {
         };
         if Self::spec_projection(&a).is_some() {
             return Self::carry_extends_arg(&a, &|p| {
-                Self::carried_type_binding_rec(bindings, chain, k - 1, p, depth)
+                Self::carried_type_binding_rec(bindings, chain, k - 1, p, &path)
             });
         }
-        Some(Self::carried_type_binding_rec(bindings, chain, k - 1, &a, depth).unwrap_or(a))
+        Some(Self::carried_type_binding_rec(bindings, chain, k - 1, &a, &path).unwrap_or(a))
     }
 
     /// The per-instance part of `is_string_keyed_array` for `member` of an

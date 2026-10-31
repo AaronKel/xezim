@@ -1948,8 +1948,8 @@ impl Simulator {
     /// to the same `Arc<ElaboratedClass>`; the DECLARING spelling
     /// (`name`, or `enclosing::name` for a class nested in another) is
     /// the canonical one. A leaf name taken by a DIFFERENT class (two
-    /// packages each declaring `Cfg`, a second nested `Inner`) is told
-    /// apart by `Arc` identity and left unmerged.
+    /// packages each declaring `Cfg`, a second nested `Inner`) keeps its
+    /// distinct declaring name and remains a separate specialization.
     /// The class a plain type-argument fragment names. A direct key hit
     /// first; a `pkg::A::B` that is not a key falls back to `A::B`. The
     /// pkg_scope collision pass renames a nested class whose leaf name is
@@ -1988,19 +1988,11 @@ impl Simulator {
         if declared == frag {
             return None; // already the declaring spelling
         }
-        // Merge only when the declaring spelling names the SAME class.
-        // `Arc::ptr_eq` on the class itself is not enough: specialization
-        // bookkeeping mutates entries through `classes.get_mut(..).map(
-        // Arc::make_mut)`, which — the key being aliased — swaps ONE of the
-        // spellings to a fresh Arc and splits pointer identity although
-        // both entries still name the same class. Such a split clones the
-        // class struct but SHARES its `methods` table, so pointer identity
-        // there is the stable same-class test; two genuinely different
-        // classes that happen to share a leaf name never share one.
+        // Artifact decoding reconstructs separate Arcs even for aliases.
+        // The elaborator's declaring name (qualified on package collisions),
+        // enclosing class and declaring module retain declaration identity.
         let declared_arc = self.module.classes.get(&declared)?;
-        let same_class = std::sync::Arc::ptr_eq(&arc, declared_arc)
-            || std::sync::Arc::ptr_eq(&arc.methods, &declared_arc.methods);
-        if !same_class {
+        if !Self::same_class_declaration(&arc, declared_arc) {
             return None;
         }
         // A parameterized class keeps the default-argument completion the
@@ -2012,6 +2004,13 @@ impl Simulator {
             }
         }
         Some(declared)
+    }
+
+    fn same_class_declaration(
+        a: &crate::compiler::elaborate::ElaboratedClass,
+        b: &crate::compiler::elaborate::ElaboratedClass,
+    ) -> bool {
+        a.name == b.name && a.enclosing == b.enclosing && a.declaring_module == b.declaring_module
     }
 
     /// §8.25: specializations match when their value arguments have the SAME
@@ -2337,19 +2336,23 @@ impl Simulator {
             return None;
         }
         let qualified = format!("{}::{}", pkg.trim(), head);
-        let same_class = match (self.module.classes.get(&qualified), self.module.classes.get(head)) {
-            (Some(q), Some(b)) => std::sync::Arc::ptr_eq(q, b),
+        let same_class = match (
+            self.module.classes.get(&qualified),
+            self.module.classes.get(head),
+        ) {
+            (Some(q), Some(b)) => Self::same_class_declaration(q, b),
             _ => false,
         };
         let same_typedef = !same_class
             && !rest.contains('#')
-            && match (
-                self.module.typedef_types.get(&qualified),
-                self.module.typedef_types.get(head),
-            ) {
-                (Some(q), Some(b)) => format!("{:?}", q) == format!("{:?}", b),
-                _ => false,
-            };
+            && self.module.typedef_types.contains_key(&qualified)
+            && self.module.typedef_types.contains_key(head)
+            // register_scoped_typedef_alias stores `pkg::declared_name`.
+            // A collision-qualified declaration `pkg::T` therefore ALSO
+            // has `pkg::pkg::T`; it is not an alias of an unrelated bare T.
+            // Structural equality cannot distinguish nominal enum types,
+            // especially when different files have identical byte spans.
+            && !self.module.typedef_types.contains_key(&format!("{}::{}", pkg.trim(), qualified));
         (same_class || same_typedef).then_some(rest)
     }
 
@@ -2601,7 +2604,7 @@ impl Simulator {
                 let enclosing = if omitted_slot.get(i).copied().unwrap_or(false) {
                     None
                 } else {
-                    self.enclosing_value_param_fragment(class_name, &frags[i])
+                    self.enclosing_value_param_fragment(&frags[i])
                 };
                 if let Some(v) = enclosing {
                     frags[i] = v;
@@ -2650,46 +2653,41 @@ impl Simulator {
         canon_frags.join(",")
     }
 
-    /// A value-parameter binding of `name` in an enclosing specialization,
-    /// when that specialization is not `class_name` itself.
+    /// The active method's lexical specialization, including an inherited
+    /// method's ancestor arguments. A free-function frame is a boundary.
+    pub(super) fn lexical_value_spec(&self) -> Option<(String, String)> {
+        let lexical = self.class_context_stack.last()?.as_ref()?;
+        let (base, sig) = self
+            .lexical_spec()
+            .or_else(|| self.inherited_param_spec(lexical))
+            .unwrap_or_else(|| (lexical.clone(), String::new()));
+        if base != *lexical && self.class_is_a(&base, lexical) {
+            Some((lexical.clone(), self.ancestor_spec(&base, &sig, lexical)?))
+        } else {
+            Some((base, sig))
+        }
+    }
+
+    /// A value-parameter binding in the lexical enclosing specialization.
     ///
     /// `canonicalize_spec_sig` treats a fragment equal to the parameter's
     /// own name as an omitted argument. `item#(H, D)` written inside
     /// `seq#(int H, int D)` is that same spelling and means the outer
     /// parameter, not item's default.
-    pub(super) fn enclosing_value_param_fragment(
-        &self,
-        class_name: &str,
-        pname: &str,
-    ) -> Option<String> {
-        let mut specs: Vec<(String, String)> = Vec::new();
-        if let Some(cs) = &self.current_spec {
-            specs.push(cs.clone());
+    pub(super) fn enclosing_value_param_fragment(&self, pname: &str) -> Option<String> {
+        let (base, sig) = self.lexical_value_spec()?;
+        let cd = self.module.classes.get(&base)?;
+        if cd.type_param_names.iter().any(|t| t == pname) {
+            return None;
         }
-        specs.extend(self.spec_scope_stack.iter().rev().cloned());
-        for (base, sig) in specs {
-            if base == class_name {
-                continue;
-            }
-            let Some(cd) = self.module.classes.get(&base) else {
-                continue;
-            };
-            if cd.type_param_names.iter().any(|t| t == pname) {
-                continue;
-            }
-            let Some(idx) = cd.param_order.iter().position(|p| p == pname) else {
-                continue;
-            };
-            let Some(v) = Self::spec_arg_at(&sig, idx) else {
-                continue;
-            };
-            let v = v.trim();
-            if v.is_empty() || v == pname {
-                continue;
-            }
-            return Some(v.to_string());
+        let idx = cd.param_order.iter().position(|p| p == pname)?;
+        if Self::spec_arg_at(&sig, idx).is_some_and(|v| v.trim() == pname) {
+            return None;
         }
-        None
+        let sig = self.canonicalize_spec_sig(&base, &sig);
+        let value = Self::spec_arg_at(&sig, idx)?;
+        let value = value.trim();
+        (!value.is_empty() && value != pname).then(|| value.to_string())
     }
 
     /// For a STATIC queue/associative/dynamic-array property of a

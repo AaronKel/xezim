@@ -88,3 +88,31 @@ fn cast_of_defaulted_rsp_ignores_foreign_local() {
         "the other-to-item cast must fail once, and only once: {out:?}"
     );
 }
+
+#[test]
+fn a_long_finite_default_chain_resolves_the_declaring_type() {
+    let source = r#"
+class item;int x=4;endclass
+class other;int x=9;endclass
+class base #(type A=item,type B=A,type C=B,type D=C,type E=D,
+             type F=E,type G=F,type H=G,type I=H,type J=I);
+ J rsp;
+endclass
+class derived extends base#(.A(item));
+ function int run();item c;c=new;return $cast(rsp,c);endfunction
+endclass
+task plant();other rsp;rsp=new;endtask
+module top;
+ derived d;
+ initial begin d=new;plant();$display("T|deep|%0d",d.run());end
+endmodule
+"#;
+    let sim = simulate(source, 20).expect("finite defaults elaborate");
+    let output: Vec<_> = sim
+        .output
+        .iter()
+        .map(|o| o.message.as_str())
+        .filter(|m| m.starts_with("T|"))
+        .collect();
+    assert_eq!(output, ["T|deep|1"]);
+}

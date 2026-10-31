@@ -1984,13 +1984,20 @@ impl Simulator {
 
     /// Value parameters of the running instance, for a specialization
     /// argument evaluated in that instance's scope (`item #(H, D)` inside
-    /// `my_seq #(32, 194)`). The leaf class's own parameters win over an
-    /// ancestor's of the same name.
-    pub(super) fn enclosing_value_params(&self) -> Option<HashMap<String, Value>> {
-        let handle = self.this_stack.iter().rev().find_map(|h| *h)?;
-        let inst = self.heap.get(handle).and_then(|o| o.as_ref())?;
+    /// `my_seq #(32, 194)`). A static/free frame is a boundary: its caller's
+    /// object does not supply the callee's lexical parameters.
+    pub(super) fn enclosing_value_params(&mut self) -> Option<HashMap<String, Value>> {
+        let lexical = self.class_context_stack.last()?.as_ref()?.clone();
         let mut map: HashMap<String, Value> = HashMap::default();
-        let mut cn: Option<&str> = Some(inst.class_name.as_str());
+        let mut names = Vec::new();
+        let instance = self
+            .this_stack
+            .last()
+            .copied()
+            .flatten()
+            .and_then(|h| self.heap.get(h))
+            .and_then(|o| o.as_ref());
+        let mut cn: Option<&str> = Some(&lexical);
         for _ in 0..64 {
             let Some(cd) = cn.and_then(|c| self.module.classes.get(c)) else {
                 break;
@@ -1999,13 +2006,28 @@ impl Simulator {
                 if cd.type_param_names.iter().any(|t| t == n) {
                     continue;
                 }
-                if let Some(v) = inst.properties.get(n) {
+                if !names.contains(n) {
+                    names.push(n.clone());
+                }
+                if let Some(v) = instance.and_then(|inst| {
+                    inst.properties
+                        .get(&format!("{}::{}", cd.name, n))
+                        .or_else(|| inst.properties.get(n))
+                }) {
                     map.entry(n.clone()).or_insert_with(|| v.clone());
                 }
             }
             cn = cd.extends.as_deref();
         }
-        Some(map)
+        let saved = self.current_spec.clone();
+        self.current_spec = self.lexical_value_spec();
+        for name in names {
+            if let Some(value) = self.resolve_value_param_in_current(&name) {
+                map.insert(name, value);
+            }
+        }
+        self.current_spec = saved;
+        (!map.is_empty()).then_some(map)
     }
 
     /// IEEE 1800-2017 §6.20.2 / §8.25: the value of the declared default `e`

@@ -233,3 +233,6 @@ mod foreach_indexed_receiver;
 
 #[path = "collections/enclosing_value_parameter_specialization.rs"]
 mod enclosing_value_parameter_specialization;
+
+#[path = "collections/lexical_value_parameter_specialization.rs"]
+mod lexical_value_parameter_specialization;
