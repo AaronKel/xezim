@@ -1307,6 +1307,7 @@ impl Simulator {
                 self.cond_waiter_reads.remove(&cpid);
                 self.cond_read_union_dirty = true;
                 self.cond_waiter_conditions.remove(&cpid);
+                self.cond_waiter_rechecks += 1;
                 self.event_queue.schedule(self.time, cpid, cont);
             }
             let newly = std::mem::take(&mut self.condition_waiters);
@@ -2609,6 +2610,10 @@ impl Simulator {
             .iter()
             .filter(|e| e.has_unresolved_reads)
             .count();
+        chatter!(
+            "[PROF] condition_waiter_rechecks={}",
+            self.cond_waiter_rechecks
+        );
         chatter!(
             "[PROF] edge_waiters={:.1}ms edge_cg={:.1}ms waiter_iters={}",
             self.prof_edge_waiters as f64 / 1e6,

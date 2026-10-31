@@ -4315,6 +4315,7 @@ impl Simulator {
             inactive_queue: Vec::new(),
             nba_region_waiters: Vec::new(),
             cond_progress: 0,
+            cond_waiter_rechecks: 0,
             mailbox_get_waiters: HashMap::default(),
             fork_baselines: HashMap::default(),
             fork_collection_captures: HashMap::default(),
