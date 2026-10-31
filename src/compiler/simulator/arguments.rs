@@ -1658,13 +1658,16 @@ impl Simulator {
                 self.pattern_scratch_seq
             }
         };
-        let scratch = format!("__pat_arg_{id}");
+        let scratch = format!("\u{2}pat_arg_{id}");
         self.assign_pattern_into_struct(&scratch, su, items);
         let vals = keys
             .iter()
             .map(|(key, w, real)| {
                 let leaf = format!("{}{}", scratch, &key[port_name.len()..]);
                 let v = self.get_signal_value_by_name(&leaf);
+                // The returned clone owns the bound value; recycled scratch
+                // storage must not keep class handles alive after the call.
+                self.signals.remove(&leaf);
                 match v.unwrap_or_else(|| Value::new(*w)) {
                     v if v.is_real && !real => Self::real_to_int(v.to_f64(), *w),
                     v => v,
@@ -3371,3 +3374,7 @@ impl Simulator {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "struct_pattern_scratch_tests.rs"]
+mod struct_pattern_scratch_tests;
