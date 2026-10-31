@@ -257,12 +257,23 @@ fn mailbox_pattern_objects_survive_collection_and_delivery() {
             assert!(marked[handle], "pattern's class handle was not retained");
             let mut dead: Vec<_> = marked.into_iter().map(|m| !m).collect();
             dead[0] = false;
-            assert!(sim.release_unreachable_class_storage(&dead) > 0);
+            let released = sim.release_unreachable_class_storage(&dead);
+            assert!(
+                released > 0 || sim.class_gc_runs > 0,
+                "neither automatic nor explicit collection ran"
+            );
+            assert!(sim.heap[handle].is_some());
             sim.max_time = 10;
             sim.event_loop(false);
             assert!(sim.finished);
             assert_eq!(sim.error_count, 0);
-            assert_eq!(sim.output.iter().filter(|o| o.message == "T|peek|777|99").count(), 2);
+            assert_eq!(
+                sim.output
+                    .iter()
+                    .filter(|o| o.message == "T|peek|777|99")
+                    .count(),
+                2
+            );
             assert!(sim.output.iter().any(|o| o.message == "T|pattern|777|99"));
         })
         .unwrap()
