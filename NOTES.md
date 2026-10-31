@@ -25,6 +25,11 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   time advance, on by default (`XEZIM_CLASS_GC=0` turns it off), with
   collections spaced so their total cost stays linear in the objects
   allocated (§8.7, #722, PR #724, contributed by AaronKel).
+* A class specialization argument written as an expression of package
+  parameters (`.D(cfg_pkg::N + cfg_pkg::K)`) names the same type as the value
+  it folds to, so a static or virtual-interface table set through one
+  spelling is seen through the others (§8.25, #741, PR #742, contributed by
+  auty1395).
 
 * Randomization, arguments, compiled methods, fork state, interfaces and
   process memory (#698-#719, PR #720, contributed by AaronKel):
