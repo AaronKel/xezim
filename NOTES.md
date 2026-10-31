@@ -10,6 +10,12 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* Package type identity survives artifact reloads; nested specializations
+  retain lexical value parameters and inherited type defaults. Collection,
+  struct and mailbox patterns preserve member values and object lifetimes;
+  foreign-function vector arguments and string results use the appropriate
+  conversions and formatting (PRs #744–#762).
+
 * Constants of a module's first instance see the struct typedefs the module
   declares in its body: a constant function's struct formal, local and
   result, a struct localparam's members, and a pattern actual of a struct
