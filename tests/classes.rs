@@ -964,3 +964,6 @@ mod class_concat_unpack;
 mod compiled_member_store_carry;
 #[path = "classes/review_pr720_followups.rs"]
 mod review_pr720_followups;
+
+#[path = "classes/class_string_queue_concatenation.rs"]
+mod class_string_queue_concatenation;
