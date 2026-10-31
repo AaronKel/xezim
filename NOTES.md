@@ -470,6 +470,10 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   bincode 1.x (RUSTSEC-2025-0141). Artifacts written by earlier versions are
   refused with the usual "recompile with current xezim" message; the caches
   are rebuilt (#531, core #87).
+* The same design writes the same artifact bytes on every run: the module
+  timescale table was filled from a randomly ordered map, so one design
+  wrote two to four distinct artifacts in six runs, and three serialized
+  name sets were randomly ordered too.
 
 **Performance**
 
@@ -503,6 +507,9 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 * A bare top name inside a `-f` argument file names a top, as on the
   command line (#601, reported by amal-khailtash).
+* A compiled artifact named beside source files, or under `--compile`, is
+  refused with an error; it was read as source text and panicked (#738,
+  reported by git-hevangel).
 * `--fst-repack` repacks a dump path that is a symbolic link into its
   target, and removes its temporary file when the rename fails (#598,
   reported by akashlevy).
