@@ -977,3 +977,6 @@ mod randc_wide_699;
 
 #[path = "classes/class_string_queue_concatenation.rs"]
 mod class_string_queue_concatenation;
+
+#[path = "classes/class_queue_empty_pattern_through_handle.rs"]
+mod class_queue_empty_pattern_through_handle;
