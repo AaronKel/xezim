@@ -116,6 +116,10 @@ Thank you to everyone who has improved xezim and xezim-core through pull request
   braces, implication operands and `randomize` blocks, packed-dimension
   recovery and closing directives inside statement blocks, plus the report
   that led to parser tests and minimum-version checks in core CI.
+- **[ds54e](https://github.com/ds54e)** — elaboration fixes in the core with
+  a simulator test for each: casts sized by a value parameter inside constant
+  functions (§6.24.1, §13.4.3), and element selects of packed localparams
+  declared in a child module's body (§7.4.1, §7.4.5).
 
 ## Bug reports
 
@@ -129,6 +133,7 @@ work. Thank you in particular to
 [chenbhil](https://github.com/chenbhil),
 [davekeeshan](https://github.com/davekeeshan),
 [Dragon-Git](https://github.com/Dragon-Git),
+[ds54e](https://github.com/ds54e),
 [Ganesh-TNL](https://github.com/Ganesh-TNL),
 [git-hevangel](https://github.com/git-hevangel),
 [hernloh](https://github.com/hernloh),

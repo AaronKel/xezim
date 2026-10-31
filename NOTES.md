@@ -8,6 +8,20 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 ### Unreleased
 
+**Correctness**
+
+* An array's size can be ordered in a `solve … before` list: `solve sel
+  before arr.size();` failed to parse, and now draws `sel` first and the
+  size in its turn, so the sizes guarded by `sel` hold and `sel` keeps its
+  `dist` weights (§18.5.10).
+* A constant function sizes a cast by a value parameter of its instance,
+  `W'(x)`, so a child's localparam computed with one folds at elaboration
+  for each instance's `W` (§6.24.1, §13.4.3, #763, PR core #130 and #764);
+  an element select of a packed localparam declared in a child module's
+  body keeps the element's width and remaining dimensions instead of
+  reading one bit (§7.4.1, §7.4.5, #766, PR core #131 and #767). Reported
+  and fixed by ds54e.
+
 **Performance**
 
 * An instance is elaborated against only the package parameters its
