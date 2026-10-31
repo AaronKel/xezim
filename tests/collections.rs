@@ -230,3 +230,6 @@ mod inside_associative_values;
 
 #[path = "collections/foreach_indexed_receiver.rs"]
 mod foreach_indexed_receiver;
+
+#[path = "collections/enclosing_value_parameter_specialization.rs"]
+mod enclosing_value_parameter_specialization;
