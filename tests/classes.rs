@@ -974,3 +974,6 @@ mod review_pr720_followups;
 mod class_param_local_width_681;
 #[path = "classes/randc_wide_699.rs"]
 mod randc_wide_699;
+
+#[path = "classes/class_string_queue_concatenation.rs"]
+mod class_string_queue_concatenation;
