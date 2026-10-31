@@ -6,7 +6,7 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 # What's new in 0.11
 
-### Unreleased
+### 0.11.4 — class-object reclamation, linear elaboration, class and randomization correctness (October 2026)
 
 **Correctness**
 
@@ -519,6 +519,16 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   1.5x smaller on top of the per-block LZ4, at the cost of one pass over
   the file at close and an inflate on open. A run that dies earlier leaves
   the unwrapped, crash-safe dump as before.
+
+**Validation**
+
+* xezim `fec70d6e`, pinned to xezim-core `8ebdf4a`, passes 5,838 default
+  tests with one existing ignored test, plus the two JIT smoke tests. Core
+  and parser pass 176 and 186 tests. Both repositories pass their minimum
+  supported Rust version checks.
+* Artifacts written by 0.11.3 or earlier are refused with the "recompile
+  with current xezim" message (the format is now bincode 2); recompile saved
+  designs.
 
 ### 0.11.3 — hierarchy, interfaces, assertions and collection correctness (October 2026)
 
