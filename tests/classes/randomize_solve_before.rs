@@ -157,3 +157,40 @@ endmodule
     // the ordering keeps it 1/2 (2000, sd ~32)
     within(&c, "s2", 1840, 2160);
 }
+
+/// §18.5.10: an array's size as an ordered operand, `arr.size()`. It did
+/// not parse; ordered before or after a scalar, the size is drawn in its
+/// turn and the guarded sizes hold.
+#[test]
+fn array_size_is_an_ordered_operand() {
+    let c = counts(
+        r#"
+class S; rand bit sel; rand bit [7:0] arr[];
+  constraint c { solve sel before arr.size(); sel dist { 1 := 1, 0 := 9 };
+                 if (sel) arr.size() == 8; else arr.size() == 1; } endclass
+class R; rand bit sel; rand bit [7:0] arr[]; rand bit [7:0] q[$];
+  constraint c { arr.size() inside {[1:4]}; q.size() inside {[1:4]};
+                 solve arr.size(), q.size() before sel;
+                 sel == (arr.size() > q.size()); } endclass
+module t;
+  initial begin
+    S s = new; R r = new; int ones, bad_s, bad_r, fail;
+    repeat (2000) begin
+      if (!s.randomize()) fail++;
+      ones += s.sel;
+      if (s.arr.size() != (s.sel ? 8 : 1)) bad_s++;
+    end
+    repeat (500) begin
+      if (!r.randomize()) fail++;
+      if (r.sel != (r.arr.size() > r.q.size())) bad_r++;
+    end
+    $display("ones=%0d bad_s=%0d bad_r=%0d fail=%0d", ones, bad_s, bad_r, fail);
+  end
+endmodule
+"#,
+    );
+    within(&c, "ones", 110, 290);
+    assert_eq!(get(&c, "bad_s"), 0, "{c:?}");
+    assert_eq!(get(&c, "bad_r"), 0, "{c:?}");
+    assert_eq!(get(&c, "fail"), 0, "{c:?}");
+}
