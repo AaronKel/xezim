@@ -227,3 +227,101 @@ fn default_reclamation_bounds_live_objects_under_churn() {
     let live = sim.heap.iter().filter(|o| o.is_some()).count();
     assert!(live < 25_000, "{live} objects still live after 60000 allocations");
 }
+
+/// §8.7 / §15.4.3: a captured pattern, rather than its tagged token, owns
+/// the object until a queued message is consumed.
+#[test]
+fn mailbox_pattern_objects_survive_collection_and_delivery() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let mut sim = crate::simulate(
+                include_str!("../../../tests/fixtures/memory/mailbox_pattern_gc.sv"),
+                1,
+            )
+            .expect("queued pattern fixture");
+            assert_eq!(sim.error_count, 0);
+            let handle = sim
+                .heap
+                .iter()
+                .position(|o| {
+                    o.as_ref().is_some_and(|o| {
+                        o.class_name == "Node"
+                            && o.properties.get("tag").and_then(|v| v.to_u64()) == Some(777)
+                    })
+                })
+                .expect("queued object");
+            let marked = sim
+                .class_heap_reachability_probe()
+                .expect("trace queued pattern");
+            assert!(marked[handle], "pattern's class handle was not retained");
+            let mut dead: Vec<_> = marked.into_iter().map(|m| !m).collect();
+            dead[0] = false;
+            assert!(sim.release_unreachable_class_storage(&dead) > 0);
+            sim.max_time = 10;
+            sim.event_loop(false);
+            assert!(sim.finished);
+            assert_eq!(sim.error_count, 0);
+            assert_eq!(sim.output.iter().filter(|o| o.message == "T|peek|777|99").count(), 2);
+            assert!(sim.output.iter().any(|o| o.message == "T|pattern|777|99"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A dead mailbox releases captured syntax; a full live mailbox and a
+/// producer parked on it keep both their patterns (§8.7 / §15.4.1).
+#[test]
+fn dead_mailboxes_release_patterns_but_parked_producers_keep_theirs() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let mut sim = crate::simulate(
+                r#"
+typedef struct { int a; int b; } pair_t;
+module top;
+ mailbox #(pair_t) live = new(1), dropped = new();
+ initial begin
+   dropped.put('{a:11,b:22}); dropped=null;
+   live.put('{a:33,b:44});
+   fork live.put('{a:55,b:66}); join_none
+   #10; $finish;
+ end
+endmodule
+"#,
+                1,
+            )
+            .expect("pattern cleanup fixture");
+            assert_eq!(sim.error_count, 0);
+            assert_eq!(sim.mbx_patterns.len(), 3);
+            assert_eq!(
+                sim.mailbox_put_waiters
+                    .values()
+                    .map(|q| q.len())
+                    .sum::<usize>(),
+                1
+            );
+            let dead_mailbox = *sim
+                .mailboxes
+                .keys()
+                .find(|h| sim.mailbox_bound.get(h).copied().unwrap_or(0) == 0)
+                .expect("unreferenced mailbox");
+            let mut dead = vec![false; sim.heap.len()];
+            dead[dead_mailbox] = true;
+            sim.release_unreachable_class_storage(&dead);
+            assert!(!sim.mailboxes.contains_key(&dead_mailbox));
+            assert_eq!(sim.mbx_patterns.len(), 2);
+            for v in sim
+                .mailboxes
+                .values()
+                .flatten()
+                .chain(sim.mailbox_put_waiters.values().flatten().map(|w| &w.value))
+            {
+                assert!(sim.mbx_pattern_items(v).is_some());
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

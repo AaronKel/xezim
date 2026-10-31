@@ -210,7 +210,10 @@ impl Simulator {
             }
             return false;
         }
-        let Some(cd) = self.module.classes.get(&cn) else {
+        // §8.3: inherited properties use their declaring class's collection
+        // metadata. Stop at the first declaration so a shadow remains local.
+        let owners = self.prop_owners(&cn);
+        let Some((_, cd)) = owners.get(member) else {
             return false;
         };
         // Associative array: `'{k:v,...}` — keyed items.

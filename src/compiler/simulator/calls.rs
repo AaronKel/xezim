@@ -62,9 +62,9 @@ impl Simulator {
         self.class_has_method(&cn, mname)
     }
 
-    pub(super) fn eval_call_inner(&mut self, func: &Expression, args: &[Expression]) -> Value {
-        // §26.3 / §35.5.4: package-local DPI names have qualified entries,
-        // just like ordinary package functions. Preserve the declaring scope.
+    /// §26.3 / §35.5.4: preserve a package import's declaring scope while
+    /// ordinary objects and local declarations retain their receiver meaning.
+    pub(super) fn package_dpi_call_key(&self, func: &Expression) -> Option<String> {
         let package_dpi = match &func.kind {
             ExprKind::MemberAccess { expr, member } => match &expr.kind {
                 ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() =>
@@ -82,7 +82,13 @@ impl Simulator {
             && !self.local_stack.last().is_some_and(|m| m.contains_key(pkg))
             && !self.signal_name_to_id.contains_key(pkg)
         {
-            let key = format!("{pkg}::{name}");
+            return Some(format!("{pkg}::{name}"));
+        }
+        None
+    }
+
+    pub(super) fn eval_call_inner(&mut self, func: &Expression, args: &[Expression]) -> Value {
+        if let Some(key) = self.package_dpi_call_key(func) {
             if let Some(value) = self.exec_dpi_import_call(&key, args) {
                 return value;
             }

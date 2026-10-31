@@ -212,6 +212,11 @@ impl Simulator {
             mailbox_get_waiters,
             semaphore_get_waiters
         );
+        for waiter in self.mailbox_put_waiters.values().flatten() {
+            if let Some(items) = self.mbx_pattern_items(&waiter.value) {
+                trace.trace(items)?;
+            }
+        }
         for fsm in self.proc_fsm.values() {
             trace.trace(&fsm.regs)?;
             trace.trace(&fsm.compiled)?;
@@ -280,6 +285,11 @@ impl Simulator {
             }
             if let Some(values) = self.mailboxes.get(&handle) {
                 edge_trace.trace(values)?;
+                for value in values {
+                    if let Some(items) = self.mbx_pattern_items(value) {
+                        edge_trace.trace(items)?;
+                    }
+                }
             }
             edges[handle].extend(edge_trace.drain_candidates());
         }
@@ -438,6 +448,24 @@ impl Simulator {
             semaphores,
             pending_class_initializers
         );
+        // A discarded mailbox (or a killed producer) releases its captured
+        // patterns. Queued messages and parked puts retain their own tokens.
+        if !self.mbx_patterns.is_empty() {
+            let tokens: HashSet<_> = self
+                .mailboxes
+                .values()
+                .flatten()
+                .chain(
+                    self.mailbox_put_waiters
+                        .values()
+                        .flatten()
+                        .map(|w| &w.value),
+                )
+                .filter(|value| value.width == 64 && value.is_fill)
+                .filter_map(Value::to_u64)
+                .collect();
+            self.mbx_patterns.retain(|token, _| tokens.contains(token));
+        }
         self.virtual_iface_bindings
             .retain(|(h, _), _| !dead_handle(*h));
         self.randc_used.retain(|(h, _), _| !dead_handle(*h));

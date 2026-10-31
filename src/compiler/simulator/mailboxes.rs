@@ -334,6 +334,15 @@ impl Simulator {
         true
     }
 
+    /// Captured message syntax can be the only owner of a class handle.
+    /// The token itself is not that handle (§8.7 / §15.4.3).
+    pub(super) fn mbx_pattern_items(&self, value: &Value) -> Option<&[AssignmentPatternItem]> {
+        if value.width != 64 || !value.is_fill {
+            return None;
+        }
+        self.mbx_patterns.get(&value.to_u64()?).map(Vec::as_slice)
+    }
+
     /// Write one delivered message into a parked waiter's lvalue, taking the
     /// aggregate path when the destination is an unpacked struct. Must run
     /// with the waiter's process context restored, so the lvalue's frame-local

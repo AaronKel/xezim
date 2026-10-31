@@ -589,3 +589,11 @@ fn dpi_audit_types_test() {
         "tests/dpi/dpi_audit_types_test.sv",
     );
 }
+
+#[test]
+fn dpi_string_return_respects_local_declaration_shadowing() {
+    let so = compile_dpi_lib("tests/dpi/string_return_display.c", "string_return_shadow");
+    let text = run_xezim_with_dpi(&so, "tests/dpi/string_return_shadow_test.sv");
+    let _ = std::fs::remove_file(so);
+    assert!(text.contains("TEST_PASS"), "{text}");
+}

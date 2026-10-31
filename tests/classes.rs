@@ -987,3 +987,6 @@ mod class_queue_empty_pattern_through_handle;
 
 #[path = "classes/package_type_identity_roundtrip.rs"]
 mod package_type_identity_roundtrip;
+
+#[path = "classes/review_collection_pattern_gaps.rs"]
+mod review_collection_pattern_gaps;

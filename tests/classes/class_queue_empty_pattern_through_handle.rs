@@ -1,6 +1,6 @@
 //! `o.q = '{}` through an object handle leaves a queue or dynamic array
 //! property with no elements, own or inherited, of any element type, as it
-//! does inside a method. `'{}` is an extension that Verilator also
+//! does inside a method. `'{}` is an extension that a reference simulator also
 //! accepts; IEEE 1800-2017 spells the empty value `{}` (§7.10).
 
 #[test]

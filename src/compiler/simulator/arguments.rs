@@ -1407,10 +1407,13 @@ impl Simulator {
                 )
             })
             .count();
-        let pattern_vals = self.eval_flat_struct_pattern(arg, leaf_count).or_else(|| {
-            let keys: Vec<_> = leaves.iter().map(|l| (l.0.clone(), l.2, l.3)).collect();
-            self.struct_pattern_leaf_values(port_name, &su, arg, &keys)
-        });
+        let widths: Vec<_> = leaves.iter().map(|l| l.2).collect();
+        let pattern_vals = self
+            .eval_flat_struct_pattern(arg, leaf_count, &widths)
+            .or_else(|| {
+                let keys: Vec<_> = leaves.iter().map(|l| (l.0.clone(), l.2, l.3)).collect();
+                self.struct_pattern_leaf_values(port_name, &su, arg, &keys)
+            });
         let call_vals = if copies_in && pattern_vals.is_none() {
             self.call_struct_leaf_values(port_name, &su, arg)
         } else {
@@ -1606,6 +1609,7 @@ impl Simulator {
         &mut self,
         arg: &Expression,
         n: usize,
+        widths: &[u32],
     ) -> Option<Vec<Value>> {
         let ExprKind::AssignmentPattern(parts) = &arg.kind else {
             return None;
@@ -1614,11 +1618,13 @@ impl Simulator {
             return None;
         }
         let mut out = Vec::with_capacity(n);
-        for p in parts.iter() {
+        for (pos, p) in parts.iter().enumerate() {
             // Positional only; keyed (`'{"name": v}`) and `default:` forms are
             // not positionally ordinal.
             if let crate::ast::expr::AssignmentPatternItem::Ordered(e) = p {
-                out.push(self.eval_expr(e));
+                // §10.8: a formal member supplies expression width before
+                // evaluation, including carry bits in a narrow addition.
+                out.push(self.eval_expr_ctx(e, widths.get(pos).copied().unwrap_or(0)));
             } else {
                 return None;
             }
@@ -1756,8 +1762,9 @@ impl Simulator {
             self.any_struct_formal_markers = true;
             self.note_struct_root(port_name);
             locals.insert(format!("{}.", port_name), Value::zero(1));
+            let widths: Vec<_> = leaves.iter().map(|l| l.2).collect();
             let pattern_vals = self
-                .eval_flat_struct_pattern(arg, leaves.len())
+                .eval_flat_struct_pattern(arg, leaves.len(), &widths)
                 .or_else(|| {
                     let keys: Vec<_> = leaves.iter().map(|l| (l.0.clone(), l.2, l.3)).collect();
                     self.struct_pattern_leaf_values(port_name, &su, arg, &keys)
@@ -1788,8 +1795,20 @@ impl Simulator {
             }
             return Some(entries);
         }
+        let widths: Vec<_> = su
+            .members
+            .iter()
+            .flat_map(|m| {
+                let width = super::elaborate::resolve_type_width(
+                    &m.data_type,
+                    Some(&self.module.parameters),
+                    Some(&self.module.typedefs),
+                );
+                m.declarators.iter().map(move |_| width)
+            })
+            .collect();
         let pattern_vals = self
-            .eval_flat_struct_pattern(arg, flat_names.len())
+            .eval_flat_struct_pattern(arg, flat_names.len(), &widths)
             .or_else(|| {
                 let mut keys = Vec::new();
                 for m in &su.members {
