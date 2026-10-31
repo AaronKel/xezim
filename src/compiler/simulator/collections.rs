@@ -4402,7 +4402,14 @@ impl Simulator {
         while let Some(cn) = cur {
             if let Some(cd) = self.module.classes.get(&cn) {
                 for (nm, con) in cd.constraints.iter() {
-                    if all_off || disabled.contains(nm) {
+                    // §18.5.11: a static block's mode is the class-wide flag
+                    // a whole-object `constraint_mode(0)` also clears.
+                    let static_off = con.is_static
+                        && !self.static_constraint_disabled.is_empty()
+                        && self
+                            .static_constraint_disabled
+                            .contains(&(cn.clone(), nm.clone()));
+                    if all_off || static_off || disabled.contains(nm) {
                         seen.insert(nm.clone());
                         continue;
                     }
