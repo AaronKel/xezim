@@ -10,6 +10,22 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* Constants of a module's first instance see the struct typedefs the module
+  declares in its body: a constant function's struct formal, local and
+  result, a struct localparam's members, and a pattern actual of a struct
+  formal read 0 or were packed by position there (§6.18, §7.2.1, #680,
+  reported by git-hevangel); a subroutine local or associative key sized
+  by a class parameter (`bit [N-1:0] x;` in `C #(N)`) takes the
+  specialization's width (§8.25, #681, reported by Ganesh-TNL); a `randc`
+  variable of up to 32 bits cycles, and a wider one warns that it is
+  randomized as `rand` (§18.4.2, #699, reported by Ganesh-TNL); a second
+  elaboration in the same thread no longer reads the previous one's
+  constant-evaluation tables (#739, reported by git-hevangel).
+* Class objects no handle reaches are reclaimed with their storage at a
+  time advance, on by default (`XEZIM_CLASS_GC=0` turns it off), with
+  collections spaced so their total cost stays linear in the objects
+  allocated (§8.7, #722, PR #724, contributed by AaronKel).
+
 * Randomization, arguments, compiled methods, fork state, interfaces and
   process memory (#698-#719, PR #720, contributed by AaronKel):
   associative-array values in `inside` constraints, fallback repairs of
@@ -443,6 +459,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   bincode 1.x (RUSTSEC-2025-0141). Artifacts written by earlier versions are
   refused with the usual "recompile with current xezim" message; the caches
   are rebuilt (#531, core #87).
+
+**Performance**
+
+* Elaboration cost is linear in the number of instances for `bind`
+  directives in a replicated module (§23.11, #679), interface-port formals
+  (§25.10, #736) and constant-function calls (§13.4.3, #737); each copied or
+  scanned the design-wide parameter table per instance (4,000 instances
+  with a bind: 49.3 G instructions before, 1.6 G after). Reported by
+  git-hevangel.
 
 **Command line**
 
