@@ -36,9 +36,16 @@ impl Simulator {
             return;
         }
         let grown = self.heap.len().saturating_sub(self.class_gc_heap_len);
+        // A collection costs time and memory in proportion to every slot
+        // ever allocated, not to the live objects, so the next one waits for
+        // half again as many allocations: the slots grow geometrically
+        // between collections and the total cost stays linear. A fixed
+        // threshold made a long run with few live objects quadratic.
         let threshold = match mode {
             ClassGcMode::Stress => 1,
-            _ => CLASS_GC_MIN_ALLOCS.max(self.class_gc_live),
+            _ => CLASS_GC_MIN_ALLOCS
+                .max(self.class_gc_live)
+                .max(self.heap.len() / 2),
         };
         // A suspended DPI task keeps values on a foreign stack the trace
         // cannot see; wait until none is parked.
@@ -65,8 +72,8 @@ impl Simulator {
 
 impl Simulator {
     /// Trace scheduler-owned runtime roots without interpreting any expressions.
-    /// This is not yet a complete collection decision: coverage/assertion state
-    /// and foreign stacks require a separate admission check before sweeping.
+    /// The sweep runs only at a time advance with no suspended DPI task
+    /// (`maybe_collect_class_heap`), whose foreign stack the trace cannot see.
     pub(super) fn trace_class_runtime_roots(&self) -> Result<HandleTrace, TraceError> {
         let mut trace = HandleTrace::new(self.heap.len());
         macro_rules! roots {
@@ -256,9 +263,8 @@ impl Simulator {
 }
 
 impl Simulator {
-    /// Read-only transitive graph, used to validate marking before a sweep is
-    /// enabled. Never call a reclamation routine solely on this result while
-    /// the foreign-stack / safe-point audit remains unfinished.
+    /// The objects reachable from the runtime roots, transitively: the
+    /// marking `maybe_collect_class_heap` sweeps by.
     pub(super) fn class_heap_reachability_probe(&self) -> Result<Vec<bool>, TraceError> {
         let mut roots = self.trace_class_runtime_roots()?;
         let mut edges = vec![Vec::new(); self.heap.len()];
@@ -335,8 +341,8 @@ impl Simulator {
 }
 
 impl Simulator {
-    /// Sweep only slots whose unreachable status has already been established.
-    /// No scheduler path calls this yet. Keep handle indices monotonic: stale
+    /// Sweep only slots whose unreachable status has already been established
+    /// (`maybe_collect_class_heap`). Keep handle indices monotonic: stale
     /// numeric comparisons must never alias a subsequently allocated object.
     pub(super) fn release_unreachable_class_storage(&mut self, dead: &[bool]) -> usize {
         assert_eq!(dead.len(), self.heap.len());

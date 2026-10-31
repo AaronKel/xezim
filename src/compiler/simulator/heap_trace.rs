@@ -24,7 +24,6 @@ impl ser::Error for TraceError {
 
 /// Candidates only: callers must intersect these with allocated heap slots.
 /// False positives retain objects; a serialization error must abort collection.
-#[allow(dead_code)]
 pub(super) struct HandleTrace {
     pub candidates: Vec<bool>,
     found: Vec<usize>,
@@ -32,7 +31,6 @@ pub(super) struct HandleTrace {
     xz_words: Vec<u64>,
     capture_words: u8,
 }
-#[allow(dead_code)]
 impl HandleTrace {
     pub fn new(heap_len: usize) -> Self {
         Self {
