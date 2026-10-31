@@ -6,6 +6,18 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 # What's new in 0.11
 
+### Unreleased
+
+**Performance**
+
+* An instance is elaborated against only the package parameters its
+  definition can name, not a copy of the whole package, `$unit` and top
+  parameter table (§23.10, §26.3, #740): with 4,000 package parameters no
+  module names, compiling 1,000 instances took 375.6 G instructions before
+  and 5.7 G after, and 250 instances 96.6 G and 4.0 G. The elaborated design
+  is unchanged for every design under tests/ and examples/. Reported by
+  git-hevangel.
+
 ### 0.11.4 — class-object reclamation, linear elaboration, class and randomization correctness (October 2026)
 
 **Correctness**
