@@ -23,6 +23,16 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* `randomize()` fails when every weight of a `dist` is 0: an item of
+  weight 0 is not in the set, so `v dist { 5 := 0 }`, `v dist { [0:15] :/
+  0 }` or weights read from variables that are all 0 admit no value, yet
+  the call returned 1 with the first item, also from `std::randomize`
+  (§18.5.4, #770, reported by Ganesh-TNL).
+* `obj.arr[i].rand_mode(0)` on an element of an unpacked rand array keeps
+  that element's value through `randomize()`, and the other constraints see
+  it; the call stopped the run with a false null-handle error. The query
+  form reads the element's mode, and `arr.rand_mode(1)` enables every
+  element again (§18.8, #769, reported by Ganesh-TNL).
 * An array's size can be ordered in a `solve … before` list: `solve sel
   before arr.size();` failed to parse, and now draws `sel` first and the
   size in its turn, so the sizes guarded by `sel` hold and `sel` keeps its
