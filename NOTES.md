@@ -23,6 +23,15 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 **Correctness**
 
+* In a parameterized class, a formal, return or local typed `bit [W-1:0]`,
+  or by a class typedef of it (`typedef bit [W-1:0] vec_t;`), is as wide
+  as the object's specialization makes it, with the type's signedness, also
+  once the method is compiled hot. A formal kept the actual's 32 bits (and
+  `$bits` read 32), an actual was not evaluated at the formal's width, a
+  typedef formal read 1 bit, a typedef return was not truncated, and a
+  typedef local was 32 bits wide. Each element of a `randc` array now
+  cycles through its values, where it was drawn as `rand` (§8.25, §13.5,
+  §18.4.2, #768, reported by Ganesh-TNL).
 * `randomize()` fails when every weight of a `dist` is 0: an item of
   weight 0 is not in the set, so `v dist { 5 := 0 }`, `v dist { [0:15] :/
   0 }` or weights read from variables that are all 0 admit no value, yet
