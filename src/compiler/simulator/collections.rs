@@ -401,6 +401,15 @@ impl Simulator {
     /// `C#spec::m`, a package `p::m`, or a local `@m#n`. Borrowed lookups
     /// only, one per level.
     pub(super) fn coll_shape_at(&self, name: &str) -> Option<(&CollShape, usize)> {
+        // The common store is `root[k1]..[kn]` with a bracket-free root: one
+        // lookup of the root, not one per prefix (element writes to
+        // `int d[][]` ask on every write).
+        if let Some(p) = name.find('[')
+            && let Some(depth) = Self::select_count(&name[p..])
+            && let Some(shape) = self.root_coll_shape(&name[..p])
+        {
+            return Some((shape, depth));
+        }
         let mut root = name;
         let mut depth = 0;
         loop {
@@ -413,6 +422,24 @@ impl Simulator {
             root = &root[..root.rfind('[')?];
             depth += 1;
         }
+    }
+
+    /// The number of `[..]` selects `rest` consists of, or `None` when
+    /// anything else follows one (`[1].a[2]`, a member of an element).
+    fn select_count(rest: &str) -> Option<usize> {
+        let (mut open, mut n) = (0usize, 0);
+        for b in rest.bytes() {
+            match b {
+                b'[' => {
+                    n += usize::from(open == 0);
+                    open += 1;
+                }
+                b']' => open = open.checked_sub(1)?,
+                _ if open == 0 => return None,
+                _ => {}
+            }
+        }
+        (open == 0).then_some(n)
     }
 
     /// The declared shape stored under the unselected name `root`.

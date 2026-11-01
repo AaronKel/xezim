@@ -1710,9 +1710,10 @@ impl Simulator {
         {
             return false;
         }
-        let mut cur = base.as_ref();
+        let (mut cur, mut selects) = (base.as_ref(), 1);
         while let ExprKind::Index { expr, .. } = &cur.kind {
             cur = expr;
+            selects += 1;
         }
         let name = match &cur.kind {
             ExprKind::Ident(h) => match h.path.last() {
@@ -1722,7 +1723,19 @@ impl Simulator {
             ExprKind::MemberAccess { member, .. } => member.name.as_str(),
             _ => return false,
         };
-        self.indexed_coll_root(name) || (self.local_coll_rows_live && self.local_coll_root(name))
+        if self.local_coll_rows_live {
+            return self.indexed_coll_root(name) || self.local_coll_root(name);
+        }
+        // A select as deep as a module-scope declaration's dimensions is an
+        // element (or a bit of one), never a row: `d[i][j] = v` on
+        // `int d[][]` is a plain element write.
+        self.indexed_coll_root(name)
+            && !(matches!(&cur.kind, ExprKind::Ident(h) if h.path.len() == 1)
+                && self
+                    .module
+                    .coll_shapes
+                    .get(name)
+                    .is_some_and(|shape| selects >= shape.dims.len()))
     }
 
     /// Whether `bare` names a subroutine-local collection of collections,
