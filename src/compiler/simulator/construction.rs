@@ -140,18 +140,29 @@ impl Simulator {
                 if let Some(&kw) = widths.get(&s_pre[..s_pre.len() - 1]) {
                     widths.insert(n_name.clone(), kw);
                 }
+                // §7.4.5: a row that is a queue or dynamic array keeps its
+                // size (`<h>#m[k].size`) and its registration in the copy.
                 let entries: Vec<(String, Value)> = self
                     .signals
                     .keys_with_elem_prefix(&s_pre)
                     .into_iter()
-                    .filter(|k| k.ends_with(']'))
+                    .filter(|k| k.ends_with(']') || k.ends_with("].size"))
                     .filter_map(|k| {
                         let v = self.signals.get(&k)?.clone();
-                        Some((k[s_pre.len()..k.len() - 1].to_string(), v))
+                        Some((k[s_pre.len()..].to_string(), v))
                     })
                     .collect();
-                for (key, v) in entries {
-                    self.signals.insert(format!("{}[{}]", n_name, key), v);
+                for (rest, v) in entries {
+                    if let Some(row) = rest.strip_suffix(".size") {
+                        let (srow, nrow) = (format!("{s_pre}{row}"), format!("{n_name}[{row}"));
+                        if self.module.dynamic_arrays.contains(&srow) {
+                            self.module.dynamic_arrays.insert(nrow.clone());
+                        }
+                        if let Some(&t) = self.module.arrays.get(&srow) {
+                            self.module.arrays.insert(nrow, t);
+                        }
+                    }
+                    self.signals.insert(format!("{}[{}", n_name, rest), v);
                 }
             }
             // §8.12: a shallow copy copies every property's value — a fixed
