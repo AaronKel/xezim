@@ -2265,8 +2265,19 @@ impl Simulator {
                     Vec::new()
                 };
                 let mut used: HashSet<u64> = HashSet::default();
+                let cyclic = randc_set.contains(prop.as_str());
                 for i in *lo..=*hi {
-                    let v = if !pool.is_empty() {
+                    // §18.4.2: each element of a randc array cycles on its own.
+                    let cycled = if cyclic {
+                        let key = format!("{prop}[{i}]");
+                        let domain = self.randc_domain(&key, *width, enum_t.as_deref(), None);
+                        (!domain.is_empty()).then(|| self.pick_randc(handle, &key, &domain))
+                    } else {
+                        None
+                    };
+                    let v = if let Some(c) = cycled {
+                        c
+                    } else if !pool.is_empty() {
                         // Prefer an unused pool member (unique); fall back to any.
                         let avail: Vec<u64> =
                             pool.iter().copied().filter(|v| !used.contains(v)).collect();
@@ -2284,7 +2295,7 @@ impl Simulator {
                     } else {
                         0
                     };
-                    let mut val = if !pool.is_empty() || *width <= 64 {
+                    let mut val = if cycled.is_some() || !pool.is_empty() || *width <= 64 {
                         Value::from_u64(v, *width)
                     } else {
                         self.random_value_of_width(*width)
@@ -2303,9 +2314,20 @@ impl Simulator {
                     continue;
                 }
                 let mut idx: Vec<i64> = shape.iter().map(|d| d.0).collect();
+                let cyclic = randc_set.contains(prop.as_str());
                 loop {
                     let suffix: String = idx.iter().map(|i| format!("[{}]", i)).collect();
-                    let v = if *width <= 64 {
+                    // §18.4.2: each element of a randc array cycles on its own.
+                    let cycled = if cyclic {
+                        let key = format!("{prop}{suffix}");
+                        let domain = self.randc_domain(&key, *width, None, None);
+                        (!domain.is_empty()).then(|| self.pick_randc(handle, &key, &domain))
+                    } else {
+                        None
+                    };
+                    let v = if let Some(c) = cycled {
+                        c
+                    } else if *width <= 64 {
                         let mask = if *width >= 64 {
                             u64::MAX
                         } else {
