@@ -120,6 +120,10 @@ Thank you to everyone who has improved xezim and xezim-core through pull request
   a simulator test for each: casts sized by a value parameter inside constant
   functions (§6.24.1, §13.4.3), and element selects of packed localparams
   declared in a child module's body (§7.4.1, §7.4.5).
+- **[Philip Axer](https://github.com/philipaxer)** — nested collections typed
+  by their declared shape at every level: the shape recorded in the core for
+  every scope, rows created as their parent's kind allows, and `%p` and
+  `foreach` over queue and dynamic outer levels (§7.4.5, §7.8, §7.10).
 
 ## Bug reports
 
@@ -141,6 +145,7 @@ work. Thank you in particular to
 [Lramseyer](https://github.com/Lramseyer),
 [lwflwf1](https://github.com/lwflwf1),
 [overcookedlobster](https://github.com/overcookedlobster),
+[philipaxer](https://github.com/philipaxer),
 [rharikrishna25](https://github.com/rharikrishna25),
 [rpjayaraman](https://github.com/rpjayaraman),
 [soronpo](https://github.com/soronpo),

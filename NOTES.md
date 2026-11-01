@@ -21,9 +21,25 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
   body keeps the element's width and remaining dimensions instead of
   reading one bit (§7.4.1, §7.4.5, #766, PR core #131 and #767). Reported
   and fixed by ds54e.
+* Each row of a nested collection is the collection its declaration names
+  at that depth, keyed by that level's own index type, at every scope. A
+  queue held in an associative array (`int m[int][$]`) kept its element after
+  `pop_front()` or `pop_back()`, and `delete(i)` stopped the run with a false
+  null-handle error; a whole-row assignment `m[k] = q` stored one `x`; `%p`
+  and `foreach` over a queue or dynamic outer level (`int d[][string][$]`)
+  printed each row as a scalar; and a receiver select with a side effect
+  (`m[f()].push_back(x)`) ran four times. A write outside a fixed parent's
+  bounds or past a queue or dynamic row's size is now ignored, and a copied
+  object or a by-value formal keeps every row (§7.4.5, §7.4.6, §7.8,
+  §7.10.1, §12.7.3, §21.2.1.7, #765, PR core #132, #133 and #772–#774).
+  Reported and fixed by philipaxer.
 
 **Performance**
 
+* An element of a nested collection is read and written through its
+  declared shape, found with one lookup: 600,000 writes to `int d[][]` take
+  16.0 G instructions instead of 18.2 G, and as many reads 8.2 G instead of
+  14.2 G (§7.4.5, #772).
 * An instance is elaborated against only the package parameters its
   definition can name, not a copy of the whole package, `$unit` and top
   parameter table (§23.10, §26.3, #740): with 4,000 package parameters no
