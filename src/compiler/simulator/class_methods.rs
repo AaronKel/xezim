@@ -1034,6 +1034,36 @@ impl Simulator {
     /// `C#(spec)` resolves bare statics to the shared `C::member` cell
     /// while every interpreter route uses `C#spec::member` — storage
     /// silently splits. Returns the saved spec for restore.
+    /// §8.25: the width of `dt`, a packed type sized by a class value
+    /// parameter, or a typedef of the class naming one, in a method of
+    /// `cname` called on `handle`: the receiver's specialization, else the
+    /// class's defaults. `None` for a literal or non-packed type.
+    pub(super) fn method_formal_param_width(
+        &mut self,
+        handle: usize,
+        cname: &str,
+        dt: &DataType,
+    ) -> Option<u32> {
+        if Self::packed_dims_are_literal(dt) {
+            return None;
+        }
+        // Only a typedef of the class itself can be sized by its parameters;
+        // look before seeding the receiver's specialization.
+        if let DataType::TypeReference { name, .. } = dt
+            && (name.has_scope() || self.class_local_typedef(cname, &name.name.name).is_none())
+        {
+            return None;
+        }
+        let saved = self.seed_callee_spec_from_instance(handle, cname);
+        self.this_stack.push(Some(handle));
+        self.class_context_stack.push(Some(cname.to_string()));
+        let w = self.class_param_sized_width(dt);
+        self.class_context_stack.pop();
+        self.this_stack.pop();
+        self.restore_spec_pooled(saved);
+        w
+    }
+
     pub(super) fn seed_callee_spec_from_instance(
         &mut self,
         handle: usize,
@@ -1674,8 +1704,22 @@ impl Simulator {
                     // a comparison (see `actual_ctx_shape`). Gated to the shape
                     // `resize_for_assign` already understands, and the width is
                     // read from the cached plan rather than recomputed.
+                    // §8.25/§13.5: a packed formal sized by a class value
+                    // parameter (`bit [W-1:0] a`, or a class typedef of one)
+                    // is as wide as the receiver's specialization makes it.
+                    let param_w = if plan.ports[i].fixed_width.is_none()
+                        && !plain_class
+                        && (Self::actual_ctx_shape(port)
+                            || port.dimensions.is_empty()
+                                && port.direction == PortDirection::Input
+                                && matches!(&port.data_type, DataType::TypeReference { .. }))
+                    {
+                        self.method_formal_param_width(handle, cname, &port.data_type)
+                    } else {
+                        None
+                    };
                     let actual_ctx = if arg_supplied(i) && Self::actual_ctx_shape(port) {
-                        plan.ports[i].fixed_width.filter(|w| *w > 0)
+                        plan.ports[i].fixed_width.filter(|w| *w > 0).or(param_w)
                     } else {
                         None
                     };
@@ -1734,6 +1778,19 @@ impl Simulator {
                     if matches!(&port.data_type, DataType::TypeReference { .. }) {
                         if plain_class {
                             // A class handle is bound as passed.
+                        } else if let Some(pw) = param_w {
+                            let signed = match &port.data_type {
+                                DataType::TypeReference { name, .. } => self
+                                    .class_local_typedef(cname, &name.name.name)
+                                    .is_some_and(super::elaborate::is_type_signed),
+                                _ => false,
+                            };
+                            if val.is_real {
+                                val = Self::real_to_int(val.to_f64(), pw);
+                            } else if pw != val.width {
+                                val = val.resize_for_assign(pw);
+                            }
+                            val.is_signed = signed;
                         } else if let Some((pw, signed)) =
                             self.scalar_formal_integral(&port.data_type)
                         {
@@ -1787,6 +1844,13 @@ impl Simulator {
                             val = val.resize_for_assign(pw);
                         }
                         val.is_signed = pp.signed;
+                    } else if let Some(pw) = param_w {
+                        if val.is_real {
+                            val = Self::real_to_int(val.to_f64(), pw);
+                        } else if pw != val.width {
+                            val = val.resize_for_assign(pw);
+                        }
+                        val.is_signed = plan.ports[i].signed;
                     } else if plan.ports[i].signed {
                         val.is_signed = true;
                     }
@@ -2546,6 +2610,24 @@ impl Simulator {
                 {
                     let (w, sg) = self.method_ret_typedef_fit(&f.return_type, &cname);
                     ret = Self::ret_convert(ret, ret_conv, w, sg);
+                }
+                // §8.25: a return typed by a class typedef sized by a class
+                // value parameter (`typedef bit [W-1:0] vec_t;`).
+                if dyn_ret_type.is_none()
+                    && !ret.is_real
+                    && !ret_is_string
+                    && let ClassMethodKind::Function(f) = &method.kind
+                    && matches!(&f.return_type, DataType::TypeReference { .. })
+                    && let Some(w) = self.method_formal_param_width(handle, &cname, &f.return_type)
+                {
+                    if w != ret.width {
+                        ret = ret.resize_for_assign(w);
+                    }
+                    if let DataType::TypeReference { name, .. } = &f.return_type
+                        && let Some(td) = self.class_local_typedef(&cname, &name.name.name)
+                    {
+                        ret.is_signed = super::elaborate::is_type_signed(td);
+                    }
                 }
                 // Per-instance return clamp for a class-parameter-sized
                 // return type: `box#(4)` with `function bit [W-1:0] mk()`

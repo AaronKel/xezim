@@ -280,6 +280,19 @@ impl Simulator {
         if !matches!(self.class_context_stack.last(), Some(Some(_))) {
             return None;
         }
+        // A typedef of the class (`typedef bit [W-1:0] vec_t;`) stands for
+        // the type it names.
+        let local;
+        let dt = match dt {
+            DataType::TypeReference {
+                name, dimensions, ..
+            } if dimensions.is_empty() && !name.has_scope() => {
+                let ctx = self.class_context_stack.last().cloned().flatten()?;
+                local = self.class_local_typedef(&ctx, &name.name.name)?.clone();
+                &local
+            }
+            _ => dt,
+        };
         let dims = match dt {
             DataType::IntegerVector { dimensions, .. } | DataType::Implicit { dimensions, .. }
                 if !dimensions.is_empty() =>

@@ -1601,7 +1601,19 @@ impl Simulator {
                     let keep_source = !matches!(port.data_type, DT::TypeReference { .. })
                         && !matches!(port.data_type, DT::IntegerAtom { .. })
                         && !Self::packed_dims_are_literal(&port.data_type);
-                    if keep_source { 0 } else { pw }
+                    // §8.25: a class typedef sized by a class parameter
+                    // (`vec_t a`) is as wide as this specialization makes it;
+                    // the plan is kept per specialization.
+                    let class_typedef_w = matches!(port.data_type, DT::TypeReference { .. })
+                        .then(|| self.method_formal_param_width(handle, cname, &port.data_type))
+                        .flatten();
+                    if let Some(w) = class_typedef_w {
+                        w
+                    } else if keep_source {
+                        0
+                    } else {
+                        pw
+                    }
                 };
                 if is_class {
                     class_formals.insert(port.name.name.clone());
@@ -1650,7 +1662,16 @@ impl Simulator {
         };
         // Effective result width: instance-resolved for param-bounded packed
         // returns, else the static width from the plan.
-        let result_width = if pre.param_able_result {
+        let result_width = if pre.param_able_result
+            && matches!(
+                &*pre.return_type,
+                crate::ast::types::DataType::TypeReference { .. }
+            )
+            && let Some(w) = self.method_formal_param_width(handle, cname, &pre.return_type)
+        {
+            // §8.25: a class typedef sized by a class parameter (`vec_t`).
+            w
+        } else if pre.param_able_result {
             let scope = self.instance_param_scope(handle);
             let w = resolve_type_width(&pre.return_type, Some(&scope), Some(&self.module.typedefs));
             if w > 0 { w } else { pre.static_result_width }
