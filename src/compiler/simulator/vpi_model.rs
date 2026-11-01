@@ -4067,7 +4067,7 @@ fn edge_code(mask: u16) -> c_int {
 }
 
 /// A bare identifier expression.
-fn ident_expr(name: &str) -> Expression {
+pub(super) fn ident_expr(name: &str) -> Expression {
     Expression::new(
         ExprKind::Ident(HierarchicalIdentifier {
             root: None,

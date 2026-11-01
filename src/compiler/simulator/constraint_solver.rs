@@ -793,6 +793,22 @@ impl Simulator {
             });
             constraint_src_files.push(inline_src_file);
         }
+        // §18.8: the elements whose rand_mode is off keep their values.
+        let pins = self.rand_mode_element_pins(handle);
+        if !pins.is_empty() {
+            constraints.push(ClassConstraint {
+                is_static: false,
+                is_extern: false,
+                has_body: true,
+                name: crate::ast::Identifier {
+                    name: "__rand_mode__".to_string(),
+                    span: crate::ast::Span::new(0, 0),
+                },
+                items: pins,
+                span: crate::ast::Span::new(0, 0),
+            });
+            constraint_src_files.push(None);
+        }
 
         // §18.5.5: expand the array SLICE of a `unique {…}` list into the
         // element-wise inequalities it denotes.

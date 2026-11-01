@@ -651,6 +651,8 @@ mod interface_class_extends_type_param;
 mod issue_246_struct_member_randomize;
 #[path = "classes/issue_249_rand_mode_receiver.rs"]
 mod issue_249_rand_mode_receiver;
+#[path = "classes/rand_mode_element_769.rs"]
+mod rand_mode_element_769;
 #[path = "classes/dist_zero_weights_770.rs"]
 mod dist_zero_weights_770;
 #[path = "classes/lrm_chained_handle_writes.rs"]

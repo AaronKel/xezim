@@ -653,6 +653,11 @@ impl Simulator {
                             (None, None)
                         }
                     }
+                    // §18.8: `obj.arr[i].rand_mode(0)` names one element.
+                    ExprKind::Index { .. } => match self.rand_mode_element_target(expr) {
+                        Some((h, key)) => (Some(h), Some(key)),
+                        None => (None, None),
+                    },
                     _ => (None, None),
                 };
                 if let Some(h) = handle_opt {
@@ -677,7 +682,9 @@ impl Simulator {
                         };
                         let disabled = table.get(&h).is_some_and(|s| {
                             if let Some(ref n) = target_name {
+                                // An element is off with its whole array.
                                 s.contains(n)
+                                    || n.split_once('[').is_some_and(|(b, _)| s.contains(b))
                             } else {
                                 !s.is_empty()
                             }
@@ -2652,14 +2659,18 @@ impl Simulator {
                     if h_val != 0 && self.heap.get(h_val).and_then(|x| x.as_ref()).is_some() {
                         // Middle segments name the targeted prop/constraint;
                         // empty = whole-object mode.
+                        // §18.8: a select names one element (`arr[2]`).
                         let target_name: Option<String> = if hier.path.len() >= 3 {
-                            Some(
-                                hier.path[1..hier.path.len() - 1]
-                                    .iter()
-                                    .map(|s| s.name.name.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("."),
-                            )
+                            let mut parts = Vec::new();
+                            for seg in &hier.path[1..hier.path.len() - 1] {
+                                let mut part = seg.name.name.clone();
+                                for sel in &seg.selects {
+                                    let i = self.eval_expr(sel).to_i64().unwrap_or(0);
+                                    part.push_str(&format!("[{i}]"));
+                                }
+                                parts.push(part);
+                            }
+                            Some(parts.join("."))
                         } else {
                             None
                         };
@@ -2686,7 +2697,9 @@ impl Simulator {
                             };
                             let disabled = table.get(&h_val).is_some_and(|s| {
                                 if let Some(ref n) = target_name {
-                                    s.contains(n) || s.contains("*")
+                                    s.contains(n)
+                                        || s.contains("*")
+                                        || n.split_once('[').is_some_and(|(b, _)| s.contains(b))
                                 } else {
                                     !s.is_empty()
                                 }
