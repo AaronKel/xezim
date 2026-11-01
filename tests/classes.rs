@@ -655,6 +655,8 @@ mod issue_249_rand_mode_receiver;
 mod rand_mode_element_769;
 #[path = "classes/dist_zero_weights_770.rs"]
 mod dist_zero_weights_770;
+#[path = "classes/class_param_sized_formals_768.rs"]
+mod class_param_sized_formals_768;
 #[path = "classes/lrm_chained_handle_writes.rs"]
 mod lrm_chained_handle_writes;
 #[path = "classes/lrm_class_queue_locator_in_expr.rs"]
