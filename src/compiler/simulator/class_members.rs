@@ -1865,7 +1865,11 @@ impl Simulator {
     /// whether or not it exists yet.
     pub(super) fn is_declared_row(&self, name: &str) -> bool {
         self.coll_shape_at(name).is_some_and(|(shape, depth)| {
-            depth >= 1 && shape.dims.get(depth).is_some_and(|d| *d != Dim::Fixed)
+            depth >= 1
+                && shape
+                    .dims
+                    .get(depth)
+                    .is_some_and(|d| !matches!(d, Dim::Fixed(_)))
         })
     }
 

@@ -2287,12 +2287,6 @@ impl Simulator {
         })
     }
 
-    /// §7.8.6/§11.5.1: a bit write into an associative element whose
-    /// element type is integral (`m[k][3] = 1`, `sb["k"][2] = 1`), absent or
-    /// not: read it (an absent one as the element type's default), set the
-    /// bit and write it back. An absent element was created with the bit
-    /// dropped, and a present one's bit went under a bogus `m[k][3]` key.
-    /// None when `expr` is not such an element.
     /// §7.8/§7.10: a write into a row of an associative array of
     /// collections (`aq[6][0] = 9` on `int aq[int][$]`) whose row does not
     /// exist yet creates the row as the collection its declaration names,
@@ -2301,23 +2295,48 @@ impl Simulator {
     /// Every level of the key chain is created in turn: `a["p"][7]["q"] = 9`
     /// on `byte a[string][int][string]` makes the rows `a["p"]` and
     /// `a["p"][7]`, each keyed by its own declared key type.
-    /// Returns the innermost row when it is a QUEUE, for the append rule.
-    fn ensure_assoc_row(&mut self, row_expr: &Expression) -> Option<String> {
+    /// Returns the innermost row when it is a queue or dynamic array, for
+    /// the append and bounds rules; `Err` when the write must be ignored
+    /// (§7.4.6, §7.5.1, §7.10.1).
+    fn ensure_assoc_row(&mut self, row_expr: &Expression) -> Result<Option<(String, Dim)>, ()> {
         // A row is a select (`m[k]`); a plain `a[i] = v` has none to create.
         if !matches!(row_expr.kind, ExprKind::Index { .. }) {
-            return None;
+            return Ok(None);
         }
         // An associative root names its keys by level; any other root (a
         // queue of associative arrays, a local's `@l#n`) by its flat name.
-        let row = self
+        let Some(row) = self
             .nested_index_name(row_expr)
-            .or_else(|| self.flat_member_name(row_expr))?;
-        if !self.is_declared_row(&row) || !self.ensure_row(&row) {
-            return None;
+            .or_else(|| self.flat_member_name(row_expr))
+        else {
+            return Ok(None);
+        };
+        // One shape lookup serves the whole write (every element write to
+        // `int d[][]` passes here): the row's own kind is its declared
+        // dimension once `ensure_row` has its path in range.
+        let Some((shape, depth)) = self.coll_shape_at(&row) else {
+            return Ok(None);
+        };
+        let own = match shape.dims.get(depth) {
+            Some(Dim::Fixed(_)) | None => return Ok(None),
+            _ if depth == 0 => return Ok(None),
+            Some(dim) => dim.clone(),
+        };
+        match self.row_write_ready(shape, depth, &row) {
+            Some(true) => {}
+            Some(false) => return Err(()),
+            None if self.ensure_row(&row) => {}
+            None => return Err(()),
         }
-        matches!(self.declared_dim(&row), Some(Dim::Queue)).then_some(row)
+        Ok(matches!(own, Dim::Queue | Dim::Dyn).then_some((row, own)))
     }
 
+    /// §7.8.6/§11.5.1: a bit write into an associative element whose
+    /// element type is integral (`m[k][3] = 1`, `sb["k"][2] = 1`), absent or
+    /// not: read it (an absent one as the element type's default), set the
+    /// bit and write it back. An absent element was created with the bit
+    /// dropped, and a present one's bit went under a bogus `m[k][3]` key.
+    /// None when `expr` is not such an element.
     fn assoc_elem_bit_write(
         &mut self,
         expr: &Expression,
@@ -2398,15 +2417,25 @@ impl Simulator {
         if let Some(r) = self.assoc_elem_bit_write(expr, index, val) {
             return r;
         }
-        if self.has_coll_rows
-            && let Some(row) = self.ensure_assoc_row(expr)
-        {
-            // §7.10.1: a write at index == size APPENDS to a queue row
-            // (`q["x"][5][0] = 7` on an empty row makes it '{7}).
-            let iv = self.eval_expr(index);
-            let sz = self.get_queue_size(&row);
-            if !iv.has_xz() && iv.to_u64() == Some(sz) {
-                self.set_queue_size(&row, sz + 1);
+        if self.has_coll_rows {
+            match self.ensure_assoc_row(expr) {
+                Err(()) => return false,
+                Ok(Some((row, dim))) => {
+                    // §7.10.1: a write at index == size APPENDS to a queue
+                    // row (`q["x"][5][0] = 7` on an empty row makes it
+                    // '{7}); one past it, or at or past a dynamic row's
+                    // size (§7.5.1), is ignored.
+                    let iv = self.eval_expr(index);
+                    let sz = self.get_queue_size(&row);
+                    match iv.to_u64().filter(|_| !iv.has_xz()) {
+                        Some(i) if i < sz => {}
+                        Some(i) if i == sz && dim == Dim::Queue => {
+                            self.set_queue_size(&row, sz + 1)
+                        }
+                        _ => return false,
+                    }
+                }
+                Ok(None) => {}
             }
         }
         // §11.5.1: a hierarchical class property's selected element lives

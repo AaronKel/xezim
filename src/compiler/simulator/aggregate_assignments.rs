@@ -4275,7 +4275,7 @@ impl Simulator {
     /// a leaf row, or a shape with fixed levels, printed by their bounds).
     fn render_p_shaped(&mut self, name: &str) -> Option<String> {
         let (shape, depth) = self.coll_shape_at(name)?;
-        if shape.dims.contains(&Dim::Fixed) {
+        if shape.dims.iter().any(|d| matches!(d, Dim::Fixed(_))) {
             return None;
         }
         let rows_are_colls = depth + 1 < shape.dims.len();

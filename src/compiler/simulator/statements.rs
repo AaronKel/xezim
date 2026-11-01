@@ -2643,7 +2643,8 @@ impl Simulator {
             let dims = scope_sized.as_ref().unwrap_or(dims);
             // §7.4.5: its declared shape, for a per-call storage key. A
             // block-scope local keeps its bare name, recorded at elaboration.
-            self.pending_local_shape = CollShape::of(dims, |kdt| {
+            // Fixed bounds fold from the literals `scope_sized` left.
+            self.pending_local_shape = CollShape::of(dims, None, |kdt| {
                 super::elaborate::coll_key_kind(
                     kdt,
                     Some(&self.module.parameters),

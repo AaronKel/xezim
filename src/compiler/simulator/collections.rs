@@ -376,14 +376,19 @@ impl Simulator {
         // §7.8.6 Table 7-1: a row past the size of a queue or dynamic array
         // above it does not exist, so has no kind (`v[1]` of a one-row
         // `int v[][string]` reads as an empty array).
+        // Nor does one outside a fixed parent's bounds (§7.4.6).
         let mut row = name;
         for parent_dim in shape.dims[..depth].iter().rev() {
             let p = row.rfind('[')?;
-            if matches!(parent_dim, Dim::Queue | Dim::Dyn) {
-                let idx = row[p + 1..row.len() - 1].parse::<u64>().ok()?;
-                if idx >= self.get_queue_size(&row[..p]) {
-                    return None;
+            let idx = &row[p + 1..row.len() - 1];
+            match parent_dim {
+                Dim::Queue | Dim::Dyn => {
+                    if idx.parse::<u64>().ok()? >= self.get_queue_size(&row[..p]) {
+                        return None;
+                    }
                 }
+                Dim::Fixed(Some(bounds)) if !Self::within(idx, *bounds) => return None,
+                _ => {}
             }
             row = &row[..p];
         }
@@ -444,15 +449,13 @@ impl Simulator {
         self.class_prop_shape(class, member)
     }
 
-    /// The shape of property `member` as declared by `class` or the nearest
-    /// class it extends.
     /// Make the declared row `name` (`m[k1]..[kn]`) exist for a write — an
     /// assignment to it or a mutating method on it — creating each absent
     /// level of its path as its declared kind. The parent's kind decides
     /// whether an absent row may be created: an associative array allocates
     /// the entry (§7.8.7), a queue grows only at `$+1` (§7.10.1), and a
     /// dynamic or fixed array must already hold the index — writing past it
-    /// is ignored (§7.4.5, §7.5.1). The keys come from `name`, so no index
+    /// is ignored (§7.4.6, §7.5.1). The keys come from `name`, so no index
     /// is evaluated again (§11.4.1). Returns false when the write must be
     /// ignored; true for an undeclared store, which the legacy paths own.
     pub(super) fn ensure_row(&mut self, name: &str) -> bool {
@@ -461,6 +464,11 @@ impl Simulator {
         };
         if depth == 0 || depth > shape.dims.len() {
             return true;
+        }
+        // Every write to an element of `int d[][]` passes here: a row path
+        // that already exists is checked without allocating.
+        if let Some(ready) = self.row_write_ready(shape, depth, name) {
+            return ready;
         }
         let dims = shape.dims.clone();
         // The path's prefixes, outermost first: `m`, `m[k1]`, ..., `name`.
@@ -485,29 +493,37 @@ impl Simulator {
             .unwrap_or(32);
         for level in 1..=depth {
             let (parent, row) = (&name[..ends[level - 1]], &name[..ends[level]]);
-            let mut registered = self.module.dynamic_arrays.contains(row)
+            let idx = &row[parent.len() + 1..row.len() - 1];
+            let registered = self.module.dynamic_arrays.contains(row)
                 || self.module.associative_arrays.contains_key(row);
             // A queue or dynamic parent holds the rows below its size, however
             // many it has registered (elaboration registers placeholders).
+            let mut fresh = false;
             match &dims[level - 1] {
                 Dim::Queue | Dim::Dyn => {
-                    let idx = row[parent.len() + 1..row.len() - 1].parse::<u64>();
                     let size = self.get_queue_size(parent);
-                    match idx {
+                    match idx.parse::<u64>() {
                         Ok(i) if i < size => {}
                         Ok(i) if i == size && dims[level - 1] == Dim::Queue => {
-                            // A new row starts empty, whatever an earlier row
-                            // at this index left behind.
                             self.set_queue_size(parent, size + 1);
-                            registered = false;
+                            fresh = true;
                         }
                         _ => return false,
                     }
                 }
-                Dim::Assoc(_) | Dim::Fixed => {}
+                Dim::Fixed(Some(bounds)) if !Self::within(idx, *bounds) => return false,
+                Dim::Assoc(_) | Dim::Fixed(_) => {}
             }
-            if registered {
+            if registered && !fresh {
                 continue;
+            }
+            // A new row starts empty, whatever an earlier row at this index
+            // left behind (`q.delete(); q[0][7] = 2` holds only key 7).
+            if fresh {
+                for key in self.signals.keys_with_elem_prefix(&format!("{row}[")) {
+                    self.signals.remove(&key);
+                    self.widths.remove(&key);
+                }
             }
             match dims.get(level) {
                 Some(Dim::Queue | Dim::Dyn) => {
@@ -516,7 +532,9 @@ impl Simulator {
                         .arrays
                         .entry(row.to_string())
                         .or_insert((0, 63, w));
-                    if !registered
+                    // An unregistered row that already has a size (a copied
+                    // object's) keeps it.
+                    if fresh
                         || !self
                             .signals
                             .contains_key(&Self::name_with_suffix(row, ".size"))
@@ -536,6 +554,50 @@ impl Simulator {
         true
     }
 
+    /// `ensure_row`'s check of a row path that needs nothing created:
+    /// `Some(true)` when every level exists and each index is in range,
+    /// `Some(false)` when the write must be ignored, `None` when a level is
+    /// still to be created (or a queue to grow at `$+1`).
+    pub(super) fn row_write_ready(
+        &self,
+        shape: &CollShape,
+        depth: usize,
+        name: &str,
+    ) -> Option<bool> {
+        let mut row = name;
+        for level in (1..=depth).rev() {
+            let p = row.rfind('[')?;
+            let (parent, idx) = (&row[..p], &row[p + 1..row.len() - 1]);
+            match &shape.dims[level - 1] {
+                parent_dim @ (Dim::Queue | Dim::Dyn) => match idx.parse::<u64>() {
+                    Ok(i) if i < self.get_queue_size(parent) => {}
+                    Ok(_) if *parent_dim == Dim::Queue => return None,
+                    _ => return Some(false),
+                },
+                Dim::Fixed(Some(bounds)) if !Self::within(idx, *bounds) => return Some(false),
+                Dim::Assoc(_) | Dim::Fixed(_) => {}
+            }
+            if matches!(
+                shape.dims.get(level),
+                Some(Dim::Queue | Dim::Dyn | Dim::Assoc(_))
+            ) && !self.module.dynamic_arrays.contains(row)
+                && !self.module.associative_arrays.contains_key(row)
+            {
+                return None;
+            }
+            row = parent;
+        }
+        Some(true)
+    }
+
+    /// Whether the stored index `idx` lies within a fixed dimension's
+    /// inclusive bounds.
+    fn within(idx: &str, (lo, hi): (i64, i64)) -> bool {
+        idx.parse::<i64>().is_ok_and(|i| (lo..=hi).contains(&i))
+    }
+
+    /// The shape of property `member` as declared by `class` or the nearest
+    /// class it extends.
     fn class_prop_shape(&self, class: &str, member: &str) -> Option<&CollShape> {
         let mut cd = self.module.classes.get(class)?;
         for _ in 0..64 {
