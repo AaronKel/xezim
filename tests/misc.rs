@@ -580,3 +580,5 @@ mod package_ref_signature;
 mod always_star_spacing;
 #[path = "misc/artifact_with_sources_738.rs"]
 mod artifact_with_sources_738;
+#[path = "misc/checkpoint_save_restore.rs"]
+mod checkpoint_save_restore;
