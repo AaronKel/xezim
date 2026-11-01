@@ -3907,18 +3907,6 @@ impl Simulator {
         None
     }
 
-    /// Mint a fresh process-unique storage key for a local dyn array `bare`
-    /// and record the rename in the current call frame. Returns the key. If
-    /// no call frame is active (top-level procedural block), returns `bare`
-    /// unchanged — a single process can't collide with itself, so the legacy
-    /// global-by-bare-name behaviour is preserved there.
-    ///
-    /// If `bare` was already declared in THIS frame (a re-entering loop body
-    /// or a sibling block reusing the name), the previous key's signals are
-    /// cleaned up first so the new declaration starts empty — matching the
-    /// LRM semantics where each automatic-variable declaration gets fresh
-    /// storage. (Nested block-scope shadowing of the same name is not fully
-    /// modelled by a flat per-frame map; it is rare in practice.)
     /// §7.4.5: record the pending declared shape of the local just declared
     /// under the storage name `name` it was given, unless `declare_local_dyn`
     /// already did (a block local outside any subroutine keeps its bare name).
@@ -3948,6 +3936,48 @@ impl Simulator {
         }
     }
 
+    /// §7.4.5, §13.5.1: a collection-of-collections formal copied in under
+    /// the per-call key `key` types its rows by the port's declared
+    /// dimensions, as a local does. (A `ref` formal aliases the actual's
+    /// storage, which has its own shape.)
+    pub(super) fn register_formal_shape(
+        &mut self,
+        key: &str,
+        dims: &[crate::ast::types::UnpackedDimension],
+    ) {
+        if dims.len() < 2 {
+            return;
+        }
+        let dims = super::elaborate::normalize_unpacked_dims(
+            dims,
+            &self.module.parameters,
+            &self.module.typedef_types,
+        );
+        let shape = CollShape::of(&dims, None, |kdt| {
+            super::elaborate::coll_key_kind(
+                kdt,
+                Some(&self.module.parameters),
+                Some(&self.module.typedefs),
+                Some(&self.module.typedef_types),
+            )
+        });
+        if let Some(shape) = shape {
+            self.register_local_shape(key, shape);
+        }
+    }
+
+    /// Mint a fresh process-unique storage key for a local dyn array `bare`
+    /// and record the rename in the current call frame. Returns the key. If
+    /// no call frame is active (top-level procedural block), returns `bare`
+    /// unchanged — a single process can't collide with itself, so the legacy
+    /// global-by-bare-name behaviour is preserved there.
+    ///
+    /// If `bare` was already declared in THIS frame (a re-entering loop body
+    /// or a sibling block reusing the name), the previous key's signals are
+    /// cleaned up first so the new declaration starts empty — matching the
+    /// LRM semantics where each automatic-variable declaration gets fresh
+    /// storage. (Nested block-scope shadowing of the same name is not fully
+    /// modelled by a flat per-frame map; it is rare in practice.)
     pub(super) fn declare_local_dyn(&mut self, bare: &str) -> String {
         // Kill-switch for debugging the per-process local-dyn-array rename.
         static NO_DYN_RENAME: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

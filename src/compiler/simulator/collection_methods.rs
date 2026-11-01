@@ -1795,6 +1795,7 @@ impl Simulator {
         };
         let w = self.module.arrays.get(&*cname).map(|t| t.2).unwrap_or(32);
         let key = self.formal_dyn_key(pname, queue_data_type);
+        self.register_formal_shape(&key, dims);
         // A queue of unpacked structs keeps its members as separate leaves
         // (`q[0].addr`); those are copied element-wise below.
         let elem_struct = (cname != key)

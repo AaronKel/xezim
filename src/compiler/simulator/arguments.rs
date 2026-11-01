@@ -2065,6 +2065,7 @@ impl Simulator {
             if w > 0 {
                 self.widths.insert(key.clone(), w);
             }
+            self.register_formal_shape(&key, &port.dimensions);
             if matches!(arg.kind, ExprKind::AssignmentPattern(_)) {
                 self.assign_whole_coll(&key, Some(&port.data_type), arg);
             }
@@ -2078,6 +2079,7 @@ impl Simulator {
             return Some((caller.clone(), caller, prior));
         }
         let key = self.formal_dyn_key(&param, &port.data_type);
+        self.register_formal_shape(&key, &port.dimensions);
         if !matches!(port.direction, PortDirection::Output) {
             // §13.5.1: copy every element in, including unpacked-struct
             // member leaves (`caller[k].x`).
