@@ -4817,7 +4817,25 @@ impl Simulator {
     pub(super) fn check_constraint_item_impl(&mut self, item: &ConstraintItem) -> bool {
         match item {
             ConstraintItem::Expr(expr) => self.cons_expr_true(expr),
-            ConstraintItem::Inside { expr, range, .. } => {
+            ConstraintItem::Inside {
+                expr,
+                range,
+                is_dist,
+                dist_weights,
+                ..
+            } => {
+                // §18.5.4: an item of weight 0 is not in the set, so a dist
+                // whose weights are all 0 admits no value.
+                let kept;
+                let range: &[ConstraintRange] = if *is_dist && !dist_weights.is_empty() {
+                    kept = self.dist_weighted_ranges(range, dist_weights);
+                    if kept.is_empty() {
+                        return false;
+                    }
+                    &kept
+                } else {
+                    range
+                };
                 // §18.3: exact signed membership — see `value_in_ranges`,
                 // at the width of all operands (§11.4.13).
                 let val = match self.inside_joint_width_cr(expr, range) {

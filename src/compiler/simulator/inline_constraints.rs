@@ -3311,13 +3311,10 @@ impl Simulator {
         }
         let masses: Vec<u128> = items.iter().map(|(_, m)| *m).collect();
         let total: u128 = masses.iter().fold(0u128, |a, m| a.saturating_add(*m));
-        // Every weight is 0 — the constraint admits no value; keep the first
-        // item so the caller still makes progress.
+        // §18.5.4: an item of weight 0 is not in the set, so when every
+        // weight is 0 the dist admits no value and nothing is picked.
         if total == 0 {
-            return Some(match &items[0].0 {
-                DistItem::One(v) => v.clone(),
-                DistItem::Span(l, _, bw) => Value::from_u64(*l as u64, *bw),
-            });
+            return None;
         }
 
         let dealt = match key {
@@ -3358,6 +3355,29 @@ impl Simulator {
                 Some(Value::from_u64(v as u64, bw))
             }
         }
+    }
+
+    /// §18.5.4: the items of a `dist` whose weight is not 0, the values it
+    /// admits. Weights are read as `pick_dist_value` reads them.
+    pub(super) fn dist_weighted_ranges(
+        &mut self,
+        ranges: &[ConstraintRange],
+        weights: &[Option<crate::ast::decl::DistWeight>],
+    ) -> Vec<ConstraintRange> {
+        use crate::ast::decl::DistWeight;
+        let mut kept = Vec::with_capacity(ranges.len());
+        for (i, r) in ranges.iter().enumerate() {
+            let w = match weights.get(i).and_then(|w| w.as_ref()) {
+                Some(DistWeight::Each(e)) | Some(DistWeight::Total(e)) => {
+                    self.eval_expr(e).to_u64().unwrap_or(1)
+                }
+                None => 1,
+            };
+            if w != 0 {
+                kept.push(r.clone());
+            }
+        }
+        kept
     }
 
     /// §18.5.4/§18.10 — deal the next dist ITEM index for `key` from its
