@@ -273,7 +273,14 @@ impl Simulator {
         if !self.wake_rank_built {
             self.build_sig_wake_rank();
         }
+        super::checkpoint::audit::start(self);
+        self.checkpoint_start();
+        if self.checkpoint_restored {
+            start = false;
+        }
         self.event_loop(start);
+        super::checkpoint::audit::finish(self);
+        self.checkpoint_unserved();
         if self.ended_waiting_in_c {
             // Stopped, not finished: no `$finish` was called.
             self.finished = false;

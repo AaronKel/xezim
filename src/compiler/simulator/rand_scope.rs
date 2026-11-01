@@ -14,11 +14,14 @@ use crate::ast::decl::DistWeight;
 
 /// §18.6: only the active rand state of reachable child objects belongs to
 /// a solve transaction. Unrelated objects and non-rand callback state do not.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct RandChildSnapshot {
     handle: usize,
     properties: Vec<(String, Option<Value>)>,
     collections: Vec<(String, Vec<(String, Value)>)>,
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
 
 pub(super) struct RandChildTransaction {
     pub(super) owner: usize,

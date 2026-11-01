@@ -19,7 +19,7 @@ const MAX_INLINE_DEPTH: usize = 8;
 const UNTYPED: &str = "\u{0}";
 
 /// Immutable admission facts shared by all method compiles in one design.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MethodAdmission {
     /// class-perf writeback: non-input (output/inout/ref) formal positions,
     /// keyed by the class that DECLARES the method. Keying by class (not by
@@ -47,7 +47,7 @@ pub(crate) struct MethodAdmission {
 }
 
 /// Memoized free-function facts (see `MethodAdmission::fn_facts`).
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FnFacts {
     /// (declaration name and source span, instance prefix, external reads
     /// allowed) -> `fn_is_pure_in_ext`. Only verdicts that do not depend on
@@ -944,6 +944,7 @@ pub struct CompiledBlock {
 /// and re-resolved against the instance's param scope per call; formals'
 /// seed widths are static (module-scope resolution) so the compiled block
 /// for a width signature is shared across instances.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct PreboundCompiledMethod {
     /// (formal name, seed width); width 0 = keep the caller's width.
     pub formals: Vec<(String, u32)>,
@@ -1030,7 +1031,7 @@ pub(super) struct PreboundCompiledMethod {
 /// register ids of its seeded `this` / result cells. One entry per compiled
 /// (class, method, width-signature); shared across all calls to that method
 /// so the body is lowered ONCE instead of re-compiled per call.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompiledMethodEntry {
     pub block: std::rc::Rc<CompiledBlock>,
     pub this_reg: crate::compiler::bytecode::RegId,
@@ -1041,7 +1042,7 @@ pub struct CompiledMethodEntry {
 /// (class, method, width-signature) key. `Block` holds the lowered body;
 /// `Nil` marks a method that FAILED to lower (negative cache) so it is not
 /// re-compiled on every call — it stays on the AST interpreter forever.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum CompiledMethodOutcome {
     Block(std::rc::Rc<CompiledMethodEntry>),
     Nil,
@@ -23685,14 +23686,14 @@ mod tests {
 /// Payload of the dynamic array-element ops, boxed to keep `TsInsn` at 24
 /// bytes (the `i64` bounds pair alone would push every instruction to 40
 /// bytes and cost measurable dispatch bandwidth on long comb streams).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TsElemStoreFromSig {
     pub sig: u32,
     pub dl: u16,
     pub op: TsElemOp,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TsElemOp {
     pub first: u32,
     pub lo: i64,
@@ -23703,7 +23704,7 @@ pub struct TsElemOp {
     pub mask: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TsNbaFromElem {
     pub dst: u32,
     pub first: u32,
@@ -23740,7 +23741,7 @@ pub fn ts_insn_name(i: &TsInsn) -> &'static str {
 
 /// Boxed payload of `RangeStoreX`/`RangeStoreXW` (rare: folded x-constant
 /// range stores), kept off the hot enum size.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TsRangeStoreX {
     pub sig: u32,
     pub hi: u32,
@@ -23750,7 +23751,7 @@ pub struct TsRangeStoreX {
 }
 
 /// Boxed payload of `CaseMaskJmp`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TsCaseMaskJmp {
     pub mask: u64,
     pub lo: u32,
@@ -23758,7 +23759,7 @@ pub struct TsCaseMaskJmp {
     pub mj: Box<CaseMaskJumpData>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TsInsn {
     /// regs[d] = signal_table[sig] (raw value bits; proven X-free by the
     /// eval-site prefilter).
@@ -24600,6 +24601,8 @@ pub enum TsInsn {
     /// `Insn::CovHit`; undone on a bail like a hazard save.
     CovHit(u32),
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
 
 pub struct TwoStateBlock {
     pub insns: Vec<TsInsn>,

@@ -35,6 +35,9 @@ cranelift-jit = { version = "0.131", optional = true }
 cranelift-module = { version = "0.131", optional = true }
 cranelift-native = { version = "0.131", optional = true }
 fst-writer = "0.3"
+# Checkpoint files (`$save`, `--save-at`). Same version xezim-core compresses
+# artifacts with, so no second copy is built.
+zstd = "0.14"
 # Inflate only, for the FST time-table repair in `fst_finish`. Already in the
 # tree via fst-writer, so this adds no build cost.
 miniz_oxide = "0.8"
@@ -64,10 +67,6 @@ corosensei = { version = "0.3", default-features = false }
 # shelling out to GTKWave's `fst2vcd` would put a system tool on the test path.
 # Reader half of the `fst-writer` above, same author and format revision.
 fst-reader = "0.17"
-# `tests/xtrace_conformance.rs` reads a zstd-compressed XTrace dump back to
-# check that its header declares the compression (XTrace §6.8). Same version
-# xezim-core writes the stream with.
-zstd = "0.14"
 
 [build-dependencies]
 cc = "1"

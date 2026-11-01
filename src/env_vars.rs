@@ -140,6 +140,14 @@ pub static ENV_VARS: &[(&str, &str)] = &[
         "Phase 2: size the single-fanout chain clustering opportunity (count, lengths, dynamic coverage)",
     ),
     (
+        "XEZIM_CKPT_AUDIT",
+        "Checkpoints: append to this file the simulator fields a run changes after setup",
+    ),
+    (
+        "XEZIM_CKPT_DIGESTS",
+        "Checkpoints: write each field's digest beside a checkpoint when saved and restored",
+    ),
+    (
         "XEZIM_CLASS_GC",
         "Class objects: reclaim unreachable objects between time slots (default on; 0 disables, stress collects at every time advance)",
     ),

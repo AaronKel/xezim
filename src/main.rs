@@ -207,6 +207,13 @@ fn print_usage() {
     eprintln!(
         "  --max-time <n>[ps|ns|us|ms|s]   Maximum simulation time; bare <n> is ns (default: 100ms)"
     );
+    eprintln!("  --save-at <time>[,<file>]  Save a checkpoint at the end of the last time slot at");
+    eprintln!(
+        "                   or before <time> (<n>[fs|ps|ns|us|ms|s], bare <n> is ns; file default"
+    );
+    eprintln!("                   xezim.ckpt); repeatable. The run continues after saving");
+    eprintln!("  --restore <file> Start from a checkpoint ($save, --save-at) of the same design,");
+    eprintln!("                   built by the same xezim");
     eprintln!("  --sim-debug      Enable simulator [DEBUG]/[OPT] output (alias: --sim_debug);");
     eprintln!("                   implies the --verbose engine lines");
     eprintln!("  --strict-top     Error out if -s names a module that does not exist (default)");
@@ -541,6 +548,33 @@ fn parse_max_time(raw: &str) -> Result<u64, String> {
         ));
     }
     Ok(rounded as u64)
+}
+
+/// Parse a `--save-at` time: like `--max-time`, a bare number is
+/// nanoseconds, but `fs` is accepted and so is zero and anything below 1 ns.
+/// Returns seconds.
+fn parse_save_time(raw: &str) -> Result<f64, String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let units = [
+        ("fs", 1e-15),
+        ("ps", 1e-12),
+        ("ns", 1e-9),
+        ("µs", 1e-6),
+        ("us", 1e-6),
+        ("ms", 1e-3),
+        ("s", 1.0),
+    ];
+    let (num, scale) = units
+        .iter()
+        .find_map(|(u, f)| lower.strip_suffix(u).map(|n| (n, *f)))
+        .unwrap_or((lower.as_str(), 1e-9));
+    match num.trim().parse::<f64>() {
+        Ok(n) if n >= 0.0 => Ok(n * scale),
+        _ => Err(format!(
+            "invalid --save-at time '{}' (expected <n>[fs|ps|ns|us|ms|s])",
+            raw
+        )),
+    }
 }
 
 /// Marks an `-override_timescale` value inside the `--module-timescale`
@@ -2135,6 +2169,7 @@ fn run_main() -> i32 {
 
     let mut compat = cli_compat::CompatArgs::default();
     let mut max_time_explicit = false;
+    let mut save_at: Vec<(f64, String)> = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -2599,6 +2634,31 @@ fn run_main() -> i32 {
                         eprintln!("{}", e);
                         std::process::exit(1);
                     }
+                }
+            }
+            "--save-at" => {
+                i += 1;
+                if i < args.len() {
+                    let (t, file) = match args[i].split_once(',') {
+                        Some((t, f)) => (t, f.to_string()),
+                        None => (args[i].as_str(), "xezim.ckpt".to_string()),
+                    };
+                    match parse_save_time(t) {
+                        Ok(secs) => {
+                            save_at.push((secs, file));
+                            xezim::compiler::simulator::set_checkpoint_save_at(save_at.clone());
+                        }
+                        Err(e) => {
+                            eprintln!("{}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+            "--restore" => {
+                i += 1;
+                if i < args.len() {
+                    xezim::compiler::simulator::set_checkpoint_restore(Some(args[i].clone()));
                 }
             }
             "--settle-limit" => {

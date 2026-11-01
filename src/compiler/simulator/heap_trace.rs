@@ -553,6 +553,9 @@ mod tests {
 impl Serialize for super::ProcCont {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use ser::SerializeSeq;
+        if super::checkpoint::active() {
+            return super::checkpoint::serialize_cont(self, serializer);
+        }
         let mut seq = serializer.serialize_seq(None)?;
         let mut frame = Some(self);
         while let Some(cont) = frame {

@@ -1038,9 +1038,23 @@ impl Simulator {
             | "$assertvacuousoff" => {
                 self.exec_assert_control(name, args);
             }
+            // Checkpoints, taken or restored at the end of the time slot.
+            // `$incsave` writes a full checkpoint.
             "$save" | "$restart" | "$incsave" => {
-                let msg = format!("Warning: {} ignored — checkpointing is not supported", name);
-                self.warn_system_task_once(name, &msg);
+                let path = args
+                    .first()
+                    .map(|a| self.system_string_arg(a))
+                    .unwrap_or_default();
+                if path.is_empty() {
+                    let msg = format!("Warning: {} ignored — it needs a file name", name);
+                    self.warn_system_task_once(name, &msg);
+                } else if name == "$restart" {
+                    self.checkpoint_ops
+                        .push(super::checkpoint::CheckpointOp::Restart(path));
+                } else {
+                    self.checkpoint_ops
+                        .push(super::checkpoint::CheckpointOp::Save(path));
+                }
             }
             "$sreadmemb" | "$sreadmemh" => {
                 let msg = format!("Warning: {} ignored — memory left unchanged", name);

@@ -9,6 +9,7 @@ impl Simulator {
         if self.compiled {
             return;
         }
+        self.checkpoint_muted = super::checkpoint::restore_pending();
         self.instrument_code_coverage();
         let trace_compile_phases = std::env::var_os("XEZIM_COMPILE_PHASES").is_some();
         let mut compile_phase_start = std::time::Instant::now();

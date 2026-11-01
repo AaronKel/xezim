@@ -1932,7 +1932,8 @@ impl Simulator {
         // compare; ~1.1-1.6x on c910). Set XEZIM_EVENT_EDGE=0 to disable.
         let event_skip = std::env::var("XEZIM_EVENT_EDGE").ok().as_deref() != Some("0");
         let event_meas = std::env::var("XEZIM_EVENT_EDGE_MEASURE").ok().as_deref() == Some("1");
-        if event_skip || event_meas {
+        // A restored run carries the measure state its checkpoint saved.
+        if (event_skip || event_meas) && !self.checkpoint_restored {
             self.event_measure = true; // enables stamping + state + phase clock
             self.event_skip = event_skip;
             self.event_after = std::env::var("XEZIM_EVENT_AFTER")
@@ -1969,7 +1970,9 @@ impl Simulator {
         // APPENDED while the batch runs (wakeups, continuations) are not
         // starts; plain FIFO keeps them behind the batch anyway, and
         // `schedule_front` fork children are exempted at pop time.
-        self.t0_starts_remaining = self.event_queue.slot_len(0);
+        if !self.checkpoint_restored {
+            self.t0_starts_remaining = self.event_queue.slot_len(0);
+        }
         while !self.finished && iters < max_iters {
             iters += 1;
             if HANG_REPORT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
@@ -2311,6 +2314,14 @@ impl Simulator {
                 // The slot is complete and every process is parked in traced
                 // scheduler state: a safe point for class reclamation.
                 self.maybe_collect_class_heap();
+                // ... and for a checkpoint; after a `$restart` the queues
+                // are the checkpoint's, so look at them again.
+                if self.checkpoint_audit.is_some() {
+                    super::checkpoint::audit::slot(self);
+                }
+                if self.checkpoint_due(next_time) && self.serve_checkpoints(next_time) {
+                    continue;
+                }
                 self.time = next_time;
                 publish_sim_time(next_time);
                 // Lines printed near the end of a burst stay buffered until the
