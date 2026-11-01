@@ -88,6 +88,39 @@ starts. Each block reaches the file whole or not at all, so after a `kill -9`,
 an out-of-memory kill or a second Ctrl-C, at any moment, the file is readable
 and holds everything up to the last block written.
 
+## Checkpoints
+
+A run can be saved at the end of a time slot and continued later, from the
+same design and the same xezim build:
+
+```bash
+# save at the end of the last slot at or before 2 ms (repeatable)
+xezim <sources> -s <top> --save-at 2ms,warm.ckpt
+
+# continue from it: the output is what the uninterrupted run prints after
+# that slot
+xezim <sources> -s <top> --restore warm.ckpt +test=second
+```
+
+`$save("file")` and `$incsave("file")` save from the design, and
+`$restart("file")` replaces the running state with a saved one; each is served
+at the end of the slot that calls it (IEEE 1800 Annex D). A bare `--save-at`
+time is nanoseconds, like `--max-time`, and the file defaults to `xezim.ckpt`.
+The run continues after a save.
+
+A checkpoint holds every process, variable, net, class object, queue,
+covergroup and random state, and the open files with their positions; a file
+written to is cut back to the length it had at the save. Plusargs are read
+from the restoring command line, so one saved warm-up can start several tests.
+Waveform dumps start afresh after a restore, and the memory of DPI and VPI
+libraries is not saved; a save waits for a slot in which no DPI task is
+suspended in C. A checkpoint of another design or written by another xezim
+build is refused.
+
+Native compilation (`XEZIM_JIT`, `XEZIM_AOT`) may differ between the saving
+and the restoring run, except that a process state machine saved while running
+natively (`XEZIM_PROC_FSM=1` with `XEZIM_AOT=1`) needs `XEZIM_AOT=1` again.
+
 ## Warm design cache
 
 Simulation mode stores a content-addressed elaborated design and compiled

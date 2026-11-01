@@ -8,6 +8,19 @@ in [docs/user-guide.md](docs/user-guide.md); building and contributing are in
 
 ### Unreleased
 
+**Command line**
+
+* Checkpoints: `--save-at <time>[,<file>]` saves the state at the end of a
+  time slot and `--restore <file>` continues from it, and `$save`,
+  `$incsave` and `$restart` do the same from the design (IEEE 1800 Annex D,
+  #738). A restored run prints what the uninterrupted run prints after the
+  saved slot; open files are reopened at their positions, plusargs come from
+  the restoring command line, and a checkpoint of another design or xezim
+  build is refused. The interpreter, `XEZIM_JIT` and `XEZIM_AOT` may differ
+  between the two runs. Not yet restored: a process forked to call a task
+  while it is still inside the task, which is refused with an error.
+  `XEZIM_CKPT_AUDIT` lists the fields a run changes after setup.
+
 **Correctness**
 
 * An array's size can be ordered in a `solve … before` list: `solve sel
